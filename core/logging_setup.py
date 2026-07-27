@@ -13,8 +13,10 @@ the process narrate its own lifecycle so the next stop is diagnosable:
   • Dual logging  — console (Servy captures it) + a ROTATING file under logs/
     that survives restarts and isn't truncated when Servy recycles its capture.
   • faulthandler  — dumps a native C-level traceback to logs/faulthandler.log on
-    a hard fault (segfault, stack overflow) or a hang. Plain Python logging can't
-    see these; they're the classic "silent" death.
+    a hard fault (segfault, stack overflow). Plain Python logging can't see
+    these; they're the classic "silent" death. Fault-time only — the periodic
+    all-thread dump was removed 2026-07-27 after it was proven to be crashing
+    the process itself (see _install_faulthandler).
   • Excepthooks   — any unhandled exception on the main thread OR a worker thread
     (the refresh pipeline runs in a thread) is logged with a full traceback
     instead of vanishing.
@@ -108,12 +110,18 @@ def _install_faulthandler() -> None:
     _fault_log_handle = open(LOG_DIR / "faulthandler.log", "a", encoding="utf-8", buffering=1)
     _fault_log_handle.write(f"\n===== faulthandler armed {datetime.now().isoformat()} =====\n")
     faulthandler.enable(file=_fault_log_handle, all_threads=True)
-    # Periodically dump all thread stacks; if the process hangs, the last dump
-    # shows where every thread was stuck (deadlock / wedged request).
-    try:
-        faulthandler.dump_traceback_later(300, repeat=True, file=_fault_log_handle)
-    except (AttributeError, RuntimeError):
-        pass
+    # ponytail: do NOT arm dump_traceback_later() here. It walks every thread's
+    # frames from a native watchdog thread WITHOUT holding the GIL; if a thread
+    # frees a frame mid-walk it reads a dead pointer and the process dies with a
+    # Windows access violation. Confirmed 2026-07-27: 5 crash dumps (7/7, 7/11,
+    # 7/17, 7/18, 7/24) all faulted at the SAME instruction, python312.dll
+    # +0x285A8C, reading tiny offsets (0x71/0x5CC4/0x569E) off a null/garbage
+    # pointer — the signature of a use-after-free on a PyObject. The AV text was
+    # written interleaved inside a periodic dump, i.e. the crash happened during
+    # the walk. This diagnostic was causing the very deaths it was added to
+    # diagnose. enable() above is safe and still writes a native traceback on a
+    # real fault. If hang-diagnosis is ever needed again, dump on demand from an
+    # endpoint (faulthandler.dump_traceback) — never on a repeating timer.
 
 
 def _install_excepthooks() -> None:
