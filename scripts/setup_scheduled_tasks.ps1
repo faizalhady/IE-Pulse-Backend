@@ -27,9 +27,10 @@
   - This script lives in scripts/ and resolves the project root one level up.
   - Run from an ELEVATED PowerShell prompt:
         .\scripts\setup_scheduled_tasks.ps1
-  - Logon mode: Password - tasks run whether the user is logged on or not.
-    You will be prompted ONCE for your Windows username + password; the
-    credential is stored encrypted in Windows Task Scheduler.
+  - Logon mode: runs as SYSTEM, whether anyone is logged on or not. No
+    password is prompted for or stored, so nothing expires. (Previously this
+    stored a user password, which silently died on every rotation - see the
+    comment above $Principal.)
 #>
 
 $ErrorActionPreference = "Stop"
@@ -41,16 +42,19 @@ $PythonExe = Join-Path $Root "venv\Scripts\python.exe"
 
 if (-not (Test-Path $PythonExe)) { throw "venv python not found: $PythonExe" }
 
-# Prompt ONCE for the credentials the tasks should run as.
-# Use your own Windows login (e.g. jabil\4033375). It needs access to the
-# network share \\penhomev10\OLE - your own account already does.
-Write-Host ""
-Write-Host "Enter the Windows credentials the scheduled tasks should run as."
-Write-Host "Use your domain login (e.g. jabil\4033375). The password is stored"
-Write-Host "encrypted in Windows Task Scheduler. You only type it once."
-Write-Host ""
-$cred = Get-Credential -Message "Credentials for the IE Pulse scheduled tasks"
-$plainPwd = $cred.GetNetworkCredential().Password
+# ponytail: run as SYSTEM, not a named user. A stored user password silently
+# expires (Jabil rotates every 6 months) and Task Scheduler then fails every
+# run with 0x8007052E ERROR_LOGON_FAILURE while still reporting State=Ready --
+# which is exactly what happened 2026-07-05..07-27: 22 consecutive missed runs
+# that looked healthy. SYSTEM has no password, so nothing to expire.
+# Verified 2026-07-27 on MYPENM0IESVR02: SYSTEM (i.e. the machine account
+# MYPENM0IESVR02$) CAN read \\penhomev10\OLE (119 items) and \OLE\RawData
+# (56 items), and pulse-backend already runs as LocalSystem and writes the
+# same mart -- so this grants nothing the box didn't already have.
+$Principal = New-ScheduledTaskPrincipal `
+    -UserId 'SYSTEM' `
+    -LogonType ServiceAccount `
+    -RunLevel Highest
 
 function Register-PipelineTask {
     param(
@@ -85,9 +89,7 @@ function Register-PipelineTask {
         -Action $action `
         -Trigger $trigger `
         -Settings $settings `
-        -User $cred.UserName `
-        -Password $plainPwd `
-        -RunLevel Highest | Out-Null
+        -Principal $Principal | Out-Null
 
     Write-Host "Registered: $Name at $Time daily"
 }
