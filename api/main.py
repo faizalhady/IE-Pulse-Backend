@@ -76,7 +76,7 @@ def startup():
     setup_logging()
     log_startup_banner(log)
     install_signal_logging(log)          # logs which signal triggers a shutdown
-    start_heartbeat(log, interval_s=60)  # last heartbeat = moment of death
+    start_heartbeat(log)                 # 5-min liveness; last one = moment of death
     init_db()
     log.info("SQLite operational DB ready")
 

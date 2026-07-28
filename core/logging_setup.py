@@ -25,9 +25,16 @@ the process narrate its own lifecycle so the next stop is diagnosable:
     works. This is the line that finally answers "who stopped it" — a deliberate
     Servy/console stop sends a signal; a hard TerminateProcess does not.
   • Banners + heartbeat — startup banner records pid/cwd/key-loaded; a heartbeat
-    line every 60s records uptime + RSS. The LAST heartbeat before the log goes
+    line every 5 min records uptime + RSS. The LAST heartbeat before the log goes
     quiet pinpoints the moment of death and whether memory was climbing
     (OOM-kill) vs a clean signalled stop (which logs a shutdown banner).
+
+Console vs file
+───────────────
+The FILE gets everything. The CONSOLE drops two high-volume INFO streams —
+per-request `uvicorn.access` lines and the heartbeat — so a terminal shows
+startup, warnings and errors only. Warnings/errors are never filtered. See
+_ConsoleNoiseFilter.
 
 Read the forensics like this after a stop:
   - shutdown banner + "SIGNAL RECEIVED" present  → something asked it to stop
@@ -60,6 +67,29 @@ _hb_stop = threading.Event()
 _start_time = time.time()
 
 
+class _ConsoleNoiseFilter(logging.Filter):
+    """Keep the terminal readable. The FILE still records everything — this only
+    hides the two high-volume INFO streams from the console:
+
+      • uvicorn.access — one line per HTTP request; the dashboard polls a lot.
+      • heartbeat      — a liveness line with uptime + RSS. Its whole job is to
+                         be the last thing in the FILE before a death, so the
+                         file is the only place it matters.
+
+    Warnings and errors from both still come through — this filter only drops
+    records below WARNING.
+    """
+
+    _MUTED_LOGGERS = ("uvicorn.access",)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING:
+            return True
+        if record.name.startswith(self._MUTED_LOGGERS):
+            return False
+        return not record.getMessage().startswith("heartbeat")
+
+
 def setup_logging(level: int = logging.INFO) -> logging.Logger:
     """Install dual (console + rotating file) logging, faulthandler, and global
     excepthooks. Idempotent — safe to call more than once (it clears handlers
@@ -82,6 +112,7 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
 
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)
+    console.addFilter(_ConsoleNoiseFilter())
     root.addHandler(console)
 
     file_handler = logging.handlers.RotatingFileHandler(
@@ -99,6 +130,16 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
         lg.handlers.clear()
         lg.propagate = True
 
+    # ponytail: silence watchfiles entirely (not just on the console). Under
+    # `uvicorn --reload` it watches the project dir — which contains logs/ — so
+    # every log line we write is itself a file change, and it emits "1 change
+    # detected" back at us several times a SECOND, forever. It never actually
+    # reloads (uvicorn only restarts for *.py), so the whole stream is noise
+    # feeding on itself. Dev-only symptom; muting here fixes it everywhere.
+    # Cleaner alternative if you'd rather it not scan at all:
+    #   uvicorn ... --reload-dir api --reload-dir modules --reload-dir core
+    logging.getLogger("watchfiles").setLevel(logging.WARNING)
+
     _install_faulthandler()
     _install_excepthooks()
 
@@ -107,6 +148,13 @@ def setup_logging(level: int = logging.INFO) -> logging.Logger:
 
 def _install_faulthandler() -> None:
     global _fault_log_handle
+    # ponytail: setup_logging() is called twice on purpose (once at import, once
+    # in startup to out-rank uvicorn's own handlers) — but faulthandler only
+    # needs arming once. Without this guard we leaked a second file handle and,
+    # back when the periodic dumper existed, ran TWO thread-walkers over the
+    # same interpreter. Re-arming buys nothing; enable() is process-global.
+    if _fault_log_handle is not None:
+        return
     _fault_log_handle = open(LOG_DIR / "faulthandler.log", "a", encoding="utf-8", buffering=1)
     _fault_log_handle.write(f"\n===== faulthandler armed {datetime.now().isoformat()} =====\n")
     faulthandler.enable(file=_fault_log_handle, all_threads=True)
@@ -200,7 +248,7 @@ def log_shutdown_banner(log: logging.Logger) -> None:
     log.info("-" * 72)
 
 
-def start_heartbeat(log: logging.Logger, interval_s: int = 60) -> None:
+def start_heartbeat(log: logging.Logger, interval_s: int = 300) -> None:
     """Emit a liveness line every interval_s with uptime + RSS. The last heartbeat
     before the log falls silent is the forensic marker for the moment of death."""
     try:
@@ -226,3 +274,25 @@ def start_heartbeat(log: logging.Logger, interval_s: int = 60) -> None:
 
 def stop_heartbeat() -> None:
     _hb_stop.set()
+
+
+if __name__ == "__main__":
+    # ponytail: self-check for the console filter — the one bit of branch logic
+    # here. Run: python -m core.logging_setup
+    def _rec(name, level, msg):
+        return logging.LogRecord(name, level, __file__, 1, msg, None, None)
+
+    f = _ConsoleNoiseFilter()
+    I, W = logging.INFO, logging.WARNING
+
+    # muted on the console
+    assert not f.filter(_rec("uvicorn.access", I, 'GET /api/ole 200'))
+    assert not f.filter(_rec("ole-backend", I, "heartbeat - uptime 60s, rss 140 MB"))
+
+    # never muted
+    assert f.filter(_rec("uvicorn.access", W, "slow request"))
+    assert f.filter(_rec("ole-backend", logging.ERROR, "heartbeat thread died"))
+    assert f.filter(_rec("ole-backend", I, "OLE-BACKEND STARTING"))
+    assert f.filter(_rec("uvicorn.error", I, "Application startup complete."))
+
+    print("console filter OK")
