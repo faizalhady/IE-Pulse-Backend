@@ -71,20 +71,66 @@ def init_db():
             --   * another host needs to hit the DB directly
             --   * you need to query INSIDE the JSON payload
             -- Until then this is a straight port, not a rewrite.
+            -- `id` is the identity. `name` is just a field, so two reports may
+            -- share a title (as in Google Docs) and renaming is an UPDATE of a
+            -- known row rather than delete-old-insert-new keyed on a string.
+            -- An earlier version had UNIQUE(module, report_type, owner_ntid,
+            -- name); see _migrate_saved_reports below for the rebuild.
             CREATE TABLE IF NOT EXISTS saved_reports (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 module      TEXT    NOT NULL,   -- 'ole' | 'cycle_time' | ...
                 report_type TEXT    NOT NULL,   -- '4q'
-                name        TEXT    NOT NULL,   -- user-chosen save name
+                name        TEXT    NOT NULL,   -- display name; NOT an identity
                 owner_ntid  TEXT    NOT NULL,   -- from RetrieveUserInfoNoParam
                 owner_name  TEXT,
                 owner_email TEXT,
                 payload     TEXT    NOT NULL,   -- JSON; for 4q = the Q3 plan only
                 created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                UNIQUE (module, report_type, owner_ntid, name)
+                updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
             );
 
             CREATE INDEX IF NOT EXISTS idx_saved_reports_owner
                 ON saved_reports (module, report_type, owner_ntid);
+        """)
+    _migrate_saved_reports()
+
+
+def _migrate_saved_reports() -> None:
+    """Drop the old UNIQUE(module, report_type, owner_ntid, name) constraint.
+
+    SQLite can't ALTER a constraint away, so the table is rebuilt. Rows are
+    preserved. Idempotent and a no-op once migrated — it only fires while a
+    UNIQUE auto-index is still present.
+    """
+    with get_conn() as conn:
+        idx = conn.execute("PRAGMA index_list('saved_reports')").fetchall()
+        if not any(r["unique"] and str(r["name"]).startswith("sqlite_autoindex") for r in idx):
+            return                                    # already migrated
+        conn.executescript("""
+            PRAGMA foreign_keys=off;
+            BEGIN;
+            CREATE TABLE saved_reports_new (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                module      TEXT    NOT NULL,
+                report_type TEXT    NOT NULL,
+                name        TEXT    NOT NULL,
+                owner_ntid  TEXT    NOT NULL,
+                owner_name  TEXT,
+                owner_email TEXT,
+                payload     TEXT    NOT NULL,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+            INSERT INTO saved_reports_new
+                (id, module, report_type, name, owner_ntid, owner_name, owner_email,
+                 payload, created_at, updated_at)
+            SELECT id, module, report_type, name, owner_ntid, owner_name, owner_email,
+                   payload, created_at, updated_at
+            FROM saved_reports;
+            DROP TABLE saved_reports;
+            ALTER TABLE saved_reports_new RENAME TO saved_reports;
+            CREATE INDEX IF NOT EXISTS idx_saved_reports_owner
+                ON saved_reports (module, report_type, owner_ntid);
+            COMMIT;
+            PRAGMA foreign_keys=on;
         """)

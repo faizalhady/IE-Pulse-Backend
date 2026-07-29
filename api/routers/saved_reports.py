@@ -105,38 +105,59 @@ def get_saved(report_id: int, x_user_ntid: Optional[str] = Header(None)):
     return out
 
 
-@router.post("")
-def save_report(body: SavedReportIn = Body(...)):
-    """Create, or overwrite the caller's existing save with the same name.
-
-    Overwrite-by-name is deliberate: "Save" on a name you already used should
-    update it, not silently create a second row you can't tell apart.
-    """
-    payload_json = json.dumps(body.payload, ensure_ascii=False)
-    if len(payload_json.encode("utf-8")) > MAX_PAYLOAD_BYTES:
+def _payload_json(payload: Any) -> str:
+    s = json.dumps(payload, ensure_ascii=False)
+    if len(s.encode("utf-8")) > MAX_PAYLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Payload too large")
+    return s
 
+
+@router.post("")
+def create_report(body: SavedReportIn = Body(...)):
+    """Create a NEW save. Always inserts.
+
+    The `id` is the identity; `name` is only a label, so duplicate titles are
+    allowed (as in Google Docs). Use PUT /{id} to update an existing save —
+    that is what makes a rename an UPDATE of a known row instead of a
+    delete-old-insert-new dance keyed on a string that the client may not
+    remember across sessions.
+    """
     with get_conn() as conn:
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT INTO saved_reports
                 (module, report_type, name, owner_ntid, owner_name, owner_email, payload)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT (module, report_type, owner_ntid, name) DO UPDATE SET
-                payload     = excluded.payload,
-                owner_name  = excluded.owner_name,
-                owner_email = excluded.owner_email,
-                updated_at  = datetime('now')
             """,
             (body.module, body.report_type, body.name.strip(), body.owner_ntid,
-             body.owner_name, body.owner_email, payload_json),
+             body.owner_name, body.owner_email, _payload_json(body.payload)),
         )
         row = conn.execute(
+            "SELECT id, name, created_at, updated_at FROM saved_reports WHERE id = ?",
+            (cur.lastrowid,),
+        ).fetchone()
+    return dict(row)
+
+
+@router.put("/{report_id}")
+def update_report(report_id: int, body: SavedReportIn = Body(...)):
+    """Update an existing save in place — name and/or payload. Rename lives here."""
+    with get_conn() as conn:
+        cur = conn.execute(
             """
-            SELECT id, name, created_at, updated_at FROM saved_reports
-            WHERE module = ? AND report_type = ? AND owner_ntid = ? AND name = ?
+            UPDATE saved_reports
+               SET name = ?, payload = ?, owner_name = ?, owner_email = ?,
+                   updated_at = datetime('now')
+             WHERE id = ? AND owner_ntid = ?
             """,
-            (body.module, body.report_type, body.owner_ntid, body.name.strip()),
+            (body.name.strip(), _payload_json(body.payload),
+             body.owner_name, body.owner_email, report_id, body.owner_ntid),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Saved report not found")
+        row = conn.execute(
+            "SELECT id, name, created_at, updated_at FROM saved_reports WHERE id = ?",
+            (report_id,),
         ).fetchone()
     return dict(row)
 
