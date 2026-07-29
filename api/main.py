@@ -42,6 +42,7 @@ from api.routers.ppqt        import router as ppqt_router
 from api.routers.lbr         import router as lbr_router
 from api.routers.ipk         import router as ipk_router
 from api.routers.ebuild      import router as ebuild_router
+from api.routers.saved_reports import router as saved_reports_router
 
 
 # Dual console+file logging, faulthandler, and global excepthooks. Done at import
@@ -67,6 +68,7 @@ app.include_router(ppqt_router)
 app.include_router(lbr_router)
 app.include_router(ipk_router)
 app.include_router(ebuild_router)
+app.include_router(saved_reports_router)
 
 
 @app.on_event("startup")
