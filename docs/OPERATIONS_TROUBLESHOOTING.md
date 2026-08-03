@@ -1,6 +1,6 @@
-# Operations & Troubleshooting — OLE Backend
+# Operations & Troubleshooting — IE Pulse Backend
 
-Server-side runbook for the OLE backend running under **Servy** (Windows
+Server-side runbook for the backend running under **Servy** (Windows
 service) on the production box at `D:\Application\IE-Pulse\BACKEND\`.
 
 Its main job: diagnose the **silent service stops** — the service stopping on
@@ -10,18 +10,24 @@ its own with nothing obvious in Servy's captured stdout/stderr.
 
 ## 1. Deploy / update on the server
 
-After new commits land on `master`:
+> **The server is NOT a git checkout.** There is no `.git` in
+> `D:\Application\IE-Pulse\BACKEND` — deploys are a file copy. `git pull` there
+> will fail. (Making it a checkout would simplify this; not done yet.)
+
+Deploy = copy `api/`, `core/`, `modules/` and `requirements.txt` over, then:
 
 ```powershell
 cd D:\Application\IE-Pulse\BACKEND
-git pull
-venv\Scripts\python.exe -m pip install -r requirements.txt   # picks up new deps (e.g. psutil)
-# then restart the Servy service (Services.msc → restart, or `sc stop`/`sc start`)
+venv\Scripts\python.exe -m pip install -r requirements.txt   # picks up new deps
+sc.exe stop pulse-backend ; sc.exe start pulse-backend
 ```
 
-`git pull` updates `requirements.txt` along with the code, so installing right
-after pull is all that's needed. `psutil` is the only recent addition — if it
-fails to install the app still runs (the heartbeat degrades to uptime-only).
+The service runs `venv\Scripts\python.exe -m uvicorn` **directly** — not the
+`uvicorn.exe` shim, which bakes an absolute interpreter path into its binary and
+breaks if the folder ever moves.
+
+**Always confirm the env after a deploy** — `.env` is git-ignored and does not
+travel with a copy. The startup banner reports `iedb key found : True/False`.
 
 **Always confirm the env after a fresh deploy:**
 
@@ -38,9 +44,10 @@ exist on the server. The startup banner (below) reports `iedb key found : True/F
 
 | File | What it holds |
 |---|---|
-| `logs/ole-backend.log` | Primary rotating log (10 × 10 MB). Startup/shutdown banners, signals, heartbeat, all request logs. **Start here.** |
+| `logs/pulse-backend.log` | Primary rotating log (10 × 10 MB). Startup/shutdown banners, signals, heartbeat, all request logs. **Start here.** |
+| `logs/<module>.log` | Per-module view — `ole`, `cycle-time`, `ppqt`, `ipk`, `lbr` (10 MB × 5 each). Same lines as the main log, filtered to one module. **This is where scheduled pipeline runs land.** |
 | `logs/faulthandler.log` | Native C-level tracebacks (segfault, stack overflow) and periodic hang dumps. Only matters if there's a fresh entry near a stop. |
-| Servy's captured stdout/stderr | Mirror of the console stream. Redundant with `ole-backend.log` now, but Servy may truncate/recycle it — prefer the file log. |
+| Servy's captured stdout/stderr | Mirror of the console stream. Redundant with `pulse-backend.log` now, but Servy may truncate/recycle it — prefer the file log. |
 
 `logs/` is git-ignored and lives only on the box.
 
@@ -48,14 +55,14 @@ exist on the server. The startup banner (below) reports `iedb key found : True/F
 
 ## 3. Reading a stop — the decision tree
 
-When the service stops, open `logs/ole-backend.log` and look at the **last
+When the service stops, open `logs/pulse-backend.log` and look at the **last
 20–30 lines**. The pattern tells you the cause:
 
 ### A) Clean signalled shutdown — *someone/something asked it to stop*
 ```
 SIGNAL RECEIVED: SIGTERM — initiating graceful shutdown (uptime 4213s)
 ------------------------------------------------------------------------
-OLE-BACKEND SHUTTING DOWN — pid 8228, uptime 4213s
+IE PULSE BACKEND SHUTTING DOWN — pid 8228, uptime 4213s
 ------------------------------------------------------------------------
 ```
 → **Not a crash.** A signal was delivered: Servy stop, console window close,
@@ -120,7 +127,7 @@ Key event IDs (System log, *Service Control Manager*):
   confirms a crash vs a deliberate stop.
 - **7024** — service stopped **with a specific error code**.
 
-Correlate the event `TimeCreated` with the last heartbeat in `ole-backend.log`.
+Correlate the event `TimeCreated` with the last heartbeat in `pulse-backend.log`.
 
 ---
 
@@ -150,5 +157,43 @@ These were live bugs found in the server logs (commit `ec7dabe`):
 Invoke-WebRequest http://127.0.0.1:9007/api/cycle-time/health -UseBasicParsing | Select StatusCode
 
 # Last lifecycle lines
-Get-Content D:\Application\IE-Pulse\BACKEND\logs\ole-backend.log -Tail 40
+Get-Content D:\Application\IE-Pulse\BACKEND\logs\pulse-backend.log -Tail 40
 ```
+
+---
+
+## Did a scheduled pipeline run?
+
+Every line carries a `[module]` tag, derived from the logger name. Each module
+also gets its own file, so a module log reads as a run history:
+
+```
+2026-08-03 02:00:01  INFO    [cycle-time] refresh: RUN START  mode=incremental trigger=scheduled
+2026-08-03 02:04:17  INFO    [cycle-time] refresh: RUN OK     256.3s
+```
+
+A failure logs the traceback and re-raises, so the process still exits non-zero
+and Task Scheduler records `LastTaskResult != 0`:
+
+```
+2026-08-03 10:45:03  ERROR   [ole       ] refresh: RUN FAILED after 12.4s — FileNotFoundError: ...
+```
+
+Quick checks:
+
+```powershell
+# every run of one module, newest last
+Select-String -Path logs\cycle-time.log -Pattern "RUN "
+
+# only the failures, across all modules
+Select-String -Path logs\*.log -Pattern "RUN FAILED"
+
+# what the scheduler itself thinks
+Get-ScheduledTask -TaskName 'IEPulse-*' | Get-ScheduledTaskInfo |
+    Select-Object TaskName, LastRunTime, LastTaskResult, NextRunTime
+```
+
+> Before 2026-08-03 the pipeline entrypoints called `logging.basicConfig`, which
+> writes to a console. Task Scheduler captures no console, so **scheduled runs
+> left no trace at all** — a failed ingest was invisible until the data went
+> stale. They now use `core.logging_setup`, so runs are on disk.

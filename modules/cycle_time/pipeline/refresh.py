@@ -31,7 +31,9 @@ from modules.cycle_time.pipeline.eff              import run as run_eff
 from modules.cycle_time.pipeline.assembly_summary import run as run_assembly_summary
 from modules.cycle_time.keep_awake                 import keep_system_awake
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
+# Logging is configured in __main__ for standalone/scheduled runs, or by the API
+# at startup. No basicConfig here - it fought core.logging_setup on import and
+# sent scheduled-run output to a console that nothing captures.
 log = logging.getLogger(__name__)
 
 
@@ -125,7 +127,18 @@ if __name__ == "__main__":
                         "(harmless — upsert dedups). Use a big value (e.g. 30) for a one-off catch-up run.")
 
     args = p.parse_args()
+
+    from core.logging_setup import setup_logging, task_run
+    setup_logging()
+    # Under `python -m ...` __name__ becomes "__main__", which would tag every
+    # line as "core" and miss the per-module log. __spec__.name keeps the real
+    # dotted path. Rebinding the module-level `log` means run() gets it too.
+    log = logging.getLogger(__spec__.name if __spec__ else __name__)
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-    success = run(mode=args.mode, only=args.only, exclude=args.exclude, overlap_days=args.overlap_days)
-    sys.exit(0 if success else 1)
+
+    with task_run(log, mode=args.mode, trigger="scheduled"):
+        success = run(mode=args.mode, only=args.only, exclude=args.exclude,
+                      overlap_days=args.overlap_days)
+        if not success:
+            raise SystemExit(1)          # raise, so task_run records RUN FAILED

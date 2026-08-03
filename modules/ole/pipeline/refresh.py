@@ -37,7 +37,9 @@ from modules.ole.pipeline.compute        import run as run_compute
 from modules.ole.pipeline.compute_weekly import run as run_compute_weekly
 from modules.ole.pipeline.compute_mh     import run as run_compute_mh
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
+# Logging is configured in __main__ for standalone/scheduled runs, or by the API
+# at startup. No basicConfig here - it fought core.logging_setup on import and
+# sent scheduled-run output to a console that nothing captures.
 log = logging.getLogger(__name__)
 
 
@@ -82,4 +84,12 @@ if __name__ == "__main__":
                    help="Re-read everything currently in the share, overwriting marts")
     p.set_defaults(mode="incremental")
     args = p.parse_args()
-    run(mode=args.mode)
+
+    from core.logging_setup import setup_logging, task_run
+    setup_logging()
+    # Under `python -m ...` __name__ becomes "__main__", which would tag every
+    # line as "core" and miss the per-module log. __spec__.name keeps the real
+    # dotted path. Rebinding the module-level `log` means run() gets it too.
+    log = logging.getLogger(__spec__.name if __spec__ else __name__)
+    with task_run(log, mode=args.mode, trigger="scheduled"):
+        run(mode=args.mode)

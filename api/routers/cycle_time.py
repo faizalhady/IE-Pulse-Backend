@@ -16,6 +16,7 @@ import logging
 import math
 import threading
 from datetime import datetime
+from functools import lru_cache
 from typing import Optional
 
 import duckdb
@@ -23,6 +24,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
+from core.mart_cache import mart_key
 from modules.cycle_time.config import (
     CT_CUSTOMERS,
     CT_DUCKDB_MEMORY_LIMIT,
@@ -642,23 +644,15 @@ def ct_live(
     }
 
 
-@router.get("/aliases")
-def ct_aliases(customer: Optional[str] = Query(None, description="Scope by customer")):
-    """
-    For each distinct `alias` (the customer-facing process name pivoted into
-    column headers), return the underlying `process` code(s) and a sample of
-    the lines on which it appears.
+@lru_cache(maxsize=32)
+def _aliases_compute(customer: Optional[str], _key) -> dict:
+    """Cached body of /aliases. `_key` is the mart mtime — unused inside, it
+    exists only so a rewritten raw.parquet produces a different cache key.
 
-    Used by the FE to render Process info in the column-header tooltip
-    when the table is pivoted on Alias.
-
-      → { "MA 1": { "processes": ["Assembly 1"], "lines": ["ASP HLA ENDO P1B-2", ...] }, ... }
+    Worth caching: this scans 4 columns x 4.4M rows into pandas and groups them
+    in Python. Measured at 12s on the server, cold AND warm, for a 136 KB answer
+    that changes once or twice a day. See core/mart_cache.
     """
-    if not CT_MART["raw"].exists():
-        raise HTTPException(
-            status_code=503,
-            detail="Cycle Time raw.parquet not found. Run /api/cycle-time/refresh first.",
-        )
     con = _con()
     try:
         _load_parquet(con, "raw", "ct_raw")
@@ -689,6 +683,29 @@ def ct_aliases(customer: Optional[str] = Query(None, description="Scope by custo
             "order": int(order.min()) if not order.empty else None,
         }
     return out
+
+
+@router.get("/aliases")
+def ct_aliases(customer: Optional[str] = Query(None, description="Scope by customer")):
+    """
+    For each distinct `alias` (the customer-facing process name pivoted into
+    column headers), return the underlying `process` code(s) and a sample of
+    the lines on which it appears.
+
+    Used by the FE to render Process info in the column-header tooltip
+    when the table is pivoted on Alias.
+
+      → { "MA 1": { "processes": ["Assembly 1"], "lines": ["ASP HLA ENDO P1B-2", ...] }, ... }
+
+    Cached on the mart's mtime — a pipeline rewrite invalidates it automatically,
+    so this can never serve data older than the file on disk.
+    """
+    if not CT_MART["raw"].exists():
+        raise HTTPException(
+            status_code=503,
+            detail="Cycle Time raw.parquet not found. Run /api/cycle-time/refresh first.",
+        )
+    return _aliases_compute(customer, mart_key(CT_MART["raw"]))
 
 
 @router.get("/profile")
