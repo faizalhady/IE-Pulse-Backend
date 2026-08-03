@@ -35,6 +35,12 @@ from modules.cycle_time.config import (
 
 log = logging.getLogger(__name__)
 
+# How far apart the chain marts' write times can be before /health calls the
+# data out of sync. A healthy run writes them within minutes of each other;
+# transform alone takes ~12 min on the server, so the window has to clear that
+# comfortably without hiding a genuinely skipped step (which shows as hours).
+SYNC_TOLERANCE_H = 2.0
+
 router = APIRouter(prefix="/api/cycle-time", tags=["Cycle Time"])
 
 
@@ -126,21 +132,55 @@ def ct_health():
     Lightweight readiness probe — safe to poll.
 
     Tells you: is the service up, are the mart files present, how many rows
-    each has, and whether an ingest is currently running. Row counts come from
-    the parquet FOOTER metadata (a few KB), so NO data is loaded into memory.
+    each has, WHEN each was last written, and whether an ingest is running. Row
+    counts come from the parquet FOOTER metadata (a few KB), so NO data is
+    loaded into memory.
+
+    `freshness.in_sync` answers "is my data current?" without reading a log.
+    The pipeline writes each mart as its own file with no rollback, so a step
+    failing mid-chain leaves EARLIER marts fresh and LATER ones stale — mixed
+    freshness rather than a clean fall-back. Comparing write times across the
+    chain is what surfaces that.
     """
+    now = datetime.now()
     status = {}
     for key, path in CT_MART.items():
         if path.exists():
+            st = path.stat()
+            entry = {
+                "exists": True,
+                "updated": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+                "age_hours": round((now.timestamp() - st.st_mtime) / 3600, 1),
+            }
             try:
-                status[key] = {"exists": True, "rows": pq.ParquetFile(path).metadata.num_rows}
+                entry["rows"] = pq.ParquetFile(path).metadata.num_rows
             except Exception:
-                status[key] = {"exists": True, "rows": "unknown"}
+                entry["rows"] = "unknown"
+            status[key] = entry
         else:
-            status[key] = {"exists": False, "rows": 0}
+            status[key] = {"exists": False, "rows": 0, "updated": None, "age_hours": None}
+
+    # The marts the daily pipeline rewrites in order. If they were all written
+    # by the same run their timestamps sit within minutes of each other; a gap
+    # of hours means a step failed and later marts never got rebuilt.
+    CHAIN = ["raw", "pivoted", "assembly_summary", "customer_status"]
+    ages = [status[k]["age_hours"] for k in CHAIN
+            if k in status and status[k].get("age_hours") is not None]
+    spread = round(max(ages) - min(ages), 1) if len(ages) > 1 else 0.0
+    freshness = {
+        "in_sync": bool(ages) and spread <= SYNC_TOLERANCE_H,
+        "spread_hours": spread,          # oldest vs newest in the chain
+        "oldest_hours": max(ages) if ages else None,
+        "chain": CHAIN,
+        "note": ("marts agree - all written by the same run" if bool(ages) and spread <= SYNC_TOLERANCE_H
+                 else "marts disagree - a pipeline step likely failed; check logs/cycle-time.log "
+                      "for RUN FAILED, then re-run IEPulse-CycleTime-Ingest"),
+    }
+
     return {
         "status":  "ok" if status.get("pivoted", {}).get("exists") else "not_ready",
         "refresh": _get_status_snapshot()["state"],   # idle | running | success | failed
+        "freshness": freshness,
         "mart":    status,
         "customers_configured": len(CT_CUSTOMERS),
     }
