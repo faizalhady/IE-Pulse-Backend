@@ -23,6 +23,30 @@ from modules.cycle_time.config import MES_WEBAPI_BASE, MES_WEBAPI_KEY, MES_WEBAP
 
 log = logging.getLogger(__name__)
 
+# ─── TLS: use the Windows certificate store ──────────────────────────────────
+# MES presents a cert issued by "CN=Jabil Enterprise KF ICA" — Jabil's internal
+# CA. Windows trusts it (Postman and Invoke-WebRequest both work); Python does
+# not, because `requests` ships its own bundle of ~150 PUBLIC CAs and a private
+# corporate CA is never in it. Every call failed with:
+#
+#     SSLError: unable to get local issuer certificate
+#
+# Confirmed 2026-08-03 to be trust-only, not network or auth: the identical
+# request with verify=False returned data. MES last answered on 28 Jul, and
+# nothing changed client-side (certifi untouched since May) — so the server or
+# a proxy stopped supplying the intermediate cert, which Windows can fill in
+# from its own store and Python cannot.
+#
+# truststore makes Python validate against the Windows store, exactly like
+# Postman. Verification stays ON — this is not verify=False — and it keeps
+# working when IT rotates the CA.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception as e:                      # never block a call over this
+    log.warning("truststore unavailable (%s) — TLS will use the bundled CA list, "
+                "which does not include Jabil's internal CA", e)
+
 _MAX_RETRIES = 3          # the MES SP intermittently 404s the same URL — retry helps
 _BACKOFF_S = 2.0          # 2s, 4s, 6s
 

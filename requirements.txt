@@ -26,3 +26,6 @@ python-dotenv==1.2.1    # .env loading for IEDB_CLIENT_KEY
 
 # ─── eBuild module ───────────────────────────────────────────────
 pyodbc==5.3.0           # MES / eDashboard SQL Server (SP_GET_SY_SMT_BUILDPLAN)
+
+# ─── MES JEMS Web API ────────────────────────────────────────────
+truststore==0.10.4      # validate TLS against the Windows cert store (Jabil internal CA)
