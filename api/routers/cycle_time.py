@@ -24,7 +24,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
-from core.mart_cache import mart_key
+from core.mart_cache import mart_key, ttl_key
 from modules.cycle_time.config import (
     CT_CUSTOMERS,
     CT_DUCKDB_MEMORY_LIMIT,
@@ -248,23 +248,10 @@ def ct_customers():
     return CT_CUSTOMERS
 
 
-@router.get("/coverage")
-def ct_coverage():
-    """
-    Per-customer cycle-time data coverage in ONE pass over raw.parquet:
-      → [ { "customer": "ASP", "assemblies": 337, "revisions": 412,
-            "updated_on": "2026-06-02..." }, ... ]
-
-    `assemblies` = distinct assemblies that actually have cycle-time data
-    locally (contrast with the catalog total in /customers).
-    `revisions`  = distinct (assembly, revision) pairs — an assembly with 3
-    revisions counts as 3. Powers the Workcells league table without a
-    per-customer /profile round trip.
-    Returns [] when nothing is ingested yet (mart absent).
-    """
-    if not CT_MART["raw"].exists():
-        return []
-
+@lru_cache(maxsize=4)
+def _coverage_compute(_key) -> list:
+    """Cached body of /coverage — see _aliases_compute. Called on every load of
+    the Cycle Time landing page; measured ~600ms cold and warm before caching."""
     con = _con()
     try:
         _load_parquet(con, "raw", "ct_raw")
@@ -281,6 +268,45 @@ def ct_coverage():
         return _df_to_json(df)
     finally:
         con.close()
+
+
+@router.get("/coverage")
+def ct_coverage():
+    """
+    Per-customer cycle-time data coverage in ONE pass over raw.parquet:
+      → [ { "customer": "ASP", "assemblies": 337, "revisions": 412,
+            "updated_on": "2026-06-02..." }, ... ]
+
+    `assemblies` = distinct assemblies that actually have cycle-time data
+    locally (contrast with the catalog total in /customers).
+    `revisions`  = distinct (assembly, revision) pairs — an assembly with 3
+    revisions counts as 3. Powers the Workcells league table without a
+    per-customer /profile round trip.
+    Returns [] when nothing is ingested yet (mart absent).
+
+    Cached on the mart's mtime — a pipeline rewrite invalidates it automatically.
+    """
+    if not CT_MART["raw"].exists():
+        return []
+    return _coverage_compute(mart_key(CT_MART["raw"]))
+
+
+# The Cycle Time landing page calls /customer-status on every load, and each
+# call is a live 2.1s round trip to IEDB. This is a slow-moving coverage report
+# (assemblies vs assemblies-with-data), not shop-floor data, so a short window
+# is a fair trade. Raise it if IEDB gets slower; lower it if the numbers ever
+# need to be to-the-second.
+CUSTOMER_STATUS_TTL_S = 300          # 5 minutes
+
+
+@lru_cache(maxsize=8)
+def _customer_status_cached(site: str, _key):
+    """TTL-cached, NOT mart-cached — there is no local file to key on, this is a
+    proxy to an upstream API. Errors are deliberately not cached: lru_cache only
+    stores successful returns, so a failed IEDB call retries on the next request
+    rather than serving a cached failure for 5 minutes."""
+    from modules.cycle_time.client import fetch_customer_status
+    return fetch_customer_status(site=site)
 
 
 @router.get("/customer-status")
@@ -305,7 +331,7 @@ def ct_customer_status(site: str = Query("pen", description="Site code for the I
         raise HTTPException(status_code=500, detail=f"IEDB client unavailable: {e}")
 
     try:
-        return fetch_customer_status(site=site)
+        return _customer_status_cached(site, ttl_key(CUSTOMER_STATUS_TTL_S))
     except PermissionError as e:
         raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:
