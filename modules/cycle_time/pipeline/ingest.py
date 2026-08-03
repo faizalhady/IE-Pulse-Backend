@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import shutil
+import warnings
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -92,7 +93,11 @@ def _upsert(existing: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
     keep_mask = ~existing[key_cols].apply(tuple, axis=1).isin(new_keys)
     kept = existing[keep_mask]
 
-    merged = pd.concat([kept, new], ignore_index=True)
+    # ponytail: some frames carry all-NA columns → pandas' concat dtype-inference
+    # deprecation. Current behaviour is intended (schema is fixed), so silence just this.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        merged = pd.concat([kept, new], ignore_index=True)
     log.info(
         f"  Upsert: kept {len(kept)} existing rows + {len(new)} new/updated = {len(merged)} total"
     )
@@ -404,7 +409,9 @@ def _run_incremental(customers: list[dict], state: dict, progress_cb=None,
         log.info("No changes across all customers — raw.parquet unchanged.")
         return True
 
-    new = pd.concat(deltas, ignore_index=True).reindex(columns=existing.columns)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)  # ponytail: see _upsert — reindex restores schema
+        new = pd.concat(deltas, ignore_index=True).reindex(columns=existing.columns)
     merged = _upsert(existing, new)
     _atomic_write_parquet(merged, CT_MART["raw"])
     log.info(f"Incremental upsert complete: {len(new):,} delta row(s) → raw.parquet now {len(merged):,} rows")

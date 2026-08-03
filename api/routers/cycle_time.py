@@ -1330,3 +1330,128 @@ def ct_raw(
         }
     finally:
         con.close()
+
+
+# ─── Completion status (IEDB cycle-time vs MES actual route) ──────────────────
+# Per top-runner model: unavailable / no_data / incomplete / complete / unverified.
+# Heavy job (MES per-customer pull) → background, like the catalog/eBuild refresh.
+_COMPLETION_STATE: dict = {"status": "idle", "started": None, "finished": None, "rows": None, "error": None}
+
+
+def _run_completion_refresh(top_n: int):
+    _COMPLETION_STATE.update(status="running", started=datetime.now().isoformat(), finished=None, rows=None, error=None)
+    try:
+        from modules.cycle_time import completion_status as cs
+        df = cs.run(cs.top_models(top_n))
+        _COMPLETION_STATE.update(status="success", finished=datetime.now().isoformat(), rows=len(df))
+    except Exception as e:
+        log.exception("completion-status refresh failed")
+        _COMPLETION_STATE.update(status="error", finished=datetime.now().isoformat(), error=str(e))
+
+
+@router.post("/completion/refresh")
+def ct_completion_refresh(background: BackgroundTasks, top_n: int = Query(100, ge=1, le=500)):
+    """Rebuild completion_status + completion_steps marts for the top-`top_n` runner
+    union (all layers). Background — poll GET /completion/refresh/status. Needs VPN (MES)."""
+    if _COMPLETION_STATE["status"] == "running":
+        return {"status": "running", "detail": "A completion refresh is already in progress."}
+    background.add_task(_run_completion_refresh, top_n)
+    return {"status": "started", "top_n": top_n}
+
+
+@router.get("/completion/refresh/status")
+def ct_completion_refresh_status():
+    return _COMPLETION_STATE
+
+
+@router.get("/completion")
+def ct_completion(
+    customer: Optional[str] = Query(None, description="Filter to one workcell (case-insensitive)."),
+    status:   Optional[str] = Query(None, description="Filter to one status (incomplete/complete/no_data/unavailable/unverified)."),
+):
+    """Completion-status summary per model. → { as_of, count, counts:{status:n}, models:[...] }."""
+    p = CT_MART["completion_status"]
+    if not p.exists():
+        raise HTTPException(status_code=503, detail="completion_status mart not built. POST /completion/refresh first.")
+    df = pd.read_parquet(p)
+    # join per-model LBR% + IPK trolleys (line_metrics mart) when available
+    lm = CT_MART["line_metrics"]
+    if lm.exists():
+        m = pd.read_parquet(lm)[["customer", "assembly", "lbr", "ipk_trolleys"]]
+        df = df.merge(m, on=["customer", "assembly"], how="left")
+    if customer:
+        df = df[df["customer"].astype(str).str.casefold() == customer.casefold()]
+    if status:
+        df = df[df["status"] == status]
+    as_of = None
+    try:
+        as_of = datetime.fromtimestamp(p.stat().st_mtime).isoformat()
+    except OSError:
+        pass
+    return {
+        "as_of": as_of,
+        "count": len(df),
+        "counts": df["status"].value_counts().to_dict() if len(df) else {},
+        "models": _df_to_json(df),
+    }
+
+
+@router.get("/completion/steps")
+def ct_completion_steps(
+    customer: str = Query(..., description="Workcell (case-insensitive)."),
+    assembly: str = Query(..., description="Model / assembly name."),
+):
+    """MES actual route vs IEDB route for one model — the FE side-by-side.
+      → { customer, assembly, mes:[{order,step,alias,qty,status}], iedb:[{process,alias,sub_workcenter,cycle_time}] }
+    mes step status: present | missing | non_iedb | unmapped."""
+    p = CT_MART["completion_steps"]
+    if not p.exists():
+        raise HTTPException(status_code=503, detail="completion_steps mart not built. POST /completion/refresh first.")
+    df = pd.read_parquet(p)
+    df = df[(df["customer"].astype(str).str.casefold() == customer.casefold())
+            & (df["assembly"].astype(str) == assembly)]
+    if not df.empty:
+        mes = [{"order": None if pd.isna(r["order"]) else int(r["order"]), "step": r["name"],
+                "alias": r["alias"], "qty": None if pd.isna(r["value"]) else int(r["value"]), "status": r["status"]}
+               for _, r in df[df["side"] == "MES"].sort_values("order").iterrows()]
+        iedb = [{"process": r["name"], "alias": r["alias"], "sub_workcenter": r["sub_workcenter"],
+                 "order": None if pd.isna(r["order"]) else int(r["order"]),
+                 "cycle_time": None if pd.isna(r["value"]) else float(r["value"])}
+                for _, r in df[df["side"] == "IEDB"].sort_values("order", na_position="last").iterrows()]
+        return {"customer": customer, "assembly": assembly, "mes": mes, "iedb": iedb}
+
+    # Not in the comparison mart (e.g. Unverified — no MES history). Still show the
+    # IEDB route from raw so the drawer isn't blank; MES side is just empty.
+    con = duckdb.connect()
+    idf = con.execute(f"""
+        SELECT DISTINCT process, alias, sub_workcenter, "order" AS ord, cycle_time_per_process AS ct
+        FROM read_parquet('{CT_MART["raw"].as_posix()}')
+        WHERE lower(customer) = lower(?) AND assembly = ? AND cycle_time_per_process IS NOT NULL AND priority = 1
+        ORDER BY "order"
+    """, [customer, assembly]).fetchdf()
+    con.close()
+    if idf.empty:
+        raise HTTPException(status_code=404, detail=f"No cycle-time data for {customer} / {assembly}.")
+    iedb = [{"process": r["process"], "alias": r["alias"], "sub_workcenter": r["sub_workcenter"],
+             "order": None if pd.isna(r["ord"]) else int(r["ord"]),
+             "cycle_time": None if pd.isna(r["ct"]) else float(r["ct"])}
+            for _, r in idf.iterrows()]
+    return {"customer": customer, "assembly": assembly, "mes": [], "iedb": iedb}
+
+
+@router.get("/completion/line-metrics")
+def ct_completion_line_metrics(
+    customer: str = Query(..., description="Workcell (config name, e.g. 'Nokia Optics')."),
+    assembly: str = Query(..., description="Model / assembly name."),
+):
+    """Per-model LBR + IPK breakdown from the IEDB route (the drawer proof).
+      → { customer, assembly, lbr, n0, bottleneck_ct, ipk_trolleys, boards_per_trolley,
+          lines:[{sub_workcenter, lbr, n0, bottleneck_step, bottleneck_ct, balance_line,
+                  stations:[{step, ct, is_bottleneck}]}],
+          buffers:[{from, to, up_uph, down_uph, gap, ipk_units, trolleys}] }
+    Only meaningful for models with COMPLETE cycle-time data."""
+    from modules.cycle_time.line_metrics import compute_one
+    m = compute_one(customer, assembly)
+    if not m:
+        raise HTTPException(status_code=404, detail=f"No line metrics for {customer} / {assembly} (no priority-1 cycle-time data).")
+    return {"customer": customer, "assembly": assembly, **m}

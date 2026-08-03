@@ -7,6 +7,13 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Anchor .env to the repo root (not process CWD) so env vars load for BOTH the
+# FastAPI server and standalone `python -m ...` runs. Idempotent; won't override
+# vars already set in the environment.
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
 # ─── API ─────────────────────────────────────────────────────────────────────
 BASE_URL    = "https://iedb2api-prd.jblapps.com"
 TOKEN_URL   = "https://jabil.okta.com/oauth2/default/v1/token"
@@ -27,7 +34,34 @@ CT_MART = {
     "assembly_summary": CT_MART_DIR / "assembly_summary.parquet",  # one row per (customer, assembly): list-page fields + precomputed SMH (+ eff)
     "eff_by_line":      CT_MART_DIR / "eff_by_line.parquet",       # (customer, sub_workcenter) → efficiency goal, from GetSummaryGroupProcessData
     "assembly_catalog": CT_MART_DIR / "assembly_catalog.parquet",  # one row per (customer, assembly) FULL IEDB catalogue + has_data flag (incl. no-data)
+    "mes_assembly_map": CT_MART_DIR / "mes_assembly_map.parquet",  # (customer, number, revision, assembly_id, customer_id) — MES name→id translator for completion status
+    "mes_process_map": CT_MART_DIR / "mes_process_map.parquet",    # (customer, step_instance, iedb_alias) — MES step ↔ IEDB alias dict, from MNS workbook
+    "completion_status": CT_MART_DIR / "completion_status.parquet",# per top-100 model: status + missing steps + coverage
+    "completion_steps":  CT_MART_DIR / "completion_steps.parquet", # per model, tidy MES-route + IEDB-route rows (FE side-by-side)
+    "line_metrics":      CT_MART_DIR / "line_metrics.parquet",     # per model, LBR% + IPK trolleys (from IEDB route; complete models only)
+    # ── completion v2 (parallel marts — v1 above is left untouched as fallback) ──
+    "completion_status_v2": CT_MART_DIR / "completion_status_v2.parquet",
+    "completion_steps_v2":  CT_MART_DIR / "completion_steps_v2.parquet",
+    "mes_serial_index":     CT_MART_DIR / "mes_serial_index.parquet",  # (customer, assembly, serial) from #94
 }
+
+# Cached MES pulls — written once, never re-fetched. mes_scans is one parquet per
+# customer-DAY (#21) so a re-run only pulls days it doesn't already have.
+CT_MES_SCAN_DIR  = CT_MART_DIR / "mes_scans"        # <cust>/<YYYY-MM-DD>.parquet
+CT_MES_BOARD_DIR = CT_MART_DIR / "mes_board_steps"  # <cust>.parquet  (#132)
+
+# MNS process-mapping workbook (curated MES StepInstance ↔ IEDB Alias, per customer).
+# Source for the completion-status feature's naming bridge. Override via env if moved.
+MES_PROCESS_MAP_XLSX = os.getenv("MES_PROCESS_MAP_XLSX",
+    r"C:\Users\4033375\Projects\PRODUCTION DASHBOARD\MNS - Process Mapping (Centralized) (1).xlsx")
+
+# ─── MES JEMS Web API — route/assembly-id lookups (completion-status feature) ──
+# Different system from the eBuild MES_SQL_* buildplan: this is the REST WebApi
+# (POST + APIKey header). Docs: docs/MES/MESWebApi_REFERENCE.md. Set MES_WEBAPI_KEY
+# in .env — without it every call raises (no live data).
+MES_WEBAPI_BASE    = os.getenv("MES_WEBAPI_BASE", "https://mypenm0soap03.corp.jabil.org/meswebapi")
+MES_WEBAPI_KEY     = os.getenv("MES_WEBAPI_KEY", "")
+MES_WEBAPI_TIMEOUT = int(os.getenv("MES_WEBAPI_TIMEOUT", "30"))
 
 CT_STATE_FILE = CT_MART_DIR / ".ingest_state.json"
 
