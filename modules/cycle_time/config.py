@@ -43,6 +43,12 @@ CT_MART = {
     "completion_status_v2": CT_MART_DIR / "completion_status_v2.parquet",
     "completion_steps_v2":  CT_MART_DIR / "completion_steps_v2.parquet",
     "mes_serial_index":     CT_MART_DIR / "mes_serial_index.parquet",  # (customer, assembly, serial) from #94
+    # IEDB CustomerStatus coverage report, snapshotted by the pipeline instead of
+    # fetched live per request. The live call cost 3.6s on every cold start and
+    # made the endpoint fail whenever IEDB was down. Snapshotting also makes it
+    # CONSISTENT with the daily marts shown beside it, rather than a live number
+    # next to day-old data.
+    "customer_status":      CT_MART_DIR / "customer_status.parquet",
 }
 
 # Cached MES pulls — written once, never re-fetched. mes_scans is one parquet per

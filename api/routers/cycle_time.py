@@ -24,7 +24,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
-from core.mart_cache import mart_key, ttl_key
+from core.mart_cache import mart_key
 from modules.cycle_time.config import (
     CT_CUSTOMERS,
     CT_DUCKDB_MEMORY_LIMIT,
@@ -291,22 +291,16 @@ def ct_coverage():
     return _coverage_compute(mart_key(CT_MART["raw"]))
 
 
-# The Cycle Time landing page calls /customer-status on every load, and each
-# call is a live 2.1s round trip to IEDB. This is a slow-moving coverage report
-# (assemblies vs assemblies-with-data), not shop-floor data, so a short window
-# is a fair trade. Raise it if IEDB gets slower; lower it if the numbers ever
-# need to be to-the-second.
-CUSTOMER_STATUS_TTL_S = 300          # 5 minutes
+@lru_cache(maxsize=4)
+def _customer_status_from_mart(_key) -> list:
+    """Read the CustomerStatus snapshot the pipeline writes.
 
-
-@lru_cache(maxsize=8)
-def _customer_status_cached(site: str, _key):
-    """TTL-cached, NOT mart-cached — there is no local file to key on, this is a
-    proxy to an upstream API. Errors are deliberately not cached: lru_cache only
-    stores successful returns, so a failed IEDB call retries on the next request
-    rather than serving a cached failure for 5 minutes."""
-    from modules.cycle_time.client import fetch_customer_status
-    return fetch_customer_status(site=site)
+    Cached on the mart's mtime — exact invalidation, so it can never serve data
+    older than the file. Previously this called IEDB live on every request
+    (3.6s cold, every restart) behind a 5-minute clock-based cache.
+    """
+    df = pd.read_parquet(CT_MART["customer_status"])
+    return _df_to_json(df)
 
 
 @router.get("/customer-status")
@@ -325,13 +319,21 @@ def ct_customer_status(site: str = Query("pen", description="Site code for the I
             "StopWatch": 114126, "Most": 0, "Estimate": 2376,
             "EstimatePercentage": 2, "Site": "PEN" }, ... ]
     """
+    # Served from the mart snapshot the pipeline writes. Falls back to a live
+    # IEDB call only when the snapshot doesn't exist yet (first deploy, before
+    # the first pipeline run) — so nothing breaks in the gap.
+    mart = CT_MART["customer_status"]
+    if mart.exists():
+        return _customer_status_from_mart(mart_key(mart))
+
+    log.info("customer_status mart not built yet — falling back to a live IEDB call")
     try:
         from modules.cycle_time.client import fetch_customer_status
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"IEDB client unavailable: {e}")
 
     try:
-        return _customer_status_cached(site, ttl_key(CUSTOMER_STATUS_TTL_S))
+        return fetch_customer_status(site=site)
     except PermissionError as e:
         raise HTTPException(status_code=401, detail=str(e))
     except Exception as e:

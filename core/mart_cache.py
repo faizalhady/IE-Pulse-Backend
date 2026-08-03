@@ -48,25 +48,8 @@ network hop, a serialisation round-trip, and an external service that a process
 with a silent-stop history can fail against.
 """
 
-import time
 from pathlib import Path
 
-
-def ttl_key(seconds: int) -> int:
-    """A cache key that changes every `seconds` — for data with NO file to watch.
-
-    Use this only when `mart_key` can't apply: a live proxy to an upstream API,
-    where nothing on our disk tells us whether the answer changed.
-
-    Unlike `mart_key` this CAN serve stale data, by up to `seconds`. That is the
-    whole trade — accept it deliberately, and only where the upstream moves
-    slowly. For anything backed by a mart file, use `mart_key` instead: it is
-    exact.
-
-    Implemented as a time bucket rather than a timestamp so that every caller
-    inside the same window shares one entry.
-    """
-    return int(time.time() // seconds)
 
 
 def mart_key(*paths: Path) -> tuple:
@@ -128,12 +111,5 @@ if __name__ == "__main__":
         g.write_text("b")
         assert mart_key(f, g) != both
 
-    # ttl_key: stable inside a window, and every caller in that window shares it
-    assert ttl_key(3600) == ttl_key(3600), "must be stable within the window"
-    assert ttl_key(1) != ttl_key(1) - 1, "sanity"
-    # a 1-second bucket must roll over
-    k = ttl_key(1)
-    time.sleep(1.1)
-    assert ttl_key(1) != k, "bucket must change once the window elapses"
 
     print("mart_cache self-check OK")

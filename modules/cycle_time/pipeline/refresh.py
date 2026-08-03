@@ -29,6 +29,7 @@ from modules.cycle_time.pipeline.ingest           import run as run_ingest, run_
 from modules.cycle_time.pipeline.transform        import run as run_transform
 from modules.cycle_time.pipeline.eff              import run as run_eff
 from modules.cycle_time.pipeline.assembly_summary import run as run_assembly_summary
+from modules.cycle_time.pipeline.customer_status  import run as run_customer_status
 from modules.cycle_time.keep_awake                 import keep_system_awake
 
 # Logging is configured in __main__ for standalone/scheduled runs, or by the API
@@ -80,6 +81,11 @@ def run(mode: str = "incremental",
     if not run_assembly_summary():
         log.error("Assembly-summary build failed — assembly_summary.parquet not written.")
         return False
+
+    # Snapshot the IEDB coverage report so the endpoint reads a mart instead of
+    # calling IEDB live on every request. Best-effort — a failure keeps the
+    # previous snapshot and does not fail the pipeline.
+    run_customer_status()
 
     # NOTE: the eBuild runner rebuild used to be chained here, so the Plant
     # Runners `has_data` badges would reflect freshly-synced cycle-time data.

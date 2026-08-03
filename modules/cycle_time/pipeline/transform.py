@@ -51,13 +51,31 @@ def run() -> bool:
         log.error(f"raw.parquet not found at {CT_MART['raw']}. Run ingest first.")
         return False
 
+    # Read ONLY the columns this pivot touches — 12 of raw.parquet's 34.
+    #
+    # This is a memory fix, not a tidiness one. Measured 2026-08-03: reading all
+    # 34 columns peaked at 11.6 GB RSS, which is fine on a 62 GB dev box (49s)
+    # but thrashes a 16 GB server — the same run took 706s there, blocked on
+    # paging rather than CPU. The columns we drop are the widest strings in the
+    # file and are never referenced below.
     try:
-        df = pd.read_parquet(CT_MART["raw"])
+        import pyarrow.parquet as pq
+        available = set(pq.ParquetFile(CT_MART["raw"]).schema.names)
+        wanted = list(dict.fromkeys(
+            _INDEX_COLS + [_PROCESS_COL, _VALUE_COL, "process", "priority"]
+        ))
+        use_cols = [c for c in wanted if c in available] or None
+    except Exception:
+        use_cols = None                 # unreadable schema — fall back to all columns
+
+    try:
+        df = pd.read_parquet(CT_MART["raw"], columns=use_cols)
     except Exception as e:
         log.error(f"Could not read raw.parquet: {e}")
         return False
 
-    log.info(f"Raw rows: {len(df)}")
+    log.info(f"Raw rows: {len(df)}"
+             + (f" | {len(use_cols)} of {len(available)} columns read" if use_cols else ""))
 
     # ── Guard: required columns ───────────────────────────────────────────────
     required = [_PROCESS_COL, _VALUE_COL]

@@ -10,6 +10,8 @@ To add a new module:
 """
 
 import sys
+import threading
+import time
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +27,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import api.routers.cycle_time as ct_router_mod
 from core.database import init_db
 from core.logging_setup import (
     setup_logging,
@@ -81,6 +84,37 @@ def startup():
     start_heartbeat(log)                 # 5-min liveness; last one = moment of death
     init_db()
     log.info("SQLite operational DB ready")
+    _warm_caches()
+
+
+def _warm_caches() -> None:
+    """Populate the mart caches in the background so the first real visitor
+    doesn't pay for them.
+
+    The caches are per-process and empty on boot, so before this the first
+    request after every restart paid full price — measured on the server:
+    /cycle-time/aliases 12.8s, /coverage 582ms. Everyone after got ~20ms.
+
+    Runs on a daemon thread: warming must never delay startup or stop the app
+    coming up if a mart is missing or malformed.
+    """
+    def _warm():
+        from modules.cycle_time.config import CT_MART
+        from core.mart_cache import mart_key
+        jobs = [
+            ("cycle-time/coverage", lambda: ct_router_mod._coverage_compute(mart_key(CT_MART["raw"]))),
+            ("cycle-time/aliases",  lambda: ct_router_mod._aliases_compute(None, mart_key(CT_MART["raw"]))),
+        ]
+        for name, fn in jobs:
+            t0 = time.time()
+            try:
+                fn()
+                log.info("cache warmed: %-22s %.1fs", name, time.time() - t0)
+            except Exception as e:
+                # Never fatal — a cold cache just means the first user waits.
+                log.warning("cache warm skipped for %s: %s", name, e)
+
+    threading.Thread(target=_warm, name="cache-warm", daemon=True).start()
 
 
 @app.on_event("shutdown")
