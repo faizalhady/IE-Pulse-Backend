@@ -26,3 +26,6 @@ Thumbs.db
 
 # Reference files (kept locally, not part of the codebase)
 iedb_auth_service.cs
+
+# Local scratch (Servy exports, ad-hoc files)
+temp/

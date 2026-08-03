@@ -1,7 +1,7 @@
 # Operations & Troubleshooting — OLE Backend
 
 Server-side runbook for the OLE backend running under **Servy** (Windows
-service) on the production box at `D:\Application\IE-Pulse\OLE-BACKEND\`.
+service) on the production box at `D:\Application\IE-Pulse\BACKEND\`.
 
 Its main job: diagnose the **silent service stops** — the service stopping on
 its own with nothing obvious in Servy's captured stdout/stderr.
@@ -13,7 +13,7 @@ its own with nothing obvious in Servy's captured stdout/stderr.
 After new commits land on `master`:
 
 ```powershell
-cd D:\Application\IE-Pulse\OLE-BACKEND
+cd D:\Application\IE-Pulse\BACKEND
 git pull
 venv\Scripts\python.exe -m pip install -r requirements.txt   # picks up new deps (e.g. psutil)
 # then restart the Servy service (Services.msc → restart, or `sc stop`/`sc start`)
@@ -26,7 +26,7 @@ fails to install the app still runs (the heartbeat degrades to uptime-only).
 **Always confirm the env after a fresh deploy:**
 
 ```powershell
-type D:\Application\IE-Pulse\OLE-BACKEND\.env   # must contain IEDB_CLIENT_KEY=...
+type D:\Application\IE-Pulse\BACKEND\.env   # must contain IEDB_CLIENT_KEY=...
 ```
 
 `.env` is git-ignored, so it does NOT come down with a pull — it must already
@@ -139,7 +139,7 @@ These were live bugs found in the server logs (commit `ec7dabe`):
 - **`IEDB_CLIENT_KEY is not set`** despite `.env` existing — `auth.py` loaded
   `.env` relative to the process CWD, which Servy doesn't set to the backend
   root. Fixed: `.env` is now loaded from the repo root regardless of CWD. If you
-  still see this error, the key genuinely isn't in `D:\…\OLE-BACKEND\.env`.
+  still see this error, the key genuinely isn't in `D:\…\BACKEND\.env`.
 
 ---
 
@@ -150,5 +150,5 @@ These were live bugs found in the server logs (commit `ec7dabe`):
 Invoke-WebRequest http://127.0.0.1:9007/api/cycle-time/health -UseBasicParsing | Select StatusCode
 
 # Last lifecycle lines
-Get-Content D:\Application\IE-Pulse\OLE-BACKEND\logs\ole-backend.log -Tail 40
+Get-Content D:\Application\IE-Pulse\BACKEND\logs\ole-backend.log -Tail 40
 ```

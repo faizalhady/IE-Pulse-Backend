@@ -7,9 +7,13 @@ This is the **IE Pulse backend** — a FastAPI monorepo serving all IE analytica
 modules for Jabil Penang. The product is **IE Pulse**.
 
 > Renamed from `OLE ANALYZER\ole-backend` on 2026-08-03 — the old name only ever
-> described one module. The GitHub repo is `faizalhady/IE-Pulse-Backend`. The
-> production folder on the server is still `D:\Application\IE-Pulse\OLE-BACKEND`
-> until that phase runs; see `docs/RENAME_RUNBOOK.md`.
+> described one module. GitHub repo: `faizalhady/IE-Pulse-Backend`. Production
+> folder: `D:\Application\IE-Pulse\BACKEND`. The Windows service is still named
+> `pulse-backend` (display name "IE Pulse Backend") and still listens on 9007.
+>
+> The rotating log is still `logs/ole-backend.log` and the logger is still named
+> `ole-backend` — deliberately, so the silent-stop investigation keeps its
+> history. Rename both together if you ever change it.
 
 Single backend, multiple modules. Each module is self-contained inside its own
 `modules/<name>/` folder. Routers are thin — all business logic lives in

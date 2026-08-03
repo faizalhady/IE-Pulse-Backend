@@ -1,6 +1,13 @@
 # Rename Runbook — `ole-backend` → `IE-Pulse-Backend`
 
-One-time operation. Delete this file once complete and verified.
+> **STATUS: COMPLETE — 2026-08-03.** Dev, GitHub and server all done and verified.
+> Kept only for the three open findings at the bottom, which are unrelated to the
+> rename and still need attention. Delete this file once those are handled.
+>
+> Outcome: dev folder, GitHub repo, and `D:\Application\IE-Pulse\BACKEND` all
+> renamed. Service `pulse-backend` runs `python.exe -m uvicorn` directly — the
+> `uvicorn.exe` shim is gone, so it is now one process instead of three. Neither
+> venv needed rebuilding. nginx needed no change at all.
 
 | | From | To |
 |---|---|---|
