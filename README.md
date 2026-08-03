@@ -1,11 +1,15 @@
-# ole-backend
+# IE-Pulse-Backend
 
-Python pipeline + FastAPI for the OLE Analyzer module inside IE Pulse.
+FastAPI backend for **IE Pulse** — serves every IE analytical module (OLE,
+Cycle Time, Downtime, Transfers, PPQT, IPK, LBR), not just OLE.
+
+See `CLAUDE.md` for the current layout and module conventions. The folder tree
+below is out of date.
 
 ## Folder structure
 
 ```
-ole-backend/
+IE-Pulse-Backend/
 ├── data/
 │   ├── raw/          ← place SMH .xls files here
 │   └── mart/         ← parquet outputs (auto-generated)
@@ -23,7 +27,7 @@ ole-backend/
 ## Setup
 
 ```bash
-cd C:\Users\4033375\Projects\OLE ANALYZER\ole-backend
+cd C:\Users\4033375\Projects\IE-Pulse-Backend
 
 # Create virtual environment
 python -m venv venv

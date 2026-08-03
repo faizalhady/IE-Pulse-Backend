@@ -33,7 +33,7 @@ IE Pulse frontend.
 ## 2. Backend Files — What Was Built
 
 ```
-ole-backend/
+IE-Pulse-Backend/
 ├── modules/
 │   ├── __init__.py
 │   └── cycle_time/

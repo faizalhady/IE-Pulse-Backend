@@ -1,6 +1,6 @@
 # OLE Backend Reorganization Plan
 
-This document outlines the strategy for refactoring and reorganizing the `ole-backend` codebase to improve maintainability, scalability, and code quality.
+This document outlines the strategy for refactoring and reorganizing the `IE-Pulse-Backend` codebase to improve maintainability, scalability, and code quality.
 
 ## 1. Objectives
 *   **Modularization:** Decouple the API monolith and pipeline logic.
@@ -11,7 +11,7 @@ This document outlines the strategy for refactoring and reorganizing the `ole-ba
 ## 2. Target Directory Structure
 
 ```text
-ole-backend/
+IE-Pulse-Backend/
 ├── api/
 │   ├── endpoints/          # Route handlers (FastAPI APIRouter)
 │   │   ├── ole.py          # /api/ole, /api/ole/summary, etc.

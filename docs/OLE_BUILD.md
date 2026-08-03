@@ -2,7 +2,7 @@
 
 > Part of **IE Pulse**, Jabil Penang's unified Industrial Engineering platform.
 > This document is the single source of truth for the **OLE (Overall Labor Effectiveness)** module.
-> It is saved to both repos: `IE-Pulse/docs/OLE_BUILD.md` and `ole-backend/docs/OLE_BUILD.md`.
+> It is saved to both repos: `IE-Pulse/docs/OLE_BUILD.md` and `IE-Pulse-Backend/docs/OLE_BUILD.md`.
 
 **Module:** OLE (Overall Labor Effectiveness)
 **Frontend status:** Live
@@ -190,7 +190,7 @@ When OLE is folded into the unified platform conventions, it should be registere
 **Current layout (as deployed):**
 
 ```
-ole-backend/
+IE-Pulse-Backend/
   api/
     main.py            FastAPI entry, registers OLE routes
   pipeline/
@@ -285,7 +285,7 @@ BECKMAN COULTER (temp excluded via TEMP_EXCLUDED_WORKCELLS), IMED.
 - normalizeDates() strips time from ISO dates before comparison.
 - Constants in oleConstants.ts. Paynter values are deterministic via seededRand.
 
-### Backend (ole-backend)
+### Backend (IE-Pulse-Backend)
 - FastAPI on port 9007. Parquet mart in data/mart/.
 - Endpoints: /api/ole/weekly, /api/ole/mh-breakdown, /api/ole/pareto,
   /api/workcells, /api/shifts. (Add /api/ole/health to match platform convention.)

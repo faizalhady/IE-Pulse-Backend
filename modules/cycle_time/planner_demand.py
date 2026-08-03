@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pandas as pd
 
-BASE = Path(__file__).parent.parent.parent          # ole-backend/
+BASE = Path(__file__).parent.parent.parent          # IE-Pulse-Backend/
 DEMAND_DIR = BASE / "data" / "demand" / "CH" / "Original Demand"
 ROOT_DIR = BASE / "data" / "demand"                 # Arista lives here, not in CH/
 DIRS = {"od": DEMAND_DIR, "root": ROOT_DIR}

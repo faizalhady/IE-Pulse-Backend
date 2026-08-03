@@ -8,7 +8,7 @@
 
 ## 1. Background & Goal
 
-The OLE Analyzer backend (`ole-backend`) already handles the OLE module — tracking
+The OLE Analyzer backend (`IE-Pulse-Backend`) already handles the OLE module — tracking
 Overall Labour Effectiveness via MES production CSVs and eTMS paid hours files.
 
 This initiative adds a **second module: Cycle Time**, which pulls standard process
@@ -222,7 +222,7 @@ lives under `modules/` as a self-contained unit. The API router is registered in
 ### 5.1 New Files Created
 
 ```
-ole-backend/
+IE-Pulse-Backend/
 ├── modules/
 │   ├── __init__.py
 │   └── cycle_time/

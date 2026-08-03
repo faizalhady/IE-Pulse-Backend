@@ -5,7 +5,7 @@ FastAPI router for eBuild — the SMT build plan from the MES / eDashboard SQL
 Server. Calls the stored procedure SP_GET_SY_SMT_BUILDPLAN directly via pyodbc.
 
 This replaces the MES Hub's two-hop (Bun/Elysia route → sql_bridge.py). Since
-ole-backend is already Python, one FastAPI endpoint does the whole job.
+IE-Pulse-Backend is already Python, one FastAPI endpoint does the whole job.
 
 The data is MES-driven: each row's Sub_Status / UnitsCompleted / % /
 CompletedDateTime reflect what was actually scanned/built on the floor —
@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ebuild", tags=["eBuild"])
 
 # ─── Storage ─────────────────────────────────────────────────────────────────
-BASE_DIR   = Path(__file__).resolve().parents[2]        # ole-backend/
+BASE_DIR   = Path(__file__).resolve().parents[2]        # IE-Pulse-Backend/
 MART_DIR   = BASE_DIR / "data" / "mart" / "ebuild"
 RUNNERS_PARQUET = MART_DIR / "runners.parquet"          # (customer, assembly) → units built
 CUSTOMER_PLANT_PARQUET = MART_DIR / "customer_plant.parquet"  # customer → dominant plant (most units)

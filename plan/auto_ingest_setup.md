@@ -69,7 +69,7 @@ Copy the output — e.g. `C:\Python311\python.exe`.
 - Action: **Start a program**
 - Program/script: `<your python.exe path>` — e.g. `C:\Python311\python.exe`
 - Add arguments: `pipeline/refresh.py`
-- Start in: `C:\Users\4033375\Projects\OLE ANALYZER\ole-backend`
+- Start in: `C:\Users\4033375\Projects\IE-Pulse-Backend`
 - OK
 
 **Conditions tab:**
@@ -108,7 +108,7 @@ Only run a full refresh when:
 Run manually:
 
 ```bash
-cd "C:/Users/4033375/Projects/OLE ANALYZER/ole-backend"
+cd "C:/Users/4033375/Projects/IE-Pulse-Backend"
 python pipeline/refresh.py --full
 ```
 
@@ -121,7 +121,7 @@ Remember: anything no longer in the share will be **lost** from the new marts.
 After a few scheduled runs, peek at the state file:
 
 ```bash
-cat "C:/Users/4033375/Projects/OLE ANALYZER/ole-backend/data/mart/.ingest_state.json"
+cat "C:/Users/4033375/Projects/IE-Pulse-Backend/data/mart/.ingest_state.json"
 ```
 
 You should see `last_run` advancing every 6h and `production` / `paid_hours_raw` dates advancing whenever new CSVs arrive on the share.

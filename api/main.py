@@ -49,7 +49,7 @@ from api.routers.saved_reports import router as saved_reports_router
 # so even an import-time crash lands in logs/ instead of vanishing.
 log = setup_logging()
 
-app = FastAPI(title="OLE Analyzer API", version="1.0.0")
+app = FastAPI(title="IE Pulse API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,

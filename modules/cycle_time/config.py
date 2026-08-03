@@ -25,7 +25,7 @@ API_TIMEOUT = 90            # seconds per request (big customers like KEYSIGHT c
 TOKEN_EXPIRY_BUFFER_S = 60
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
-BASE_DIR     = Path(__file__).parent.parent.parent          # ole-backend/
+BASE_DIR     = Path(__file__).parent.parent.parent          # IE-Pulse-Backend/
 CT_MART_DIR  = BASE_DIR / "data" / "mart" / "cycle_time"
 
 CT_MART = {
