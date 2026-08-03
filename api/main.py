@@ -101,9 +101,15 @@ def _warm_caches() -> None:
     def _warm():
         from modules.cycle_time.config import CT_MART
         from core.mart_cache import mart_key
+        # Everything the Cycle Time landing page calls on load. Keep this list in
+        # step with that page - an endpoint missing here is one the first
+        # visitor after a restart still pays for.
         jobs = [
             ("cycle-time/coverage", lambda: ct_router_mod._coverage_compute(mart_key(CT_MART["raw"]))),
             ("cycle-time/aliases",  lambda: ct_router_mod._aliases_compute(None, mart_key(CT_MART["raw"]))),
+            ("cycle-time/customer-status",
+             lambda: ct_router_mod._customer_status_from_mart(mart_key(CT_MART["customer_status"]))
+                     if CT_MART["customer_status"].exists() else None),
         ]
         for name, fn in jobs:
             t0 = time.time()
