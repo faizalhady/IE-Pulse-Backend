@@ -25,11 +25,14 @@ Endpoints:
 
 import logging
 import os
+from functools import lru_cache
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+
+from core.mart_cache import mart_key
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +41,10 @@ router = APIRouter(prefix="/api/ebuild", tags=["eBuild"])
 # ─── Storage ─────────────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).resolve().parents[2]        # IE-Pulse-Backend/
 MART_DIR   = BASE_DIR / "data" / "mart" / "ebuild"
+
+# Query timeout for the MES stored proc, seconds. See _fetch_buildplan.
+MES_QUERY_TIMEOUT_S = int(os.getenv("MES_QUERY_TIMEOUT_S", "300"))
+
 RUNNERS_PARQUET = MART_DIR / "runners.parquet"          # (customer, assembly) → units built
 CUSTOMER_PLANT_PARQUET = MART_DIR / "customer_plant.parquet"  # customer → dominant plant (most units)
 PLANT_RUNNERS_PARQUET = MART_DIR / "plant_runners.parquet"    # (plant, customer, assembly) → units + has_data
@@ -77,10 +84,16 @@ def _fetch_buildplan(from_dt: datetime, to_dt: datetime) -> list[dict]:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"pyodbc unavailable: {e}")
     try:
-        conn = pyodbc.connect(_conn_str(), timeout=10)
+        conn = pyodbc.connect(_conn_str(), timeout=10)     # LOGIN timeout only
     except Exception as e:
         log.exception("MES SQL connect failed")
         raise HTTPException(status_code=503, detail=f"MES DB unavailable: {e}")
+    # `timeout=` above bounds logging in, NOT running the query. Without this
+    # line a mid-read network stall blocks forever: on 2026-08-03 exactly that
+    # happened and the call sat for 51 MINUTES before dying with
+    # "ConnectionRead (recv()) 10053". A healthy 24-month pull takes ~2-3 min
+    # (measured: 365 days = 65s, 270k rows), so 5 min is generous headroom.
+    conn.timeout = MES_QUERY_TIMEOUT_S
     try:
         cur = conn.cursor()
         cur.execute("EXEC [dbo].[SP_GET_SY_SMT_BUILDPLAN] @from=?, @to=?", from_dt, to_dt)
@@ -186,6 +199,43 @@ def _has_data_lookup() -> dict:
     for cust, asm in zip(s["customer"], s["assembly"]):
         d.setdefault(_normc(cust), set()).add(_norma(asm))
     return d
+
+
+@lru_cache(maxsize=8)
+def _runners_with_has_data(parquet_path: str, _key) -> pd.DataFrame:
+    """Read a runners mart and recompute `has_data` from the CURRENT cycle-time
+    mart, rather than trusting the value baked in when eBuild last ran.
+
+    Why this exists
+    ───────────────
+    `has_data` was the ONLY reason the eBuild rebuild was chained onto the end
+    of the cycle-time pipeline — refreshing one boolean meant re-pulling 24
+    months of MES buildplan over SQL. On 2026-08-03 that turned a 10-minute
+    cycle-time run into 67 minutes when MES dropped a connection.
+
+    Computing it here instead makes the flag MORE accurate, not less: it now
+    reflects the cycle-time mart as of this request, whereas the baked column
+    reflected whenever eBuild last ran. And it lets the two pipelines run on
+    their own schedules, failing independently.
+
+    Cached on BOTH files' mtimes, so either one changing recomputes.
+    Callers must treat the result as read-only (it is shared) — copy before
+    mutating.
+    """
+    df = pd.read_parquet(parquet_path)
+    if df.empty or "customer" not in df.columns or "assembly" not in df.columns:
+        return df
+    lut = _has_data_lookup()
+    df = df.copy()
+    df["has_data"] = [(_norma(a) in lut.get(_normc(c), set()))
+                      for c, a in zip(df["customer"], df["assembly"])]
+    return df
+
+
+def _read_runners(parquet: Path) -> pd.DataFrame:
+    """Runners mart with a freshly-computed has_data flag."""
+    from modules.cycle_time.config import CT_MART
+    return _runners_with_has_data(str(parquet), mart_key(parquet, CT_MART["assembly_summary"]))
 
 
 PROJECTION_WEEKS = 4  # forward window MES buildplan actually populates (see docs)
@@ -395,7 +445,7 @@ def ebuild_plant_runners(
                "planner": PLANNER_RUNNERS_PARQUET}.get(mode, PLANT_RUNNERS_PARQUET)
     if not parquet.exists():
         raise HTTPException(status_code=503, detail=f"{mode} plant-runners mart not built. POST /api/ebuild/refresh first.")
-    df = pd.read_parquet(parquet)
+    df = _read_runners(parquet)
 
     as_of = None
     try:
@@ -441,7 +491,7 @@ def ebuild_runners(
     if not parquet.exists():
         raise HTTPException(status_code=503, detail=f"{mode} runners mart not built.")
 
-    df = pd.read_parquet(parquet)
+    df = _read_runners(parquet)
     if customer:
         df = df[df["customer"].astype(str).str.casefold() == customer.casefold()]
 

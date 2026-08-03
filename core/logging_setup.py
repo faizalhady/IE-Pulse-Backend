@@ -64,7 +64,7 @@ MAIN_LOG = "pulse-backend.log"
 # Modules that get their own log file. A module's tag is derived from the logger
 # name, which is already __name__ everywhere — so this needs no code changes at
 # the call sites.
-MODULES = ("ole", "cycle-time", "ppqt", "ipk", "lbr")
+MODULES = ("ole", "cycle-time", "ppqt", "ipk", "lbr", "ebuild")
 
 _FMT = "%(asctime)s  %(levelname)-7s [%(module_tag)-10s] %(short)s: %(message)s"
 

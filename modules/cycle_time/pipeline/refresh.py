@@ -81,16 +81,17 @@ def run(mode: str = "incremental",
         log.error("Assembly-summary build failed — assembly_summary.parquet not written.")
         return False
 
-    # Chain the eBuild runner mart rebuild so the Plant Runners dashboard's
-    # has_data badges reflect the freshly-synced cycle-time data. Non-fatal —
-    # the cycle-time pipeline itself already succeeded.
-    try:
-        from api.routers.ebuild import build_runners_mart, build_projection_runners_mart
-        build_runners_mart(24)             # historical (units built, 24mo)
-        build_projection_runners_mart()    # projection (planned demand, ~4wk)
-        log.info("Chained eBuild runner mart rebuild complete (historical + projection).")
-    except Exception:
-        log.exception("Chained eBuild runner refresh failed (non-fatal) — run POST /api/ebuild/refresh manually.")
+    # NOTE: the eBuild runner rebuild used to be chained here, so the Plant
+    # Runners `has_data` badges would reflect freshly-synced cycle-time data.
+    # Removed 2026-08-03. That flag is a set-membership test against
+    # assembly_summary.parquet — milliseconds — but refreshing it meant
+    # re-pulling 24 MONTHS of MES buildplan over SQL. On 2026-08-03 a dropped
+    # MES connection turned a 10-minute cycle-time run into 67 minutes.
+    #
+    # `has_data` is now computed at READ time in api/routers/ebuild.py
+    # (_read_runners), cached on both marts' mtimes. That makes it MORE accurate
+    # than the baked column ever was, and lets eBuild run on its own schedule
+    # (IEPulse-eBuild-Refresh) so the two fail independently.
 
     elapsed = (datetime.now() - start).total_seconds()
     log.info(f"Cycle Time pipeline complete in {elapsed:.1f}s")
