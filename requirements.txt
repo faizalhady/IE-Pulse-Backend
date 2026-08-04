@@ -29,3 +29,8 @@ pyodbc==5.3.0           # MES / eDashboard SQL Server (SP_GET_SY_SMT_BUILDPLAN)
 
 # ─── MES JEMS Web API ────────────────────────────────────────────
 truststore==0.10.4      # validate TLS against the Windows cert store (Jabil internal CA)
+
+# ─── SMH upload (api/routers/smh.py) ─────────────────────────────
+python-multipart==0.0.32  # FastAPI needs this for ANY Form/File endpoint.
+                          # Without it the app raises at import - it does not
+                          # degrade, it fails to start at all.

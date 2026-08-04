@@ -8,14 +8,20 @@ Single entry point. Run this to refresh all mart data end-to-end.
   python pipeline/refresh.py --full           # nuke & re-read everything
 
 Modes
-  incremental — only reads CSV files newer than the last successful run.
-                Appends to existing parquet marts. PRESERVES historical
-                rows that have been deleted from the network share by
-                retention. Use this for routine / scheduled runs.
+  incremental — reads every file in the share and MERGES over the mart. Dates
+                the share covers are rebuilt from source; dates it no longer
+                holds are PRESERVED. Self-healing: a date missed or partially
+                read today is repaired on the next run. Use for all routine and
+                scheduled runs.
 
   full        — re-reads everything currently visible in the network share
                 and overwrites marts. Anything no longer in the share
                 is LOST. Use only for disaster recovery / schema migration.
+
+Incremental used to skip any date already in the mart, which made a missed
+date permanent and silently drifted two machines apart. It no longer does —
+see ingest.run() for what that cost us. There is deliberately no third
+"repair" mode: repair is what the normal run does.
 
 Steps
   1. ingest  — load raw sources, normalise, write Parquet

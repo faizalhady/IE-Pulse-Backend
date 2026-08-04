@@ -14,12 +14,13 @@ Endpoints kept at their historical paths for FE compatibility:
   GET  /api/ole/mh-breakdown, /api/ole/predict
   GET  /api/production
   GET  /api/paid-hours
-  GET  /api/smh, /api/smh-status
+  GET  /api/smh-status          (/api/smh + CRUD live in api/routers/smh.py)
   GET  /api/indirect-labor, /api/indirect-labor/entities
   GET  /api/shift-operators
   GET  /api/mh-distribution
 """
 
+import json
 import logging
 from typing import Optional
 
@@ -36,10 +37,52 @@ router = APIRouter(tags=["OLE"])
 
 @router.get("/api/health")
 def health():
+    """Mart presence AND ingest coverage.
+
+    `mart_ready` only ever said "the files exist", which was true throughout
+    the 2026-08-04 drift where the server was silently missing a day of
+    production. `coverage` is written by every ingest run and is what actually
+    answers "is this server up to date": status is `degraded` when the mart is
+    missing a date the share still holds.
+    """
     mart_files = {key: path.exists() for key, path in MART.items()}
+
+    coverage = {}
+    try:
+        state_file = MART["production"].parent.parent / ".ingest_state.json"
+        if state_file.exists():
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            coverage = state.get("coverage") or {}
+            coverage["last_run"] = state.get("last_run")
+    except Exception as e:                       # a broken state file must not 500 health
+        coverage = {"error": str(e)}
+
+    missing = coverage.get("missing_days") or []
+
+    # Staleness matters as much as coverage. A failed ingest does NOT rewrite
+    # the state file, so `coverage` would keep reporting the last GOOD run and
+    # read as healthy while the mart quietly ages. Ingest runs daily; 36h gives
+    # one missed run of slack before this complains.
+    hours_old = None
+    stale = False
+    last_run = coverage.get("last_run")
+    if last_run:
+        try:
+            hours_old = round(
+                (pd.Timestamp.now() - pd.Timestamp(last_run)).total_seconds() / 3600, 1
+            )
+            stale = hours_old > 36
+        except Exception:
+            pass
+
     return {
-        "status": "ok",
+        "status": "degraded" if (missing or stale or not all(mart_files.values())) else "ok",
         "mart_ready": all(mart_files.values()),
+        "coverage_ok": not missing,
+        "missing_days": missing,
+        "stale": stale,
+        "hours_since_last_ingest": hours_old,
+        "coverage": coverage,
         "timestamp": pd.Timestamp.now().isoformat(),
         "mart_files": mart_files,
     }
@@ -423,23 +466,9 @@ def get_paid_hours(
         c.close()
 
 
-@router.get("/api/smh")
-def get_smh(
-    workcell: Optional[str] = Query(None),
-    assembly: Optional[str] = Query(None),
-):
-    c = con()
-    try:
-        parquet(c, "smh")
-        clauses = []
-        if workcell:
-            clauses.append(f"workcell = '{workcell}'")
-        if assembly:
-            clauses.append(f"assembly = '{assembly}'")
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        return df_to_json(c.execute(f"SELECT * FROM smh {where} ORDER BY workcell, assembly").df())
-    finally:
-        c.close()
+# GET /api/smh now lives in api/routers/smh.py, backed by the `smh` SQLite
+# table rather than smh_lookup.parquet. The parquet is a snapshot from the last
+# pipeline run; the SMH page has to show what an edit just did.
 
 
 @router.get("/api/smh-status")

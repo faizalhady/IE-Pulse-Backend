@@ -91,6 +91,116 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_saved_reports_owner
                 ON saved_reports (module, report_type, owner_ntid);
+
+            -- Access, modelled the way people actually describe it:
+            -- ONE ROW PER PERSON, not one per grant.
+            --
+            -- The first cut stored a row per (person, scope) pair, which meant
+            -- someone who led two workcells and admin'd an app appeared three
+            -- times in the table with no obvious relationship between the rows.
+            -- Splitting the person from the things they own fixes that: the
+            -- list reads as people, and the detail hangs off them.
+            --
+            --   level   what they ARE          viewer < admin < super_admin < developer
+            --   apps    where that applies     'all', or a CSV like 'ole,cycle_time'
+            --   workcells (other table)        what they LEAD - zero or many
+            --
+            -- `level` is global authority; leading a workcell is a separate
+            -- fact. Someone can lead three workcells and still be a viewer
+            -- everywhere else, which is the common case.
+            CREATE TABLE IF NOT EXISTS user_access (
+                ntid        TEXT    PRIMARY KEY,
+                name        TEXT,
+                email       TEXT,
+                level       TEXT    NOT NULL DEFAULT 'viewer'
+                            CHECK (level IN ('viewer','admin','super_admin','developer')),
+                -- 'all' rather than listing every app, so adding a module does
+                -- not silently narrow anyone's existing access.
+                apps        TEXT    NOT NULL DEFAULT 'all',
+                -- Copied from headcount at the time they were added, not joined
+                -- live: this backend runs as LocalSystem and cannot authenticate
+                -- to AD_GET as a person, so the browser supplies them. Stale by
+                -- design — re-save a person to refresh.
+                position    TEXT,
+                customer    TEXT,
+                added_by    TEXT,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                updated_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+            );
+
+            -- Which workcells a person leads. Separate table because it is
+            -- genuinely many-per-person, and because "who leads ASP?" should be
+            -- an index lookup, not a string search through a CSV column.
+            CREATE TABLE IF NOT EXISTS user_workcells (
+                ntid        TEXT    NOT NULL,
+                workcell    TEXT    NOT NULL,
+                is_primary  INTEGER NOT NULL DEFAULT 0,   -- addressed first in email
+                PRIMARY KEY (ntid, workcell)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_workcells_wc
+                ON user_workcells (workcell);
+
+            -- Notification opt-ins, keyed so a second report type costs a row
+            -- rather than a migration. Today there is one key: 'ole_smh'.
+            CREATE TABLE IF NOT EXISTS user_notifications (
+                ntid        TEXT    NOT NULL,
+                key         TEXT    NOT NULL,   -- 'ole_smh' | future report types
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (ntid, key)
+            );
+
+            -- Standard Man Hours per unit — the NUMERATOR of every OLE number.
+            --
+            -- Was ten HTML-disguised .xls files under data/raw/, re-parsed on
+            -- every pipeline run. They are still accepted (bulk upload), but
+            -- this table is now the source of truth: ingest_smh() reads here,
+            -- not from disk. That is what makes SMH editable from the UI at
+            -- all — an edit written to the parquet mart was overwritten by the
+            -- next refresh.
+            --
+            -- An edit here is RETROACTIVE. compute.py rebuilds ole_computed
+            -- from the whole production history each run, so adding an SMH
+            -- value today changes last month's OLE too. That is intended: the
+            -- standard hour was always that number, we just hadn't recorded it.
+            --
+            -- smh_value > 0 is enforced here, not merely validated in the
+            -- router. A zero reads identically to "no SMH" in compute.py's
+            -- LEFT JOIN, so a row storing 0 would be an invisible way to break
+            -- a workcell's OLE. Deleting the row is the honest way to say "not
+            -- known". smh_store.MIN_SMH additionally rejects decimal-place
+            -- errors (values below 1e-4); that floor is business policy, so it
+            -- lives in code where it can carry its reasoning, not in a CHECK.
+            CREATE TABLE IF NOT EXISTS smh (
+                workcell    TEXT NOT NULL,          -- WORKCELL_CONFIG key
+                assembly    TEXT NOT NULL,          -- AssemblyNumber from MES
+                smh_value   REAL NOT NULL CHECK (smh_value > 0),
+                scan_stage  TEXT,                   -- SMT | Backend | BoxBuild
+                stage_label TEXT,
+                plant       TEXT,
+                source      TEXT NOT NULL DEFAULT 'manual',  -- 'xls' | 'manual'
+                updated_by  TEXT,                   -- ntid
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (workcell, assembly)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_smh_workcell ON smh (workcell);
+
+            -- Append-only. SMH edits move the plant's headline number, so
+            -- "who changed this and what was it before" has to survive the
+            -- row being edited again or deleted outright.
+            CREATE TABLE IF NOT EXISTS smh_audit (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                workcell   TEXT NOT NULL,
+                assembly   TEXT NOT NULL,
+                action     TEXT NOT NULL,           -- create | update | delete | import
+                old_value  REAL,                    -- NULL on create/import
+                new_value  REAL,                    -- NULL on delete
+                changed_by TEXT,
+                changed_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_smh_audit_row
+                ON smh_audit (workcell, assembly, changed_at DESC);
         """)
     _migrate_saved_reports()
 

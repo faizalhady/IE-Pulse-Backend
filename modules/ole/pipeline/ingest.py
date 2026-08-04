@@ -44,6 +44,7 @@ from modules.ole.config import (
     PRODUCTION_PREFIX,
     PAID_HOURS_RAW_PREFIX,
 )
+from modules.ole import smh_store
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
@@ -572,7 +573,13 @@ def _parse_smh_xls(path: Path, workcell: str) -> pd.DataFrame:
     return df[["workcell", "assembly", "smh_value", "scan_stage", "stage_label", "plant", "last_updated"]]
 
 
-def ingest_smh() -> pd.DataFrame:
+def parse_all_smh_files() -> pd.DataFrame:
+    """Parse every configured .xls into one frame.
+
+    No longer part of the refresh — SMH comes from SQLite now. This is the
+    import path: used by scripts/migrate_smh_to_sqlite.py and by the
+    upload endpoint, both of which feed smh_store.upsert_many().
+    """
     frames = []
     for workcell, path in SMH_FILES.items():
         if workcell not in WORKCELL_CONFIG:
@@ -585,12 +592,33 @@ def ingest_smh() -> pd.DataFrame:
             frames.append(df)
 
     if not frames:
-        log.error("No SMH data loaded.")
         return pd.DataFrame()
 
     df = pd.concat(frames, ignore_index=True)
-    df = df.drop_duplicates(subset=["workcell", "assembly"])
-    log.info(f"SMH lookup: {len(df)} total assembly entries across {df['workcell'].nunique()} workcells")
+    return df.drop_duplicates(subset=["workcell", "assembly"])
+
+
+def ingest_smh() -> pd.DataFrame:
+    """SMH from the `smh` SQLite table — NOT from the .xls files.
+
+    The files were the store until the UI needed to edit SMH; an edit written
+    anywhere downstream was wiped by the next refresh. They are still accepted
+    via the upload endpoint, which imports INTO this table.
+
+    Empty table is a hard stop, not a warning. Returning an empty frame here
+    would let compute.py join against nothing and publish a plant-wide OLE of
+    0% — a silent, plausible-looking wrong answer.
+    """
+    df = smh_store.load_lookup()
+    if df.empty:
+        log.error(
+            "SMH table is empty -- run scripts/migrate_smh_to_sqlite.py to import "
+            "the .xls files, or add values via /api/smh."
+        )
+        return pd.DataFrame()
+
+    log.info(f"SMH lookup: {len(df)} assembly entries across {df['workcell'].nunique()} "
+             f"workcells (source: SQLite)")
     return df
 
 
@@ -639,6 +667,88 @@ def _merge_with_existing(mart_path: Path, new_df: pd.DataFrame, label: str) -> p
     return combined
 
 
+def _share_unreachable() -> str | None:
+    """Return why the share is unusable, or None if it looks fine.
+
+    A run that cannot see the share reads nothing, merges nothing, and — before
+    this check — still logged `Pipeline complete` and `RUN OK`. That happened on
+    2026-08-04: an ingest with zero files reported success in 3.3 seconds. A
+    scheduled task failing that way every night is invisible.
+
+    Checked before any parsing so the failure names the cause, rather than
+    surfacing later as the misleading "mart would be empty".
+    """
+    for label, dirs, prefix in (
+        ("production", [NETWORK_PATH, RAWDATA_PATH], PRODUCTION_PREFIX),
+        ("paid hours", [RAWDATA_PATH],               PAID_HOURS_RAW_PREFIX),
+    ):
+        reachable = False
+        found     = 0
+        for d in dirs:
+            try:
+                found += sum(1 for _ in d.glob(f"{prefix}*.csv"))
+                reachable = True          # listed without raising
+            except Exception as e:
+                log.error("  Cannot access %s: %s", d, e)
+        if not reachable:
+            return f"{label}: none of {[str(d) for d in dirs]} could be listed"
+        if found == 0:
+            return f"{label}: no {prefix}*.csv files found in {[str(d) for d in dirs]}"
+    return None
+
+
+def _verify_coverage(prod: pd.DataFrame, hours: pd.DataFrame) -> dict:
+    """Every date the share still holds must be in the mart. Report what isn't.
+
+    The 2026-08-04 drift went unnoticed for weeks because a run that silently
+    skipped a date still logged success. Reading the whole share (above) stops
+    new gaps forming; this is the alarm for when something else does — a file
+    that fails to parse, a share that vanishes mid-run, a workcell filtered out
+    by a mapping change.
+
+    Cheap on purpose: production files are one day each, so their filenames are
+    the expected date set. No extra I/O beyond a directory listing.
+    """
+    result: dict = {"checked_at": datetime.now().isoformat(timespec="seconds")}
+    try:
+        date_re = re.compile(r"(\d{8})\.csv$")
+        share_dates = sorted({
+            datetime.strptime(m.group(1), "%Y%m%d").date()
+            for f in _find_csv_files(PRODUCTION_PREFIX, [NETWORK_PATH, RAWDATA_PATH])
+            if (m := date_re.search(f.name))
+        })
+        if not share_dates:
+            result["error"] = "no production files visible in the share"
+            log.warning("  Coverage check skipped: %s", result["error"])
+            return result
+
+        mart_dates = set(pd.to_datetime(prod["date"]).dt.date.dropna().unique())
+        missing = [str(d) for d in share_dates if d not in mart_dates]
+
+        result["share_from"]  = str(share_dates[0])
+        result["share_to"]    = str(share_dates[-1])
+        result["share_days"]  = len(share_dates)
+        result["missing_days"] = missing
+        result["paid_hours_from"] = str(pd.to_datetime(hours["date"]).min().date())
+        result["paid_hours_to"]   = str(pd.to_datetime(hours["date"]).max().date())
+
+        if missing:
+            # ERROR, not warning: a hole here is wrong OLE on a dashboard people
+            # make decisions from, and it will not fix itself if the share file
+            # is deleted before the next run.
+            log.error("  COVERAGE GAP -- %d share date(s) missing from the mart: %s",
+                      len(missing), ", ".join(missing[:10]) + (" ..." if len(missing) > 10 else ""))
+        else:
+            log.info("  Coverage OK -- all %d share dates present in the mart (%s .. %s)",
+                     len(share_dates), share_dates[0], share_dates[-1])
+    except Exception as e:
+        # Never fail the run over the self-check; a broken alarm must not stop
+        # a good ingest from being written.
+        result["error"] = str(e)
+        log.warning("  Coverage check failed: %s", e)
+    return result
+
+
 def run(mode: str = "incremental") -> bool:
     """
     mode='incremental' (default) — only reads files newer than the last successful
@@ -648,6 +758,26 @@ def run(mode: str = "incremental") -> bool:
     mode='full'                   — re-reads everything currently in the share and
                                     overwrites marts. Loses anything no longer in
                                     the share. Use for disaster recovery only.
+
+    Incremental re-reads the WHOLE share every run — it does not skip dates
+    ─────────────────────────────────────────────────────────────────────────
+    It used to. Every date already in the mart was pre-loaded into
+    `exclude_dates` and stitching skipped it, which made a date's first ingest
+    permanent: if the machine was down when a file landed, or read a file that
+    was later re-exported with fuller data, the gap froze. No later run could
+    correct it, and every run still reported success.
+
+    That cost us a day of debugging on 2026-08-04. The server was missing all
+    of 2026-07-29 production while holding that day's paid hours, so W31 read
+    49.1% against local's 57.2%; its paid-hours mart was also ~68k hours short
+    across June. Two machines, same code, same state file, both "OK".
+
+    Re-reading everything and merging costs ~5 seconds, which is what the
+    skipping was buying. Incremental is now self-healing: a date missed today
+    is repaired on the next run, with no operator involvement.
+
+    `since` is still tracked and logged as a high-water mark, but it no longer
+    gates which files are read. It is diagnostic, not control flow.
     """
     if mode not in ("incremental", "full"):
         log.error(f"Unknown ingest mode: {mode!r}")
@@ -657,36 +787,27 @@ def run(mode: str = "incremental") -> bool:
     log.info(f"INGEST  starting  (mode={mode})")
     log.info("=" * 60)
 
+    # Fail before doing anything, not after silently producing nothing.
+    problem = _share_unreachable()
+    if problem:
+        log.error("SHARE UNREACHABLE -- %s", problem)
+        log.error("Aborting: the mart is UNCHANGED and still serving its previous data, "
+                  "which is now going stale. Fix share access and re-run.")
+        return False
+
     state = _load_state() if mode == "incremental" else {}
-    prod_since  = state.get("production")        if mode == "incremental" else None
-    hours_since = state.get("paid_hours_raw")    if mode == "incremental" else None
-
-    # Pre-load dates already in the parquet marts so stitching skips them.
-    # Full mode: marts get wiped, no point pre-loading → pass None.
-    prod_exclude_dates  = None
-    hours_exclude_dates = None
     if mode == "incremental":
-        log.info(f"  Production high-water mark:  {prod_since or '(none — first run)'}")
-        log.info(f"  Paid hours high-water mark:  {hours_since or '(none — first run)'}")
-        if MART["production"].exists():
-            try:
-                prod_exclude_dates = set(
-                    pd.to_datetime(pd.read_parquet(MART["production"])["date"])
-                      .dt.date.dropna().unique()
-                )
-            except Exception as e:
-                log.warning(f"  Could not pre-load production dates ({e}); proceeding without exclusion.")
-        if MART["paid_hours"].exists():
-            try:
-                hours_exclude_dates = set(
-                    pd.to_datetime(pd.read_parquet(MART["paid_hours"])["date"])
-                      .dt.date.dropna().unique()
-                )
-            except Exception as e:
-                log.warning(f"  Could not pre-load paid-hours dates ({e}); proceeding without exclusion.")
+        log.info(f"  Production high-water mark:  {state.get('production')    or '(none — first run)'}")
+        log.info(f"  Paid hours high-water mark:  {state.get('paid_hours_raw') or '(none — first run)'}")
+        log.info("  Reading the full share and merging (high-water marks are diagnostic only).")
 
-    prod_new  = ingest_production(since=prod_since,  exclude_dates=prod_exclude_dates)
-    hours_new = ingest_paid_hours(since=hours_since, exclude_dates=hours_exclude_dates)
+    # since=None / exclude_dates=None in BOTH modes, deliberately.
+    #
+    # Passing a `since` or an exclusion set is what made a missed or partial
+    # date permanent — see the note in this function's docstring. The mart
+    # merge (below) is what protects history, not the read filter.
+    prod_new  = ingest_production(since=None, exclude_dates=None)
+    hours_new = ingest_paid_hours(since=None, exclude_dates=None)
     smh       = ingest_smh()  # SMH lives locally, no retention concern → always full
 
     if smh.empty:
@@ -695,7 +816,10 @@ def run(mode: str = "incremental") -> bool:
 
     if mode == "incremental":
         # MERGE NEW WITH EXISTING — preserves rows already in mart even if files
-        # have been deleted from the share. All-column dedup absorbs overlap.
+        # have been deleted from the share. new_df covers the whole share window,
+        # so that window is rebuilt from source while everything older survives.
+        # This is the ONLY thing protecting pre-retention history; the read
+        # filter used to do it too, and that redundancy is what hid the bug.
         prod  = _merge_with_existing(MART["production"], prod_new,  "raw_production")
         hours = _merge_with_existing(MART["paid_hours"], hours_new, "raw_paid_hours")
     else:
@@ -730,6 +854,9 @@ def run(mode: str = "incremental") -> bool:
     if latest_hours: new_state["paid_hours_raw"]  = latest_hours
     new_state["last_run"]      = datetime.now().isoformat(timespec="seconds")
     new_state["last_run_mode"] = mode
+    # Persisted so /api/health can report it without re-reading the share —
+    # that is what makes a gap visible without anyone running a script.
+    new_state["coverage"]      = _verify_coverage(prod, hours)
     _save_state(new_state)
 
     log.info("Mart written:")
