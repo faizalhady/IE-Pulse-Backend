@@ -34,3 +34,4 @@ truststore==0.10.4      # validate TLS against the Windows cert store (Jabil int
 python-multipart==0.0.32  # FastAPI needs this for ANY Form/File endpoint.
                           # Without it the app raises at import - it does not
                           # degrade, it fails to start at all.
+PyJWT==2.10.1

@@ -26,9 +26,10 @@ Endpoints:
 import logging
 from typing import Literal, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from core.auth import require_level, verified_ntid
 from core.database import get_conn
 
 log = logging.getLogger(__name__)
@@ -105,13 +106,21 @@ def list_users():
 
 
 @router.get("/me/{ntid}")
-def effective_access(ntid: str):
+def effective_access(ntid: str, caller: str = Depends(verified_ntid)):
     """What this person may do — the shape a permission check needs.
 
     `all_workcells` is true for super_admin and developer: enumerating every
     workcell for them would go stale the moment one is added, and "can edit
     anything" is the actual intent.
     """
+    if ntid.lower() != caller.lower():
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT level FROM user_access WHERE lower(ntid) = lower(?)", (caller,)
+            ).fetchone()
+        if not row or row["level"] not in ("admin", "super_admin", "developer"):
+            raise HTTPException(403, "You can only look up your own access.")
+
     with get_conn() as conn:
         users = _load_users(conn, ntid)
     if not users:
@@ -173,7 +182,7 @@ def recipients(key: str = Query("ole_smh", description="Notification key, e.g. '
     }
 
 
-@router.put("/{ntid}")
+@router.put("/{ntid}", dependencies=[Depends(require_level("developer"))])
 def upsert_user(ntid: str, body: UserIn):
     apps = ",".join(body.apps) if body.apps else "all"
     with get_conn() as conn:
@@ -209,7 +218,7 @@ def upsert_user(ntid: str, body: UserIn):
     return user
 
 
-@router.delete("/{ntid}")
+@router.delete("/{ntid}", dependencies=[Depends(require_level("developer"))])
 def delete_user(ntid: str):
     with get_conn() as conn:
         cur = conn.execute("DELETE FROM user_access WHERE lower(ntid) = lower(?)", (ntid,))
