@@ -1529,7 +1529,11 @@ def _demand_frame() -> pd.DataFrame:
         if f.exists():
             d = pd.read_parquet(f)
             d["src"] = "mes" if name.startswith("projection") else "planner"
-            frames.append(d[["plant", "customer", "assembly", "units", "src"]])
+            for c in ("first_start", "planned_finish"):
+                if c not in d.columns:
+                    d[c] = pd.NaT
+            frames.append(d[["plant", "customer", "assembly", "units", "src",
+                             "first_start", "planned_finish"]])
     if not frames:
         return pd.DataFrame(columns=["plant", "customer", "assembly", "units", "sources"])
 
@@ -1551,9 +1555,15 @@ def _demand_frame() -> pd.DataFrame:
     dom = (d.groupby(["customer", "assembly", "plant"], as_index=False)["units"].sum()
              .sort_values("units", ascending=False)
              .drop_duplicates(["customer", "assembly"])[["customer", "assembly", "plant"]])
+    for c in ("first_start", "planned_finish"):
+        d[c] = pd.to_datetime(d[c], errors="coerce")
     agg = (d.groupby(["customer", "assembly"], as_index=False)
              .agg(units=("units", "sum"),
-                  sources=("src", lambda s: "+".join(sorted(set(s))))))
+                  sources=("src", lambda s: "+".join(sorted(set(s)))),
+                  # earliest start = the next time this model hits the floor;
+                  # latest finish = when the current demand for it runs out.
+                  next_build=("first_start", "min"),
+                  last_build=("planned_finish", "max")))
     return agg.merge(dom, on=["customer", "assembly"], how="left")
 
 
@@ -1576,6 +1586,19 @@ def _completion_demand(_key) -> dict:
     keep = [c for c in ("status", "source", "expected", "present", "no_ct", "not_in_iedb",
                         "unmapped", "non_iedb", "actual_steps", "coverage") if c in st.columns]
     out = dem.merge(st[["_k"] + keep].drop_duplicates("_k"), on="_k", how="left")
+
+    # LBR% and IPK trolleys — the two line-design indicators. Only meaningful
+    # once a model's route is complete, so they are frequently null; the table
+    # shows a dash rather than pretending zero.
+    lm_path = CT_MART["line_metrics"]
+    if lm_path.exists():
+        lm = pd.read_parquet(lm_path)[["customer", "assembly", "lbr", "ipk_trolleys",
+                                       "bottleneck_ct", "station_count"]]
+        lm["_k"] = (lm["customer"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+                    + "|"
+                    + lm["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True))
+        out = out.merge(lm.drop(columns=["customer", "assembly"]).drop_duplicates("_k"),
+                        on="_k", how="left")
     out["status"] = out["status"].fillna("not_checked")
     out = out.sort_values("units", ascending=False).reset_index(drop=True)
     out["rank"] = out.index + 1
