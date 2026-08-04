@@ -14,6 +14,7 @@ Endpoints:
 
 import logging
 import math
+import re
 import threading
 from datetime import datetime
 from functools import lru_cache
@@ -1478,6 +1479,189 @@ def ct_completion(
         "count": len(df),
         "counts": df["status"].value_counts().to_dict() if len(df) else {},
         "models": _df_to_json(df),
+    }
+
+
+# ─── Demand-scoped completion (the Incompletion Report page) ─────────────────
+# The plain /completion endpoint lists whatever is in the mart, in no useful
+# order. This one answers the question the report actually asks: "of the models
+# we are building and about to build, which have complete cycle times?"
+#
+# Demand = MES projection (SP_GET_SY_SMT_BUILDPLAN, ~4wk forward) UNION planner
+# demand (planners' Excel, ~13wk). Neither alone is enough — the Excel covers 18
+# workcells, MES covers 39 — so the union is the real scope. Ranked by units,
+# because volume is heavily concentrated: the top 500 models are 88% of it.
+_DEMAND_MARTS = ("projection_runners.parquet", "planner_runners.parquet")
+
+# MES plant codes -> the grouping the floor actually uses.
+_PLANT_REGION = {"JBK": "Batu Kawan", "Plant 1": "Penang Island", "JPE": "Penang Island",
+                 "Unassigned": "Other"}
+
+
+def _canonical_customers() -> dict:
+    """normalised name -> the spelling the Cycle Time module uses.
+
+    MES, the planners' Excel and IEDB each spell workcells differently — the
+    demand marts contain RESMED *and* ResMed, MASIMO *and* Masimo. Left alone
+    they show up as separate workcells in the picker and split one workcell's
+    models across two rows. CT_CUSTOMERS is the canonical list, so everything
+    collapses onto its spelling; anything it doesn't know keeps the first
+    spelling seen.
+    """
+    return {_cnorm_key(c["customer"]): c["customer"] for c in CT_CUSTOMERS}
+
+
+def _cnorm_key(s) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(s).upper())
+
+
+def _demand_frame() -> pd.DataFrame:
+    """One row per (customer, assembly): summed demand units + dominant plant.
+
+    A model can be planned in more than one plant (INFINERA runs in both JBK and
+    Plant 1), so the plant shown is the one with the most units — same rule
+    eBuild uses for customer_plant.
+    """
+    eb = CT_MART["raw"].parent.parent / "ebuild"
+    frames = []
+    for name in _DEMAND_MARTS:
+        f = eb / name
+        if f.exists():
+            d = pd.read_parquet(f)
+            d["src"] = "mes" if name.startswith("projection") else "planner"
+            frames.append(d[["plant", "customer", "assembly", "units", "src"]])
+    if not frames:
+        return pd.DataFrame(columns=["plant", "customer", "assembly", "units", "sources"])
+
+    d = pd.concat(frames, ignore_index=True)
+    d["units"] = pd.to_numeric(d["units"], errors="coerce").fillna(0)
+
+    # Collapse spelling variants BEFORE any grouping, or one workcell becomes two.
+    canon = _canonical_customers()
+    d["_ck"] = d["customer"].map(_cnorm_key)
+    first_seen = d.drop_duplicates("_ck").set_index("_ck")["customer"].to_dict()
+    d["customer"] = [canon.get(k, first_seen.get(k, c))
+                     for k, c in zip(d["_ck"], d["customer"])]
+    d = d.drop(columns=["_ck"])
+    # A handful of planner rows carry no plant (Cohu). Without this they vanish
+    # from the picker while still appearing in the table — a workcell you can
+    # see but cannot filter to.
+    d["plant"] = d["plant"].fillna("Unassigned")
+    # dominant plant = most units for that model
+    dom = (d.groupby(["customer", "assembly", "plant"], as_index=False)["units"].sum()
+             .sort_values("units", ascending=False)
+             .drop_duplicates(["customer", "assembly"])[["customer", "assembly", "plant"]])
+    agg = (d.groupby(["customer", "assembly"], as_index=False)
+             .agg(units=("units", "sum"),
+                  sources=("src", lambda s: "+".join(sorted(set(s))))))
+    return agg.merge(dom, on=["customer", "assembly"], how="left")
+
+
+@lru_cache(maxsize=8)
+def _completion_demand(_key) -> dict:
+    """Completion status joined to demand, ranked by units. Cached on the mtimes
+    of every mart it reads, so any refresh invalidates it exactly."""
+    dem = _demand_frame()
+    if dem.empty:
+        return {"scope": {}, "models": [], "counts": {}, "unchecked": 0}
+
+    st = pd.read_parquet(CT_MART["completion_status_v2"])
+    # Case and punctuation differ between MES, the planners' Excel and IEDB
+    # ("RESMED" vs "ResMed"), so join on a normalised key, not the raw strings.
+    for f in (dem, st):
+        f["_k"] = (f["customer"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+                   + "|"
+                   + f["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True))
+
+    keep = [c for c in ("status", "source", "expected", "present", "no_ct", "not_in_iedb",
+                        "unmapped", "non_iedb", "actual_steps", "coverage") if c in st.columns]
+    out = dem.merge(st[["_k"] + keep].drop_duplicates("_k"), on="_k", how="left")
+    out["status"] = out["status"].fillna("not_checked")
+    out = out.sort_values("units", ascending=False).reset_index(drop=True)
+    out["rank"] = out.index + 1
+    out["region"] = out["plant"].map(_PLANT_REGION).fillna("Other")
+
+    # Each workcell gets ONE home plant in the picker — the one where most of its
+    # demand sits. A few (INFINERA) genuinely run in two plants, but listing them
+    # twice means un-ticking a plant silently un-ticks the workcell under the
+    # other one too, and the plant checkbox lands in a permanent partial state.
+    # Filtering is by workcell name anyway, so nothing is lost: picking the
+    # workcell still includes every model it has, in whichever plant.
+    home = (out.groupby(["customer", "plant"], as_index=False)["units"].sum()
+               .sort_values("units", ascending=False)
+               .drop_duplicates("customer"))
+    by_plant: dict = {}
+    for plant, g in home.groupby("plant"):
+        by_plant[str(plant)] = sorted(g["customer"].astype(str).unique().tolist())
+
+    return {
+        "scope": {
+            "plants": by_plant,
+            "regions": {r: sorted({p for p, rr in _PLANT_REGION.items() if rr == r} & set(by_plant))
+                        for r in sorted(set(_PLANT_REGION.values()))},
+            "workcells": sorted(out["customer"].astype(str).unique().tolist()),
+        },
+        "counts": out["status"].value_counts().to_dict(),
+        "unchecked": int((out["status"] == "not_checked").sum()),
+        "models": _df_to_json(out.drop(columns=["_k"])),
+    }
+
+
+@router.get("/completion/demand")
+def ct_completion_demand(
+    plants:    Optional[str] = Query(None, description="Comma-separated plant codes (e.g. 'Plant 1,JBK'). Omit for all."),
+    workcells: Optional[str] = Query(None, description="Comma-separated workcells. Takes precedence over `plants`."),
+    status:    Optional[str] = Query(None, description="Comma-separated statuses to keep."),
+    limit:     int = Query(0, ge=0, le=5000, description="Top N by demand units. 0 = all."),
+):
+    """Completion status for the models we are actually building and planning.
+
+      → { as_of, count, total, counts:{status:n}, unchecked,
+          scope:{ plants:{plant:[workcell]}, regions:{}, workcells:[] },
+          models:[ { rank, plant, region, customer, assembly, units, sources,
+                     status, source, expected, present, coverage, ... } ] }
+
+    `scope` drives the plant/workcell picker, so the UI never has to know the
+    plant layout itself. Rows the completion run has not reached yet come back
+    as status "not_checked" rather than being dropped — a model missing from the
+    report is indistinguishable from one with no problems otherwise.
+    """
+    if not CT_MART["completion_status_v2"].exists():
+        raise HTTPException(status_code=503,
+                            detail="completion_status_v2 mart not built. Run scripts/run_completion_target.py first.")
+
+    eb = CT_MART["raw"].parent.parent / "ebuild"
+    data = _completion_demand(mart_key(CT_MART["completion_status_v2"],
+                                       *(eb / n for n in _DEMAND_MARTS)))
+    rows = data["models"]
+    total = len(rows)
+
+    if workcells:
+        want = {w.strip().casefold() for w in workcells.split(",") if w.strip()}
+        rows = [r for r in rows if str(r.get("customer", "")).casefold() in want]
+    elif plants:
+        want = {p.strip().casefold() for p in plants.split(",") if p.strip()}
+        rows = [r for r in rows if str(r.get("plant", "")).casefold() in want]
+    if status:
+        want = {s.strip() for s in status.split(",") if s.strip()}
+        rows = [r for r in rows if r.get("status") in want]
+    if limit:
+        rows = rows[:limit]
+
+    as_of = None
+    try:
+        as_of = datetime.fromtimestamp(CT_MART["completion_status_v2"].stat().st_mtime).isoformat()
+    except OSError:
+        pass
+
+    return {
+        "as_of": as_of,
+        "total": total,
+        "count": len(rows),
+        "counts": pd.Series([r["status"] for r in rows]).value_counts().to_dict() if rows else {},
+        "unchecked": data["unchecked"],
+        "scope": data["scope"],
+        "models": rows,
     }
 
 
