@@ -92,6 +92,35 @@ def verified_ntid(authorization: Optional[str] = Header(None)) -> str:
     return ntid
 
 
+RANK = {"viewer": 0, "admin": 1, "super_admin": 2, "developer": 3}
+
+
+def optional_ntid(authorization: Optional[str] = Header(None)) -> Optional[str]:
+    """The caller's NTID if they proved one, else None — never raises.
+
+    For endpoints that must answer anonymous callers rather than reject them,
+    e.g. the UI asking "may I edit?" before it knows who it is.
+    """
+    try:
+        return verified_ntid(authorization)
+    except HTTPException:
+        return None
+
+
+def level_of(ntid: Optional[str]) -> str:
+    """Their level in user_access. Absent means viewer — consistent with
+    /api/access/me, where never having been granted anything is not an error."""
+    from core.database import get_conn
+
+    if not ntid:
+        return "viewer"
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT level FROM user_access WHERE lower(ntid) = lower(?)", (ntid,)
+        ).fetchone()
+    return row["level"] if row else "viewer"
+
+
 def require_level(minimum: str):
     """Dependency factory: caller must be at least `minimum`.
 
@@ -99,21 +128,12 @@ def require_level(minimum: str):
     so revoking someone takes effect immediately instead of whenever their token
     happens to expire.
     """
-    from core.database import get_conn
-
-    rank = {"viewer": 0, "admin": 1, "super_admin": 2, "developer": 3}
-    if minimum not in rank:
+    if minimum not in RANK:
         raise ValueError(f"unknown level {minimum!r}")
 
     def dep(ntid: str = Depends(verified_ntid)) -> str:
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT level FROM user_access WHERE lower(ntid) = lower(?)", (ntid,)
-            ).fetchone()
-        # Absent means viewer — consistent with /api/access/me, where never having
-        # been granted anything is not an error.
-        level = row["level"] if row else "viewer"
-        if rank[level] < rank[minimum]:
+        level = level_of(ntid)
+        if RANK[level] < RANK[minimum]:
             log.warning("denied %s (%s) — needs %s", ntid, level, minimum)
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,

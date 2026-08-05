@@ -21,11 +21,10 @@ deliberate — see the `pending_refresh` flag on write responses, which the UI
 uses to say so. Letting the UI trigger a refresh would let anyone kick off a
 full recompute at will.
 
-⚠️ Identity here is IDENTIFICATION, not AUTHENTICATION — same trade-off as
-saved_reports.py. The caller sends its own NTID in `X-User-Ntid` and could send
-anyone's. The allowlist stops accidents (a curious user clicking Edit), not a
-determined one. Real auth needs the identity resolved server-side; until then
-do not put anything here that would be damaging to forge.
+Identity is AUTHENTICATED: every write needs a live AD_GET-signed token and
+`admin` or above in `user_access` (core/auth.py). It used to trust a plain
+`X-User-Ntid` header against a hardcoded pair of NTIDs, which anyone could send.
+Reads stay open — SMH values are not sensitive, and the OLE pages read them.
 """
 
 import logging
@@ -34,9 +33,10 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
+from core.auth import RANK, level_of, optional_ntid, require_level
 from modules.ole import smh_store
 from modules.ole.config import WORKCELL_CONFIG
 from modules.ole.smh_store import SmhError
@@ -45,10 +45,10 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/smh", tags=["SMH"])
 
-# Who may write. Two people today, so a list beats a lookup table.
-# Grows past a handful -> move to workcell_pic (core/database.py already
-# anticipates this) or an AD group, rather than editing code.
-SMH_EDITORS = {"4033375", "1268287"}
+# Who may write: admin or above in `user_access`, proven by AD_GET's signature.
+# Was a hardcoded pair of NTIDs read from a self-asserted X-User-Ntid header —
+# forgeable, and it went stale the moment the roster went live.
+SMH_MIN_LEVEL = "admin"
 
 
 class SmhCreate(BaseModel):
@@ -61,17 +61,9 @@ class SmhUpdate(BaseModel):
     smh_value: float = Field(..., gt=0)
 
 
-def _editor(ntid: Optional[str]) -> str:
-    """Resolve + authorise the caller. Raises 401/403."""
-    if not ntid or not ntid.strip():
-        raise HTTPException(status_code=401, detail="X-User-Ntid header is required")
-    who = ntid.strip()
-    if who not in SMH_EDITORS:
-        raise HTTPException(
-            status_code=403,
-            detail="You do not have permission to edit SMH values. Contact the IE team.",
-        )
-    return who
+# Every write goes through this one dependency — the four handlers below cannot
+# drift apart, and there is no second place to forget the check.
+_editor = require_level(SMH_MIN_LEVEL)
 
 
 def _ok(payload: dict) -> dict:
@@ -106,16 +98,19 @@ def get_history(
 
 
 @router.get("/can-edit")
-def can_edit(x_user_ntid: Optional[str] = Header(None)):
-    """Lets the UI show or hide edit controls without guessing the rule."""
-    return {"can_edit": bool(x_user_ntid and x_user_ntid.strip() in SMH_EDITORS)}
+def can_edit(ntid: Optional[str] = Depends(optional_ntid)):
+    """Lets the UI show or hide edit controls without guessing the rule.
+
+    Answers anonymous callers with false instead of 401 — a signed-out user
+    needs a rendered page, not an error.
+    """
+    return {"can_edit": RANK[level_of(ntid)] >= RANK[SMH_MIN_LEVEL]}
 
 
 # ─── Writes (allowlisted) ─────────────────────────────────────────────────────
 
 @router.post("")
-def create_smh(body: SmhCreate, x_user_ntid: Optional[str] = Header(None)):
-    who = _editor(x_user_ntid)
+def create_smh(body: SmhCreate, who: str = Depends(_editor)):
     cfg = WORKCELL_CONFIG.get(body.workcell, {})
     try:
         row = smh_store.create(
@@ -131,8 +126,7 @@ def create_smh(body: SmhCreate, x_user_ntid: Optional[str] = Header(None)):
 
 @router.put("/{workcell}/{assembly:path}")
 def update_smh(workcell: str, assembly: str, body: SmhUpdate,
-               x_user_ntid: Optional[str] = Header(None)):
-    who = _editor(x_user_ntid)
+               who: str = Depends(_editor)):
     try:
         row = smh_store.update(workcell, assembly, body.smh_value, by=who)
     except SmhError as e:
@@ -141,8 +135,7 @@ def update_smh(workcell: str, assembly: str, body: SmhUpdate,
 
 
 @router.delete("/{workcell}/{assembly:path}")
-def delete_smh(workcell: str, assembly: str, x_user_ntid: Optional[str] = Header(None)):
-    who = _editor(x_user_ntid)
+def delete_smh(workcell: str, assembly: str, who: str = Depends(_editor)):
     try:
         smh_store.delete(workcell, assembly, by=who)
     except SmhError as e:
@@ -154,14 +147,13 @@ def delete_smh(workcell: str, assembly: str, x_user_ntid: Optional[str] = Header
 async def import_xls(
     workcell: str = Form(...),
     file: UploadFile = File(...),
-    x_user_ntid: Optional[str] = Header(None),
+    who: str = Depends(_editor),
 ):
     """Bulk import one workcell's .xls — the same format IE already maintains.
 
     Which SMH column is read depends on the workcell's scan stage, so the
     workcell must be a known one; the parser cannot infer it from the file.
     """
-    who = _editor(x_user_ntid)
     if workcell not in WORKCELL_CONFIG:
         raise HTTPException(status_code=400, detail=f"Unknown workcell: {workcell}")
 

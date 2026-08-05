@@ -98,7 +98,26 @@ def _load_users(conn, ntid: Optional[str] = None) -> list[dict]:
     return users
 
 
-@router.get("")
+def _guard_demotion(conn, ntid: str, caller: str, new_level: Optional[str]) -> None:
+    """Stop the two ways a developer can lock the roster out of its own admins.
+
+    `new_level=None` means deletion. Demoting yourself is refused outright — the
+    endpoint that would undo it needs developer, so the fix is a hand-written
+    SQLite UPDATE on the server (which is exactly how 5 Aug went).
+    """
+    row = conn.execute(
+        "SELECT level FROM user_access WHERE lower(ntid) = lower(?)", (ntid,)).fetchone()
+    was_dev = bool(row) and row["level"] == "developer"
+    if not was_dev or new_level == "developer":
+        return
+    if ntid.lower() == caller.lower():
+        raise HTTPException(403, "You cannot remove your own developer access — ask another developer.")
+    n = conn.execute("SELECT count(*) c FROM user_access WHERE level = 'developer'").fetchone()["c"]
+    if n <= 1:
+        raise HTTPException(403, "This is the last developer — promote someone else first.")
+
+
+@router.get("", dependencies=[Depends(verified_ntid)])
 def list_users():
     with get_conn() as conn:
         users = _load_users(conn)
@@ -141,7 +160,7 @@ def effective_access(ntid: str, caller: str = Depends(verified_ntid)):
     }
 
 
-@router.get("/recipients")
+@router.get("/recipients", dependencies=[Depends(verified_ntid)])
 def recipients(key: str = Query("ole_smh", description="Notification key, e.g. 'ole_smh'.")):
     """Who to email for a notification, grouped by the workcell it concerns.
 
@@ -182,10 +201,11 @@ def recipients(key: str = Query("ole_smh", description="Notification key, e.g. '
     }
 
 
-@router.put("/{ntid}", dependencies=[Depends(require_level("developer"))])
-def upsert_user(ntid: str, body: UserIn):
+@router.put("/{ntid}")
+def upsert_user(ntid: str, body: UserIn, caller: str = Depends(require_level("developer"))):
     apps = ",".join(body.apps) if body.apps else "all"
     with get_conn() as conn:
+        _guard_demotion(conn, ntid, caller, body.level)
         conn.execute("""
             INSERT INTO user_access (ntid, name, email, position, customer, level, apps, added_by)
             VALUES (?,?,?,?,?,?,?,?)
@@ -218,9 +238,10 @@ def upsert_user(ntid: str, body: UserIn):
     return user
 
 
-@router.delete("/{ntid}", dependencies=[Depends(require_level("developer"))])
-def delete_user(ntid: str):
+@router.delete("/{ntid}")
+def delete_user(ntid: str, caller: str = Depends(require_level("developer"))):
     with get_conn() as conn:
+        _guard_demotion(conn, ntid, caller, None)
         cur = conn.execute("DELETE FROM user_access WHERE lower(ntid) = lower(?)", (ntid,))
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail=f"No access record for {ntid}.")

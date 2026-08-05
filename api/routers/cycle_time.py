@@ -23,8 +23,9 @@ from typing import Optional
 import duckdb
 import pandas as pd
 import pyarrow.parquet as pq
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
+from core.auth import require_level
 from core.mart_cache import mart_key
 from modules.cycle_time.config import (
     CT_CUSTOMERS,
@@ -258,7 +259,8 @@ def _run_ct_pipeline(mode: str) -> None:
         log.exception("Cycle Time pipeline crashed")
 
 
-@router.post("/refresh", status_code=202)
+@router.post("/refresh", status_code=202,
+             dependencies=[Depends(require_level("admin"))])
 def ct_refresh(
     background_tasks: BackgroundTasks,
     mode: str = Query("incremental", pattern="^(incremental|full)$"),
@@ -478,7 +480,7 @@ def _run_catalog_refresh():
         _CATALOG_STATE.update(status="error", finished=datetime.now().isoformat(), error=str(e))
 
 
-@router.post("/catalog/refresh")
+@router.post("/catalog/refresh", dependencies=[Depends(require_level("admin"))])
 def ct_catalog_refresh(background: BackgroundTasks):
     """Rebuild assembly_catalog.parquet in the background. Poll GET /catalog/status."""
     if _CATALOG_STATE["status"] == "running":
@@ -1435,7 +1437,7 @@ def _run_completion_refresh(top_n: int):
         _COMPLETION_STATE.update(status="error", finished=datetime.now().isoformat(), error=str(e))
 
 
-@router.post("/completion/refresh")
+@router.post("/completion/refresh", dependencies=[Depends(require_level("admin"))])
 def ct_completion_refresh(background: BackgroundTasks, top_n: int = Query(100, ge=1, le=500)):
     """Rebuild completion_status + completion_steps marts for the top-`top_n` runner
     union (all layers). Background — poll GET /completion/refresh/status. Needs VPN (MES)."""
@@ -1557,13 +1559,20 @@ def _demand_frame() -> pd.DataFrame:
              .drop_duplicates(["customer", "assembly"])[["customer", "assembly", "plant"]])
     for c in ("first_start", "planned_finish"):
         d[c] = pd.to_datetime(d[c], errors="coerce")
+    # "Next build" means the next one — so only starts from today onward count.
+    # Plain min(first_start) returned the FIRST start on record, which for 2,847
+    # of 3,913 models was a date in the past.
+    today = pd.Timestamp.today().normalize()
+    d["_upcoming"] = d["first_start"].where(d["first_start"] >= today)
     agg = (d.groupby(["customer", "assembly"], as_index=False)
              .agg(units=("units", "sum"),
                   sources=("src", lambda s: "+".join(sorted(set(s)))),
-                  # earliest start = the next time this model hits the floor;
-                  # latest finish = when the current demand for it runs out.
-                  next_build=("first_start", "min"),
-                  last_build=("planned_finish", "max")))
+                  next_build=("_upcoming", "min"),          # next start from today on
+                  last_build=("planned_finish", "max")))    # when current demand runs out
+    # A model already on the floor has no future start but its demand still runs.
+    # Without this it shows a blank Next Build and reads as "not building" — true
+    # for 1,266 models today, a third of the report.
+    agg["in_progress"] = agg["next_build"].isna() & (agg["last_build"] >= today)
     return agg.merge(dom, on=["customer", "assembly"], how="left")
 
 
@@ -1583,8 +1592,15 @@ def _completion_demand(_key) -> dict:
                    + "|"
                    + f["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True))
 
-    keep = [c for c in ("status", "source", "expected", "present", "no_ct", "not_in_iedb",
-                        "unmapped", "non_iedb", "actual_steps", "coverage") if c in st.columns]
+    keep = [c for c in ("status", "reason", "source", "expected", "present", "no_ct",
+                        "not_in_iedb", "unmapped", "non_iedb", "actual_steps",
+                        "coverage") if c in st.columns]
+    # The status mart still carries both spellings of a few workcells (RESMED and
+    # ResMed), so one model can have two rows — one judged, one a phantom "absent".
+    # Keep the row that actually saw production, or dedupe picks whichever landed
+    # first and a complete model reads as not_in_iedb.
+    if "actual_steps" in st.columns:
+        st = st.sort_values("actual_steps", ascending=False)
     out = dem.merge(st[["_k"] + keep].drop_duplicates("_k"), on="_k", how="left")
 
     # LBR% and IPK trolleys — the two line-design indicators. Only meaningful

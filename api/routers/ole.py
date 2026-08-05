@@ -25,9 +25,10 @@ import logging
 from typing import Optional
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from api.deps import con, parquet, df_to_json, where_clause, SHIFT_LABELS
+from core.auth import require_level
 from modules.ole.config import MART, WORKCELL_CONFIG, INDIRECT_LABOR_CONFIG
 
 log = logging.getLogger(__name__)
@@ -88,7 +89,7 @@ def health():
     }
 
 
-@router.post("/api/refresh")
+@router.post("/api/refresh", dependencies=[Depends(require_level("admin"))])
 def refresh():
     try:
         from modules.ole.pipeline.ingest import run as ingest_run

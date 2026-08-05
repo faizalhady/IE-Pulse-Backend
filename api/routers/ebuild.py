@@ -30,8 +30,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
+from core.auth import require_level
 from core.mart_cache import mart_key
 
 log = logging.getLogger(__name__)
@@ -333,7 +334,7 @@ def ebuild_buildplan(
     return {"count": len(rows), "rows": rows}
 
 
-@router.post("/refresh")
+@router.post("/refresh", dependencies=[Depends(require_level("admin"))])
 def ebuild_refresh(background: BackgroundTasks, months: int = Query(24, ge=1, le=60)):
     """Rebuild the runners mart in the background. Poll GET /refresh/status."""
     if _REFRESH_STATE["status"] == "running":

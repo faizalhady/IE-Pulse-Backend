@@ -12,7 +12,9 @@ Mounted at /api/lbr in api/main.py.
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+
+from core.auth import require_level
 
 from modules.lbr.config import LBR_MART
 
@@ -42,7 +44,8 @@ def lbr_health():
     }
 
 
-@router.post("/refresh", status_code=202)
+@router.post("/refresh", status_code=202,
+             dependencies=[Depends(require_level("admin"))])
 def lbr_refresh(
     background_tasks: BackgroundTasks,
     mode: str = Query("incremental", pattern="^(incremental|full)$"),

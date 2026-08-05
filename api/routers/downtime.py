@@ -7,10 +7,11 @@ Mounted under /api/downtime in api/main.py.
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from api.deps import row_to_dict
+from core.auth import verified_ntid
 from core.database import get_conn
 from modules.ole.config import WORKCELL_CONFIG
 
@@ -50,7 +51,9 @@ def list_downtime(
     return [row_to_dict(r) for r in rows]
 
 
-@router.post("/api/downtime", status_code=201)
+# Writes need a signed-in caller, not a privileged one — logging downtime is
+# the supervisor's daily job. Raise to require_level("admin") if that changes.
+@router.post("/api/downtime", status_code=201, dependencies=[Depends(verified_ntid)])
 def create_downtime(body: DowntimeCreate):
     if body.workcell not in WORKCELL_CONFIG:
         raise HTTPException(status_code=400, detail=f"Unknown workcell: {body.workcell}")
@@ -68,7 +71,8 @@ def create_downtime(body: DowntimeCreate):
     return row_to_dict(row)
 
 
-@router.delete("/api/downtime/{log_id}", status_code=204)
+@router.delete("/api/downtime/{log_id}", status_code=204,
+               dependencies=[Depends(verified_ntid)])
 def delete_downtime(log_id: int):
     with get_conn() as conn:
         deleted = conn.execute("DELETE FROM downtime_logs WHERE id = ?", (log_id,)).rowcount

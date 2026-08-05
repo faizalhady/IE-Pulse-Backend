@@ -15,23 +15,19 @@ Endpoints
 
 Identity
 ────────
-The caller sends its NTID (header `X-User-Ntid`, or the body on POST). The
-frontend gets it from /userinfo/RetrieveUserInfoNoParam.
-
-⚠️ This is IDENTIFICATION, not AUTHENTICATION. A caller can send any NTID, so
-this partitions saves per user — it does not protect them. That is an accepted
-trade-off for an internal tool storing report commentary. If anything sensitive
-ever goes in `payload`, resolve the identity server-side instead and revisit
-every handler here.
+The owner is taken from the AD_GET-signed token, never from the request. Any
+`owner_ntid` in the body is ignored — it used to be trusted, which let a caller
+read, overwrite or delete anyone's saves by naming them.
 """
 
 import json
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Header, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from core.auth import verified_ntid
 from core.database import get_conn
 
 log = logging.getLogger(__name__)
@@ -45,16 +41,12 @@ class SavedReportIn(BaseModel):
     module: str = Field(..., min_length=1, max_length=40)
     report_type: str = Field(..., min_length=1, max_length=40)
     name: str = Field(..., min_length=1, max_length=120)
-    owner_ntid: str = Field(..., min_length=1, max_length=40)
+    # Accepted so existing clients keep validating, then ignored — the owner is
+    # whoever the token says. Drop the field once the frontend stops sending it.
+    owner_ntid: Optional[str] = Field(None, max_length=40)
     owner_name: Optional[str] = Field(None, max_length=200)
     owner_email: Optional[str] = Field(None, max_length=200)
     payload: Any
-
-
-def _ntid(header_ntid: Optional[str]) -> str:
-    if not header_ntid:
-        raise HTTPException(status_code=400, detail="X-User-Ntid header is required")
-    return header_ntid.strip()
 
 
 @router.get("/health")
@@ -68,10 +60,9 @@ def health():
 def list_saved(
     module: str = Query(...),
     report_type: str = Query(...),
-    x_user_ntid: Optional[str] = Header(None),
+    ntid: str = Depends(verified_ntid),
 ):
     """List the caller's saves. Payload is omitted — the list view doesn't need it."""
-    ntid = _ntid(x_user_ntid)
     with get_conn() as conn:
         rows = conn.execute(
             """
@@ -87,8 +78,7 @@ def list_saved(
 
 
 @router.get("/{report_id}")
-def get_saved(report_id: int, x_user_ntid: Optional[str] = Header(None)):
-    ntid = _ntid(x_user_ntid)
+def get_saved(report_id: int, ntid: str = Depends(verified_ntid)):
     with get_conn() as conn:
         row = conn.execute(
             "SELECT * FROM saved_reports WHERE id = ? AND owner_ntid = ?",
@@ -113,7 +103,7 @@ def _payload_json(payload: Any) -> str:
 
 
 @router.post("")
-def create_report(body: SavedReportIn = Body(...)):
+def create_report(body: SavedReportIn = Body(...), ntid: str = Depends(verified_ntid)):
     """Create a NEW save. Always inserts.
 
     The `id` is the identity; `name` is only a label, so duplicate titles are
@@ -129,7 +119,7 @@ def create_report(body: SavedReportIn = Body(...)):
                 (module, report_type, name, owner_ntid, owner_name, owner_email, payload)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (body.module, body.report_type, body.name.strip(), body.owner_ntid,
+            (body.module, body.report_type, body.name.strip(), ntid,
              body.owner_name, body.owner_email, _payload_json(body.payload)),
         )
         row = conn.execute(
@@ -140,7 +130,8 @@ def create_report(body: SavedReportIn = Body(...)):
 
 
 @router.put("/{report_id}")
-def update_report(report_id: int, body: SavedReportIn = Body(...)):
+def update_report(report_id: int, body: SavedReportIn = Body(...),
+                  ntid: str = Depends(verified_ntid)):
     """Update an existing save in place — name and/or payload. Rename lives here."""
     with get_conn() as conn:
         cur = conn.execute(
@@ -151,7 +142,7 @@ def update_report(report_id: int, body: SavedReportIn = Body(...)):
              WHERE id = ? AND owner_ntid = ?
             """,
             (body.name.strip(), _payload_json(body.payload),
-             body.owner_name, body.owner_email, report_id, body.owner_ntid),
+             body.owner_name, body.owner_email, report_id, ntid),
         )
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Saved report not found")
@@ -163,8 +154,7 @@ def update_report(report_id: int, body: SavedReportIn = Body(...)):
 
 
 @router.delete("/{report_id}")
-def delete_saved(report_id: int, x_user_ntid: Optional[str] = Header(None)):
-    ntid = _ntid(x_user_ntid)
+def delete_saved(report_id: int, ntid: str = Depends(verified_ntid)):
     with get_conn() as conn:
         cur = conn.execute(
             "DELETE FROM saved_reports WHERE id = ? AND owner_ntid = ?",

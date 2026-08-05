@@ -12,7 +12,9 @@ Mounted at /api/ipk in api/main.py.
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+
+from core.auth import require_level
 
 from modules.ipk.config import IPK_MART
 
@@ -42,7 +44,8 @@ def ipk_health():
     }
 
 
-@router.post("/refresh", status_code=202)
+@router.post("/refresh", status_code=202,
+             dependencies=[Depends(require_level("admin"))])
 def ipk_refresh(
     background_tasks: BackgroundTasks,
     mode: str = Query("incremental", pattern="^(incremental|full)$"),
