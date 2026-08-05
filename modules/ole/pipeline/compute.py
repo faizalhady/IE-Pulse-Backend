@@ -169,10 +169,15 @@ def run() -> bool:
         MIN(p.date)                                             AS first_seen_date,
         MAX(p.date)                                             AS last_seen_date,
         COUNT(DISTINCT p.date)                                  AS active_days,
+        -- Two states only. There was a third, MISSING_SMH, for a row that
+        -- existed with value 0 — what the old .xls import produced from a blank
+        -- cell. smh_store._clean_value now refuses to store 0 ("if the value
+        -- isn't known, the row shouldn't exist"), so those assemblies have no
+        -- row at all and land in NOT_IN_SMH_DB. The branch was unreachable and
+        -- left the UI with a filter that matched nothing.
         CASE
-            WHEN s.assembly IS NULL  THEN 'NOT_IN_SMH_DB'
-            WHEN s.smh_value = 0     THEN 'MISSING_SMH'
-            ELSE                          'OK'
+            WHEN s.assembly IS NULL THEN 'NOT_IN_SMH_DB'
+            ELSE                         'OK'
         END                                                     AS smh_status
     FROM read_parquet('{MART["production"]}') p
     LEFT JOIN read_parquet('{MART["smh"]}') s
