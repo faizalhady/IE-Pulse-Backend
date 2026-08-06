@@ -9,14 +9,15 @@ WHAT CHANGED vs v1
      100% of its 7,752 "missing" verdicts false-ish (`PACKOUT` never equals
      `PACKOUT 1`). v2 uses a ladder: workbook first, then auto-match, and compares
      on a BASE key with the trailing instance number stripped.
-  2. STATUSES — v1 fused three different problems into `incomplete`. v2 splits:
-       unavailable  model not in IEDB at all
-       no_data      in IEDB, zero cycle time entered
-       route_gap    MES runs steps IEDB's route doesn't list  ← was "missing CT"
-       incomplete   step IS in IEDB's route but its cycle time is empty
+  2. STATUSES — four, worst-first, each with a `reason` that carries the detail:
+       incomplete     in IEDB with cycle times, but gaps against what the floor runs
+       no_cycle_time  EXISTS in the official IEDB, but not one cycle time entered
+       not_in_iedb    does not exist in the official IEDB at all
+       not_in_mes   no MES production found — not built yet, or workcell isn't on MES
        complete     every MES step it runs has a cycle time
-       unverified   has CT, but no MES production found to check against
-       non_mes      workcell isn't on MES — can't be checked
+     (7 statuses collapsed to 4 on 2026-08-05 — route_gap/no_data/unverified/
+     unavailable were separate columns saying the same thing four ways. The
+     distinction survives in `reason`; the breakdown report groups on it.)
   3. SOURCES — #21 (customer/day scan counts) is cached to disk per customer-day,
      so a re-run costs ~0 MES calls for days already pulled. #132 BoardHistory adds
      a per-serial view with TWO names per step (RouteStep + StepInstance) and the
@@ -25,6 +26,7 @@ WHAT CHANGED vs v1
      rework/variant steps that this model may not actually run).
 """
 
+import bisect
 import json
 import logging
 import re
@@ -43,12 +45,85 @@ _cnorm = lambda s: re.sub(r"[^A-Z0-9]", "", str(s).upper())       # customer key
 _snorm = lambda s: re.sub(r"\s+", " ", str(s).strip().upper())     # step display key
 _anorm = lambda s: re.sub(r"[^A-Z0-9]", "", str(s).upper())        # exact match key
 
-# BASE key — same as _anorm but with the trailing instance number dropped.
-# IEDB numbers a step per-model ("MA 1", "MA 2.5"); MES has no idea about that
-# number, and the workbook can only carry one. Matching on the base kills that
-# whole class of false misses. ponytail: loses "MA 1 has CT but MA 2 doesn't" —
+# An alias is a compound "CODE n - DISPLAY NAME", and the two sides disagree on
+# how much of it they store. IEDB writes the whole thing ("MA 1 - BACK MECH ASSY 1",
+# "TSTH 1 - TSTH TOP"); a workbook may write only the code ("MA 1", "PACKOUT 1").
+# Comparing the strings whole can therefore NEVER match those — which is exactly
+# what it did, and why R380-7868R9.0 read as a route gap on a step both sides
+# spell identically.
+#
+# Only the CODE is an identifier. The display name is free text: it disagrees
+# harmlessly ("TSTH1" vs "TSTH TOP") and agrees dangerously ("SCRB 1 - SCRT01"
+# would fuse with "SCRT 1 - SCRT01" — bottom printer read as top). So we parse
+# the code out and compare that.
+#
+# The trailing instance token goes too ("MA 2" ≡ "MA 1" ≡ "MA 2.1" ≡ "MA 1/2").
+# IEDB numbers steps per-model, MES has no idea about that number, and the
+# workbook can only carry one. ponytail: loses "MA 1 has CT but MA 2 doesn't" —
 # worth ~nothing, only 0.4% of IEDB route rows lack a cycle time at all.
-_base = lambda s: _anorm(re.sub(r"\s*\d+(\.\d+)?\s*$", "", str(s).strip().upper()))
+_code = lambda s: _anorm(re.sub(r"[\s\d./]+$", "", str(s).split("-")[0].strip().upper()))
+
+
+# Suffixes that still resolve to the base model's route, confirmed by Faiz
+# 2026-08-05: -SUB, -OP*, -S*, -FA, plus the repair/engineering variants.
+#
+# NOT here, on purpose:
+#   -OPT, -SFT, -Z2   not confirmed as sharing the base route
+#   bare letters      "EK050-66451N", "IN300-1074-203SDZ", "IN800-0673-201A1F"
+#                     look like revisions but are NOT — the catalogue carries
+#                     revision in its own column ('', 'D', 'A01' for those three)
+#                     and EK050-66401 / EK050-66451N are separate live parts.
+#                     Stripping them would fuse genuinely different assemblies.
+#
+# Boundaries are deliberately tight. A bare trailing "S" is only taken after a
+# DIGIT ("SKY900-212127-000S"), never after a letter — "AK11-CAP-9D3C6-TS" would
+# otherwise collapse into the real, separate part "AK11-CAP-9D3C6-T".
+_SUFFIX = re.compile(
+    "(?:"
+    r"[-_ ]?(?:H?RMA|CRMA|BRMA|FRU|EV\d*)"   # repair / engineering variant
+    r"|[-_ ]?SUB"                            # sub-assembly (often written with no dash)
+    r"|[-_ ](?:OP\d*|S\d*|FA)"               # build-stage marker, separated
+    r"|(?<=\d)(?:OP\d+|S\d*|FA)"             # ...or run straight onto a digit
+    ")$", re.I)
+
+
+def _desuffix(s: str) -> str:
+    v = str(s).strip().upper()
+    while True:
+        n = _SUFFIX.sub("", v)
+        if n == v:
+            return v
+        v = n
+
+
+_MIN_STEM = 6      # below this a "front name" is too generic to trust
+
+
+def _front_match(keys: list, lut: dict, k: str):
+    """Match on the FRONT of the model name: either side may carry extra tail.
+    `keys` is sorted anorm names, `lut` maps anorm -> the real name.
+
+    Faiz 2026-08-05: match the front, whatever the suffix. Catches
+    '8100-0774-R05' -> '8100-0774-R05-DEV' and every -OPT/-SFT/-Z2 style tail we
+    could not enumerate. It cannot invent a match: 'PCA-01803-20' still fails
+    against 'PCA-01803-10' because they diverge before the tail."""
+    if not k or len(k) < _MIN_STEM:
+        return None
+    i = bisect.bisect_left(keys, k)                 # IEDB name extends ours
+    if i < len(keys) and keys[i].startswith(k):
+        return lut[keys[i]]
+    for j in range(len(k) - 1, _MIN_STEM - 1, -1):  # ours extends an IEDB name
+        if k[:j] in lut:
+            return lut[k[:j]]
+    return None
+
+
+def _alias_name(s: str) -> str:
+    """The display half of a compound alias — everything after the first dash,
+    or the whole string when there is no dash. Free text: only ever consulted
+    for steps the workbook never mapped, never to overrule a mapped code."""
+    head, _, tail = str(s).partition("-")
+    return (tail.strip() or head.strip())
 
 _WINDOW_DAYS = 120
 _NON_MES = {"LAMMEC", "ADVANTEST"}        # verified-zero MES production
@@ -258,29 +333,87 @@ class Ctx:
             self.pknown.add(k)
             if isie:
                 self.pmap[k] = a
-        self._iedb, self._models = {}, {}
+        self._iedb, self._models, self._desuf, self._desufkeys = {}, {}, {}, {}
+        # The FULL IEDB catalogue, including assemblies with no cycle time. `raw`
+        # only holds rows that HAVE a cycle time, so a model that exists in IEDB
+        # but was never timed is missing from it — reading absence from `raw`
+        # alone reported 452 such models as "not in IEDB at all". Very different
+        # jobs: create the model, versus go and time the one already there.
+        self.catalog: dict = {}      # cnorm -> {anorm(name): original}
+        cat_path = CT_MART["assembly_catalog"]
+        if cat_path.exists():
+            cat = pd.read_parquet(cat_path)
+            cols = [c for c in ("assembly", "assembly_full") if c in cat.columns]
+            for c, *names in zip(cat["customer"], *(cat[c] for c in cols)):
+                d = self.catalog.setdefault(_cnorm(c), {})
+                for n in names:
+                    d.setdefault(_anorm(n), str(n).strip())
+            # TWO COUNTING UNITS, never mix them:
+            #   MODEL      = (customer, assembly name). What demand, MES and this
+            #                report mean by "a model". Revisions collapse into one.
+            #   ASSEMBLY_ID = (customer, assembly, revision). IEDB's own row unit,
+            #                and what its CustomerStatus report counts.
+            # Comparing our MODEL count to IEDB's ASSEMBLY_ID count made every
+            # workcell look short (KEYSIGHT 22,208 vs 33,933) and wrongly marked
+            # 706 models unverified. Same unit both sides -> 26/40 match exactly.
+            self._cat_n = (cat.groupby(cat["customer"].map(_cnorm))["assembly_id"]
+                              .nunique().to_dict())
+        self._catkeys = {c: sorted(d) for c, d in self.catalog.items()}
+
+        # Workcells where our catalogue snapshot is SMALLER than the assembly
+        # count IEDB itself reports. For those we cannot honestly say a model is
+        # "not in IEDB" — only that it is not in our copy. On 2026-08-05 the
+        # snapshot was a month old and short by 11,953 assemblies on KEYSIGHT
+        # alone, which made 898 "absent" verdicts unprovable.
+        self.short: set = set()
+        cs_path = CT_MART["customer_status"]
+        if cs_path.exists() and self.catalog:
+            cs = pd.read_parquet(cs_path)
+            have = getattr(self, "_cat_n", {})
+            for cd, n in zip(cs["CustomerDivision"], cs["NoOfAssemblies"]):
+                c = _cnorm(str(cd).split("/")[0])
+                if c in have and n and n > have[c]:
+                    self.short.add(c)
 
     def iedb(self, customer: str) -> dict:
-        """{assembly: {'ct': set(exact), 'ct_b': set(base), 'all_b': set(base),
-        'proc_b': set(base of process name), 'detail': [...] }}"""
+        """{assembly: {'ct_codes', 'all_codes', 'ct_names', 'all_names', 'detail'}}
+
+        Built from the ALIAS column only. `process` ("Assembly 2", "Link 1",
+        "Press 2", "THI 2") is a human display label, not an identifier — matching
+        against it manufactured 1,377 false "present" verdicts, because MES's
+        coarse route family ("LINK", "QC") collides with it by pure word overlap.
+        It is kept for display in `detail` and never used to decide anything."""
         if customer in self._iedb:
             return self._iedb[customer]
+        # Alias-less rows are KEPT. Filtering them out dropped the model from this
+        # dict entirely, so a model with 18 cycle times and a blank alias column
+        # (LIFE360 410-10152-00-Z1) fell through and was reported as "no cycle
+        # time" — the exact opposite of the truth. They contribute no match key,
+        # which is a real problem, but it is an alias-entry problem and classify()
+        # names it as one instead of lying about the cycle times.
         df = self.con.execute(f"""
             SELECT DISTINCT assembly, process, alias, sub_workcenter,
                    "order" AS ord, cycle_time_per_process AS ct
             FROM read_parquet('{self.raw}')
-            WHERE customer = ? AND priority = 1 AND alias IS NOT NULL
+            WHERE customer = ? AND priority = 1
         """, [customer]).fetchdf()
         d = {}
+        # Keyed on the STRIPPED name: 85 models were reported "not in IEDB" purely
+        # because the demand plan carried a trailing space or a literal tab
+        # ('M068459C002-2\t'). Only whitespace is normalised away — case and
+        # punctuation are load-bearing in these part numbers.
+        df["assembly"] = df["assembly"].astype(str).str.strip()
         for a, p, al, sw, od, ct in zip(df["assembly"], df["process"], df["alias"],
                                         df["sub_workcenter"], df["ord"], df["ct"]):
-            e = d.setdefault(a, {"ct": set(), "ct_b": set(), "all_b": set(),
-                                 "proc_b": set(), "detail": []})
-            has = not pd.isna(ct)
-            e["all_b"].add(_base(al))
-            e["proc_b"].add(_base(p)); e["proc_b"].add(_anorm(p))
-            if has:
-                e["ct"].add(_anorm(al)); e["ct_b"].add(_base(al))
+            e = d.setdefault(a, {"ct_codes": set(), "all_codes": set(), "ct_names": set(),
+                                 "all_names": set(), "any_ct": False, "detail": []})
+            has_ct = not pd.isna(ct)
+            e["any_ct"] |= has_ct
+            if not pd.isna(al):                      # no alias -> no match key
+                code, name = _code(al), _anorm(_alias_name(al))
+                e["all_codes"].add(code); e["all_names"].add(name)
+                if has_ct:
+                    e["ct_codes"].add(code); e["ct_names"].add(name)
             e["detail"].append({"process": p, "alias": al, "sub_workcenter": sw,
                                 "order": None if pd.isna(od) else int(od),
                                 "cycle_time": None if pd.isna(ct) else float(ct)})
@@ -291,10 +424,61 @@ class Ctx:
 
     def models(self, customer: str) -> set:
         if customer not in self._models:
-            self._models[customer] = set(self.con.execute(
+            self._models[customer] = {str(a).strip() for a in self.con.execute(
                 f"SELECT DISTINCT assembly FROM read_parquet('{self.raw}') WHERE customer = ?",
-                [customer]).fetchdf()["assembly"])
+                [customer]).fetchdf()["assembly"]}
         return self._models[customer]
+
+    def resolve(self, customer: str, assembly: str):
+        """Demand's model name -> the IEDB assembly that answers it, or None.
+
+        EXACT WINS. The suffix rule is only a fallback, never a rewrite of the
+        key: IEDB frequently holds both `X` and `X-RMA` as separate models, so
+        normalising both sides up front fused 1,590 of them. As a fallback it
+        cannot do that — an exact hit is taken before it is ever consulted."""
+        a = str(assembly).strip()
+        have = self.models(customer)
+        if a in have:
+            return a
+        if customer not in self._desuf:
+            # Keyed on anorm(desuffix(...)): demand writes 'AK-01-AKMCAC2-SUB'
+            # where IEDB has 'AK01-AKMCAC2', so the dashes have to go too. Safe
+            # only because this is reached after an exact miss.
+            m: dict = {}
+            for x in sorted(have):               # sorted -> deterministic winner
+                m.setdefault(_anorm(_desuffix(x)), x)
+            self._desuf[customer] = m
+            self._desufkeys[customer] = sorted(m)
+        d = self._desuf[customer]
+        k = _anorm(_desuffix(a))
+        return d.get(k) or _front_match(self._desufkeys[customer], d, k)
+
+    def in_catalog(self, cn: str, assembly: str) -> bool:
+        """Does the OFFICIAL IEDB list this model — exact, suffix, or front name."""
+        d = self.catalog.get(cn)
+        if not d:
+            return False
+        k = _anorm(str(assembly).strip())
+        if k in d or _anorm(_desuffix(assembly)) in d:
+            return True
+        return _front_match(self._catkeys[cn], d, k) is not None
+
+    def near(self, cn: str, assembly: str) -> str:
+        """The catalogue entry this model most likely IS, when nothing matched.
+        Surfaced rather than applied — `853-238767-003-OP2` and `-S1` and `-OP3`
+        all point at `853-238767-003`, and silently collapsing them would report
+        one route as covering four different build stages."""
+        keys = self._catkeys.get(cn)
+        if not keys:
+            return ""
+        k = _anorm(assembly)
+        i = bisect.bisect_left(keys, k)         # IEDB name extends ours
+        if i < len(keys) and keys[i].startswith(k) and keys[i] != k:
+            return self.catalog[cn][keys[i]]
+        for j in range(len(k) - 1, 5, -1):      # ours extends an IEDB name
+            if k[:j] in self.catalog[cn]:
+                return self.catalog[cn][k[:j]]
+        return ""
 
 
 def match_step(ctx: Ctx, cn: str, ie: dict, names: list[str]) -> tuple[str, str]:
@@ -302,14 +486,23 @@ def match_step(ctx: Ctx, cn: str, ie: dict, names: list[str]) -> tuple[str, str]
     `names` = the MES name(s) for this step — [StepInstance] from #21, or
     [StepInstance, RouteStep] from #132.
 
-    Ladder, first hit wins:
-      1. workbook says "not an IEDB step"      -> non_iedb
-      2. workbook alias, exact then base       -> present / (falls through)
-      3. any MES name vs IEDB alias base       -> present
-      4. any MES name vs IEDB process base     -> present
-      5. anything above found the step in the route but with NO cycle time -> no_ct
-      6. workbook had an alias but nothing matched -> not_in_iedb
-      7. no workbook entry, no auto-match      -> unmapped
+    The IEDB side offers exactly ONE identifier: the alias code. The MES side may
+    offer several, and they are NOT equal in weight:
+
+      1. workbook says "not an IEDB step"           -> non_iedb
+      2. workbook mapped this step to an alias      -> judge on THAT code, and stop
+      3. no workbook entry: try the MES names       -> code, then alias display name
+      4. nothing matched                            -> unmapped
+
+    Rung 2 is deliberately a dead end. Once the workbook has told us which IEDB
+    step this is, a miss means the route really lacks it — so we report the gap
+    instead of going fishing with the step's free text. Fishing is what produced
+    the false greens: `HLA 1 LINK` carries workbook alias `MA 1`, the model's IEDB
+    route has no MA at all, but the MES family label "LINK" collided with IEDB's
+    display name "Link 1" and the step was called complete. It proved nothing —
+    it never checked MA. Like looking someone up by employee ID: if the ID is not
+    found you report not found, you do not start matching on first names.
+
     Returns (status, alias_used).
     """
     alias = None
@@ -321,42 +514,95 @@ def match_step(ctx: Ctx, cn: str, ie: dict, names: list[str]) -> tuple[str, str]
     if alias is None and known:
         return "non_iedb", ""                    # workbook explicitly says not IEDB
 
-    keys = [_base(n) for n in names]
     if alias:
-        if _anorm(alias) in ie["ct"] or _base(alias) in ie["ct_b"]:
+        c = _code(alias)
+        if c in ie["ct_codes"]:
             return "present", alias
-        keys.insert(0, _base(alias))
-    if any(k in ie["ct_b"] for k in keys):
-        return "present", alias or ""
-    if any(k in ie["proc_b"] for k in keys):
-        return "present", alias or ""
-    if any(k in ie["all_b"] for k in keys):
-        return "no_ct", alias or ""              # in the route, cycle time is empty
-    return ("not_in_iedb", alias) if alias else ("unmapped", "")
+        if c in ie["all_codes"]:
+            return "no_ct", alias                # in the route, cycle time is empty
+        return "not_in_iedb", alias              # route genuinely lacks this step
+
+    # Unmapped step — now the MES free text is all we have, so use every bit of it
+    # against both halves of the IEDB alias.
+    keys = {_code(n) for n in names} | {_anorm(n) for n in names}
+    keys.discard("")
+    if keys & ie["ct_codes"] or keys & ie["ct_names"]:
+        return "present", ""
+    if keys & ie["all_codes"] or keys & ie["all_names"]:
+        return "no_ct", ""
+    return "unmapped", ""
 
 
 _STEP_COLS = ["customer", "assembly", "side", "name", "name2", "alias",
               "sub_workcenter", "order", "value", "status", "source"]
 
+# Model status -> the reasons it can carry. The status answers "how bad", the
+# reason answers "why", and the breakdown report groups on (status, reason).
+REASONS = {
+    "incomplete":    ("missing_ct", "missing_step", "missing_ct+step", "unmapped", "no_alias"),
+    "no_cycle_time": ("in_iedb_untimed",),
+    "not_in_iedb":   ("absent", "absent_unverified"),
+    "not_in_mes":  ("no_production", "workcell_not_on_mes"),
+    "complete":    ("",),
+}
+
 
 def classify(ctx: Ctx, customer: str, assembly: str, steps: list[tuple], source: str) -> tuple[dict, list]:
     """`steps` = [(names:list[str], order:int, qty:int), ...] already deduped."""
     cn = _cnorm(customer)
-    r = {"customer": customer, "assembly": assembly, "status": None, "source": source,
+    r = {"customer": customer, "assembly": assembly, "status": None, "reason": "",
+         "source": source,
          "expected": 0, "present": 0, "no_ct": 0, "not_in_iedb": 0, "unmapped": 0,
          "non_iedb": 0, "actual_steps": len(steps), "coverage": None,
-         "missing_ct": "", "gap_steps": ""}
+         "missing_ct": "", "gap_steps": "", "near_match": ""}
 
-    if assembly not in ctx.models(customer):
-        return {**r, "status": "unavailable", "actual_steps": 0, "source": "none"}, []
+    akey = ctx.resolve(customer, assembly)
+    if akey is None:
+        # Keep the MES route. Returning [] here meant the drawer showed an empty
+        # "MES ROUTE (ACTUAL)" for exactly the models where knowing what the floor
+        # runs matters most — IEDB has nothing, so the MES route is the only
+        # record of the process that exists.
+        # In IEDB's catalogue but untimed, or not in IEDB at all — same status,
+        # different job for whoever picks it up.
+        a = str(assembly).strip()
+        known = ctx.in_catalog(cn, a)
+        # Only claim "absent" when our catalogue is known-complete for this
+        # workcell; otherwise say so rather than assert a fact we cannot back.
+        if known:
+            return {**r, "status": "no_cycle_time", "reason": "in_iedb_untimed"}, [
+                {"customer": customer, "assembly": assembly, "side": "MES",
+                 "name": names[0], "name2": names[1] if len(names) > 1 else "",
+                 "alias": "", "sub_workcenter": None, "order": order, "value": qty,
+                 "status": "unmapped", "source": source}
+                for names, order, qty in sorted(steps, key=lambda x: (x[1], x[0][0]))]
+        why = "absent_unverified" if cn in ctx.short else "absent"
+        return {**r, "status": "not_in_iedb", "reason": why,
+                "near_match": ctx.near(cn, a)}, [
+            {"customer": customer, "assembly": assembly, "side": "MES",
+             "name": names[0], "name2": names[1] if len(names) > 1 else "",
+             "alias": "", "sub_workcenter": None, "order": order, "value": qty,
+             "status": "unmapped", "source": source}
+            for names, order, qty in sorted(steps, key=lambda x: (x[1], x[0][0]))]
     if cn in _NON_MES:
-        return {**r, "status": "non_mes", "actual_steps": 0, "source": "none"}, []
+        return {**r, "status": "not_in_mes", "reason": "workcell_not_on_mes",
+                "actual_steps": 0, "source": "none"}, []
 
-    ie = ctx.iedb(customer).get(assembly)
-    if ie is None or not ie["ct"]:
-        return {**r, "status": "no_data"}, _iedb_rows(customer, assembly, ie)
+    ie = ctx.iedb(customer).get(akey)
+    if ie is not None and ie["any_ct"] and not ie["ct_codes"]:
+        # Cycle times ARE entered, but every row's alias is blank, so nothing can
+        # be matched to the floor. An IEDB data-entry gap, not a missing cycle
+        # time — saying "no cycle time" here would send someone to re-time a model
+        # that is already fully timed.
+        return {**r, "status": "incomplete", "reason": "no_alias"}, \
+            _iedb_rows(customer, assembly, ie)
+    if ie is None or not ie["ct_codes"]:
+        # In IEDB's catalogue but not one cycle time entered — same practical hole
+        # as not being there at all, so it lands in the same bucket.
+        return {**r, "status": "not_in_iedb", "reason": "no_cycle_time"}, \
+            _iedb_rows(customer, assembly, ie)
     if not steps:
-        return {**r, "status": "unverified"}, _iedb_rows(customer, assembly, ie)
+        return {**r, "status": "not_in_mes", "reason": "no_production"}, \
+            _iedb_rows(customer, assembly, ie)
 
     rows, no_ct, gap = [], [], []
     counts = {"present": 0, "no_ct": 0, "not_in_iedb": 0, "unmapped": 0, "non_iedb": 0}
@@ -379,14 +625,16 @@ def classify(ctx: Ctx, customer: str, assembly: str, steps: list[tuple], source:
               "coverage": round((len(steps) - counts["unmapped"]) / len(steps), 2),
               "missing_ct": "; ".join(sorted(set(no_ct))),
               "gap_steps": "; ".join(sorted(set(gap)))})
-    if counts["no_ct"]:
-        r["status"] = "incomplete"          # the real cycle-time gap — most actionable
-    elif counts["not_in_iedb"]:
-        r["status"] = "route_gap"           # IEDB's route doesn't list steps the floor runs
+    if counts["no_ct"] or counts["not_in_iedb"]:
+        r["status"] = "incomplete"
+        r["reason"] = ("missing_ct+step" if counts["no_ct"] and counts["not_in_iedb"]
+                       else "missing_ct" if counts["no_ct"] else "missing_step")
     elif counts["present"]:
         r["status"] = "complete"
     else:
-        r["status"] = "unverified"          # only unmapped/non-IEDB steps — nothing to judge
+        # MES ran steps but not one of them could be tied to the IEDB route. We
+        # cannot show it as complete on evidence we do not have.
+        r["status"], r["reason"] = "incomplete", "unmapped"
     return r, rows + _iedb_rows(customer, assembly, ie)
 
 
@@ -517,24 +765,215 @@ def run(models: pd.DataFrame, window: int = _WINDOW_DAYS, use_serial: bool = Tru
     return df
 
 
+def cached_steps(customer: str) -> dict:
+    """{assembly: {step: [order, qty]}} from the on-disk #21 cache ONLY — no API
+    call, no network. The earlier classify() threw the MES route away for models
+    IEDB does not list, so those rows are gone from the steps mart and the drawer
+    had nothing to draw. The scans that produced them are still on disk, so the
+    route can be rebuilt for free."""
+    d = CT_MES_SCAN_DIR / _cnorm(customer)
+    acc: dict = {}
+    if not d.exists():
+        return acc
+    for p in d.glob("*.parquet"):
+        try:
+            df = pd.read_parquet(p)
+        except Exception:
+            continue
+        for a, st, o, q in zip(df["assembly"], df["step"], df["order"], df["qty"]):
+            e = acc.setdefault(a, {})
+            if st in e:
+                e[st][0] = min(e[st][0], int(o)); e[st][1] += int(q)
+            else:
+                e[st] = [int(o), int(q)]
+    return acc
+
+
+def reclassify() -> pd.DataFrame:
+    """Re-judge every model already in the v2 marts, from the CACHED steps mart.
+
+    Zero MES calls. The MES route was already pulled and stored — only the verdict
+    changes — so tuning the match rule costs a couple of minutes instead of a
+    re-scrape. Use this after any change to match_step/classify; use run() only
+    when you actually need fresh MES data."""
+    ctx = Ctx()
+    st = pd.read_parquet(CT_MART["completion_steps_v2"])
+    old = pd.read_parquet(CT_MART["completion_status_v2"])
+    mes = st[st["side"] == "MES"]
+
+    by: dict = {}
+    for c, a, n, n2, o, v, src in zip(mes["customer"], mes["assembly"], mes["name"],
+                                      mes["name2"], mes["order"], mes["value"], mes["source"]):
+        names = [str(n)] + ([str(n2)] if str(n2) not in ("", "nan", "None") else [])
+        by.setdefault((c, a), (src, []))[1].append((names, int(o), int(v)))
+
+    summary, steps = {}, {}
+    cache: dict = {}
+    for c, a, src in zip(old["customer"], old["assembly"], old["source"]):
+        sl_src, sl = by.get((c, a), (src, []))
+        if not sl:
+            # Nothing in the mart — try the raw scan cache before giving up.
+            if c not in cache:
+                cache[c] = cached_steps(c)
+            hit = cache[c].get(str(a).strip()) or cache[c].get(a)
+            if hit:
+                sl = [([st], v[0], v[1]) for st, v in hit.items()]
+                sl_src = "batch"
+        summary[(c, a)], steps[(c, a)] = classify(ctx, c, a, sl, sl_src)
+    _flush(summary, steps)
+    df = pd.DataFrame(list(summary.values()))
+    log.info("reclassified %d models: %s", len(df), df["status"].value_counts().to_dict())
+    return df
+
+
+def verify(df: pd.DataFrame = None) -> list:
+    """Audit EVERY model's verdict against IEDB independently of how it was
+    reached. Each rule is a claim the status makes; a hit is a verdict that
+    contradicts the data. Run after any reclassify — a silent wrong verdict is
+    worse than a crash, and `not_in_iedb` shipped three of these before it was
+    caught by hand."""
+    ctx = Ctx()
+    if df is None:
+        df = pd.read_parquet(CT_MART["completion_status_v2"])
+    bad: list = []
+
+    def flag(rule, r, detail=""):
+        bad.append({"rule": rule, "customer": r["customer"], "assembly": r["assembly"],
+                    "status": r["status"], "reason": r.get("reason", ""), "detail": detail})
+
+    for r in df.to_dict("records"):
+        c, a, cn = r["customer"], r["assembly"], _cnorm(r["customer"])
+        st, why = r["status"], (r.get("reason") or "")
+        resolved = ctx.resolve(c, a)
+        in_cat = _anorm(str(a).strip()) in ctx.catalog.get(cn, {})
+
+        # 1. "not in IEDB at all" must mean exactly that — in neither raw nor catalogue.
+        if st == "not_in_iedb" and why == "absent" and (resolved or in_cat):
+            flag("absent_but_present", r, f"resolves to {resolved or 'catalogue'}")
+        # 2. The opposite: claimed found, but nothing in IEDB backs it.
+        if st in ("complete", "incomplete") and not resolved:
+            flag("judged_without_iedb", r)
+        # 3. `complete` must have matched steps and no gaps of any kind.
+        if st == "complete" and not (r.get("present", 0) > 0
+                                     and not r.get("no_ct", 0) and not r.get("not_in_iedb", 0)):
+            flag("complete_with_gaps", r, f"present={r.get('present')} no_ct={r.get('no_ct')}")
+        # 4. `not_in_mes` claims zero production — steps would contradict it.
+        if st == "not_in_mes" and r.get("actual_steps", 0):
+            flag("no_mes_but_has_steps", r, f"actual_steps={r.get('actual_steps')}")
+        # 5. `no_cycle_time` claims none entered; a timed route contradicts it.
+        if why == "no_cycle_time" and resolved:
+            ie = ctx.iedb(c).get(resolved)
+            if ie and ie["ct_codes"]:
+                flag("no_ct_but_timed", r, f"{len(ie['ct_codes'])} timed aliases")
+        # 6. Every reason must belong to its status.
+        if why and why not in REASONS.get(st, ()):
+            flag("reason_not_valid_for_status", r, why)
+
+    if bad:
+        b = pd.DataFrame(bad)
+        log.warning("VERIFY: %d contradictions\n%s", len(b),
+                    b.groupby("rule").size().to_string())
+    else:
+        log.info("VERIFY: %d models, no contradictions", len(df))
+    return bad
+
+
+def breakdown(df: pd.DataFrame = None) -> None:
+    """Print the summary report: models per status/reason, per workcell, and the
+    ranked alias codes behind the gaps — that last list is the actual fix-list."""
+    import collections
+    if df is None:
+        df = pd.read_parquet(CT_MART["completion_status_v2"])
+    order = ["incomplete", "no_cycle_time", "not_in_iedb", "not_in_mes", "complete"]
+
+    print(f"\n{len(df)} models\n")
+    for s in order:
+        g = df[df["status"] == s]
+        if not len(g):
+            continue
+        print(f"{s:<14}{len(g):>6}  ({100*len(g)//len(df)}%)")
+        for reason, n in g["reason"].fillna("").value_counts().items():
+            print(f"    {str(reason) or '-':<20}{n:>6}")
+
+    print(f"\n{'workcell':<26}" + "".join(f"{s[:9]:>11}" for s in order))
+    piv = df.pivot_table(index="customer", columns="status", values="assembly",
+                         aggfunc="count", fill_value=0)
+    piv["_bad"] = sum(piv[s] for s in order[:3] if s in piv)
+    for cust, row in piv.sort_values("_bad", ascending=False).head(20).iterrows():
+        print(f"{str(cust):<26}" + "".join(f"{int(row.get(s, 0)):>11}" for s in order))
+
+    inc = df[df["status"] == "incomplete"]
+    codes = collections.Counter()
+    for col in ("missing_ct", "gap_steps"):
+        for v in inc[col].fillna(""):
+            codes.update(x.strip() for x in str(v).split(";") if x.strip())
+    if codes:
+        print(f"\nTOP GAPS — alias codes missing across {len(inc)} incomplete models:")
+        for a, n in codes.most_common(20):
+            print(f"  {n:>6}  {a}")
+
+
 def _selfcheck():
     """The match ladder is the whole point of v2 — check every rung."""
+    # ── the code parser ──────────────────────────────────────────────────────
+    assert _code("MA 2 - BACK MECH ASSY 1") == _code("MA 1 - BACK MECH ASSY 1") == "MA"
+    assert _code("TSTH 1 - TSTH1") == _code("TSTH 1  - TSTH TOP") == "TSTH"   # 27819-M
+    assert _code("PACKOUT 1") == _code("PACKOUT - PACKOUT") == "PACKOUT"      # bare vs compound
+    assert _code("MA 2.1") == _code("MA 1/2") == "MA"                         # instance forms
+    assert _code("LINK (AOP) 1") == _code("LINK AOP 1") == "LINKAOP"          # punctuation
+    assert _code("SCRB 1 - SCRT01") != _code("SCRT 1 - SCRT01")               # must NOT fuse
+
+    # ── assembly suffix rule: narrow on purpose ─────────────────────────────
+    for src, want in [("26432-N-RMA", "26432-N"), ("26432-N", "26432-N"),
+                      ("M011872C001-F-RMA", "M011872C001-F"),
+                      ("20049553-A.00-FRU", "20049553-A.00"),
+                      ("AK-01-AKMCAC2-SUB", "AK-01-AKMCAC2"),
+                      ("AK06-CAJ9D3C6HTSUB", "AK06-CAJ9D3C6HT"),   # SUB, no separator
+                      ("853-800575-301-OP1", "853-800575-301"),
+                      ("853-238767-003-S1", "853-238767-003"),
+                      ("853-238767-003-FA", "853-238767-003"),
+                      ("SKY900-212127-000S", "SKY900-212127-000")]:  # bare S after a digit
+        assert _desuffix(src) == want.upper(), (src, _desuffix(src))
+    # Must survive untouched. The trailing letters LOOK like revisions and are
+    # not — IEDB carries revision separately ('', 'D', 'A01' for these three) and
+    # EK050-66401 is its own live part. "AK11-CAP-9D3C6-TS" is the trap: a bare
+    # trailing S after a LETTER, where the stripped form is a different real part.
+    for keep in ("AK11-CAP-9D3C6-TS", "EK050-66401N", "IN300-1074-203SDZ",
+                 "IN800-0673-201A1F", "853-064887-010-OPT", "SKYASB1097381-SFT",
+                 "EK041-66401Q"):
+        assert _desuffix(keep) == keep.upper(), (keep, _desuffix(keep))
+
     class C:  # stand-in Ctx: only pmap/pknown are read by match_step
-        pmap = {("CUST", "PACKOUT LINK"): "PACKOUT", ("CUST", "AOI TOP"): "AOIT 1",
+        pmap = {("CUST", "PACKOUT LINK"): "PACKOUT 1 - PACKOUT",
+                ("CUST", "AOI TOP"): "AOIT 1",
+                ("CUST", "BACK MECH ASSY 1"): "MA 2 - BACK MECH ASSY 1",
+                ("CUST", "HLA 1 LINK"): "PMI 1",
                 ("CUST", "GHOST"): "NOSUCH 1", ("CUST", "DEAD"): "OLD 1"}
         pknown = set(pmap) | {("CUST", "UNLINK")}
-    ie = {"ct": {"AOIT1"}, "ct_b": {"PACKOUT", "AOIT", "SCRT"}, "all_b": {"PACKOUT", "AOIT", "SCRT", "OLD"},
-          "proc_b": {"XRAY", "XRAY1"}}
+    ie = {"ct_codes": {"PACKOUT", "AOIT", "SCRT", "MA"},
+          "all_codes": {"PACKOUT", "AOIT", "SCRT", "MA", "OLD"},
+          "ct_names": {"XRAY"}, "all_names": {"XRAY", "DEPANEL"}}
     m = lambda names: match_step(C(), "CUST", ie, names)
-    assert m(["PACKOUT LINK"]) == ("present", "PACKOUT"), m(["PACKOUT LINK"])   # base: PACKOUT == PACKOUT 1
-    assert m(["AOI TOP"])[0] == "present"                                       # exact workbook hit
-    assert m(["SCRT01"])[0] == "present"                                        # auto: name -> alias base
-    assert m(["XRAY"])[0] == "present"                                          # auto: name -> process
-    assert m(["DEAD"])[0] == "no_ct"                                            # in route, cycle time empty
-    assert m(["GHOST"])[0] == "not_in_iedb"                                     # mapped, route lacks it
-    assert m(["UNLINK"])[0] == "non_iedb"                                       # workbook says not IEDB
-    assert m(["WHO KNOWS"])[0] == "unmapped"                                    # nothing knows it
-    assert m(["ZZZ", "SCRT01"])[0] == "present"                                 # #132 second name saves it
+
+    assert m(["PACKOUT LINK"])[0] == "present"        # compound workbook vs code
+    assert m(["AOI TOP"])[0] == "present"             # bare workbook code
+    assert m(["BACK MECH ASSY 1"])[0] == "present"    # R380: MA 2 vs MA 1, names differ
+    assert m(["DEAD"])[0] == "no_ct"                  # in route, cycle time empty
+    assert m(["GHOST"])[0] == "not_in_iedb"           # mapped, route lacks it
+    assert m(["UNLINK"])[0] == "non_iedb"             # workbook says not IEDB
+    assert m(["SCRT01"])[0] == "present"              # unmapped -> code auto-match
+    assert m(["XRAY"])[0] == "present"                # unmapped -> alias display name
+    assert m(["WHO KNOWS"])[0] == "unmapped"          # nothing knows it
+    assert m(["ZZZ", "SCRT01"])[0] == "present"       # #132 second name saves it
+
+    # ── THE GUARD ───────────────────────────────────────────────────────────
+    # `PMI 1` is not in the route, so this is a gap. The step's own words contain
+    # "XRAY", which IS in the route. A mapped step must NOT be rescued by them —
+    # this exact fishing is what produced 1,377 false greens.
+    assert m(["HLA 1 LINK", "XRAY"]) == ("not_in_iedb", "PMI 1"), m(["HLA 1 LINK", "XRAY"])
+    # And the IEDB `process` label is never a key at all: a step named exactly
+    # after one can only match if the ALIAS backs it up.
+    assert m(["ASSEMBLY 2"])[0] == "unmapped"
     print("match ladder OK")
 
     # ── #132 circuit breaker: an all-404 customer must bail, not grind ────────
