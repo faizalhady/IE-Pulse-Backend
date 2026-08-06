@@ -58,6 +58,14 @@ _norm = lambda s: re.sub(r"[^A-Z0-9]", "", str(s).upper())
 
 def setup_log(tag: str) -> Path:
     LOG_DIR.mkdir(exist_ok=True)
+    # Windows hands a redirected stdout cp1252, which cannot encode the tick in
+    # completion_v2's per-customer line — and a logging failure kills the run.
+    # On 6 Aug that ended a 4,126-model rebuild after one customer. Force UTF-8
+    # rather than policing every log string for non-cp1252 characters.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError):
+        pass
     p = LOG_DIR / f"completion_target_{datetime.now():%Y%m%d_%H%M%S}_{tag}.log"
     fmt = logging.Formatter("%(asctime)s  %(levelname)-7s %(message)s", "%H:%M:%S")
     root = logging.getLogger()
