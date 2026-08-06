@@ -219,25 +219,25 @@ def _run_ct_pipeline(mode: str) -> None:
         if not run_ingest(mode=mode, progress_cb=_progress):
             _set_status(state="failed", finished_at=datetime.utcnow().isoformat() + "Z",
                         last_error="ingest returned False — check server logs")
-            log.error("Cycle Time ingest failed — see logs above")
+            log.error("Cycle Time ingest failed - see logs above")
             return
         # 2. transform → pivoted.parquet
         if not run_transform():
             _set_status(state="failed", finished_at=datetime.utcnow().isoformat() + "Z",
                         last_error="transform returned False — check server logs")
-            log.error("Cycle Time transform failed — see logs above")
+            log.error("Cycle Time transform failed - see logs above")
             return
         # 3. eff → eff_by_line.parquet (best-effort enrichment)
         try:
             if not run_eff():
-                log.warning("Efficiency build produced no eff_by_line.parquet — continuing with NULL eff.")
+                log.warning("Efficiency build produced no eff_by_line.parquet - continuing with NULL eff.")
         except Exception:
-            log.exception("Efficiency build crashed — continuing (non-fatal).")
+            log.exception("Efficiency build crashed - continuing (non-fatal).")
         # 4. assembly_summary → assembly_summary.parquet (the has-data ground truth)
         if not run_assembly_summary():
             _set_status(state="failed", finished_at=datetime.utcnow().isoformat() + "Z",
                         last_error="assembly_summary returned False — check server logs")
-            log.error("Cycle Time assembly_summary failed — see logs above")
+            log.error("Cycle Time assembly_summary failed - see logs above")
             return
         # 5. CHAIN: rebuild the eBuild runner mart so the Plant Runners dashboard
         #    has_data badges reflect the freshly-synced cycle-time data. Non-fatal —
@@ -248,7 +248,7 @@ def _run_ct_pipeline(mode: str) -> None:
             build_projection_runners_mart()    # projection (planned demand, ~4wk)
             log.info("Chained eBuild runner mart rebuild complete (historical + projection).")
         except Exception:
-            log.exception("Chained eBuild runner refresh failed (non-fatal) — run POST /api/ebuild/refresh manually.")
+            log.exception("Chained eBuild runner refresh failed (non-fatal) - run POST /api/ebuild/refresh manually.")
 
         _set_status(state="success", finished_at=datetime.utcnow().isoformat() + "Z",
                     customers_done=len(CT_CUSTOMERS), current_customer=None)
@@ -369,7 +369,7 @@ def ct_customer_status(site: str = Query("pen", description="Site code for the I
     if mart.exists():
         return _customer_status_from_mart(mart_key(mart))
 
-    log.info("customer_status mart not built yet — falling back to a live IEDB call")
+    log.info("customer_status mart not built yet - falling back to a live IEDB call")
     try:
         from modules.cycle_time.client import fetch_customer_status
     except Exception as e:

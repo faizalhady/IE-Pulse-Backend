@@ -231,7 +231,7 @@ def serial_index(days_back: list[int], hours: list[int], per_model: int = 5) -> 
                     "endTime": (s + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S"),
                     "maxCount": "100000"})
             except MESWebApiError as ex:
-                log.warning("  #126 %s FAILED — %s", s, str(ex)[:80])
+                log.warning("  #126 %s FAILED - %s", s, str(ex)[:80])
                 continue
             for x in r:
                 a, sn = str(x.get("Assembly") or "").strip(), str(x.get("SerialNumber") or "").strip()
@@ -308,7 +308,7 @@ def board_steps(customer: str, customer_id, picks: pd.DataFrame) -> pd.DataFrame
             if best is None or len(j) > len(best):
                 best = j                   # keep the longest partial as a fallback
         if misses >= _MAX_MISSES:
-            log.warning("  #132 %-24s BREAKER TRIPPED after %d consecutive failures — "
+            log.warning("  #132 %-24s BREAKER TRIPPED after %d consecutive failures - "
                         "%d models done, %d left to #21", customer, misses,
                         len({r["assembly"] for r in rows}), len(todo) - todo.index(asm))
             break
@@ -691,9 +691,9 @@ def run(models: pd.DataFrame, window: int = _WINDOW_DAYS, use_serial: bool = Tru
     if resume and state.exists():
         try:
             done = set(json.loads(state.read_text()).get("done", []))
-            log.info("RESUME — %d customers done, %d models in v2 mart", len(done), len(summary))
+            log.info("RESUME - %d customers done, %d models in v2 mart", len(done), len(summary))
         except Exception:
-            log.warning("resume state unreadable — starting over")
+            log.warning("resume state unreadable - starting over")
 
     by_cust: dict = {}
     for m in models.itertuples(index=False):
@@ -725,7 +725,7 @@ def run(models: pd.DataFrame, window: int = _WINDOW_DAYS, use_serial: bool = Tru
                 try:
                     bs = board_steps(cust, cid, picks)
                 except MESWebApiError as ex:
-                    log.warning("  #132 %s failed — %s", cust, ex)
+                    log.warning("  #132 %s failed - %s", cust, ex)
         serial_models = set(bs["assembly"]) if len(bs) else set()
 
         # ── batch source (#21) — only needed for models with NO serial. Skip the
@@ -735,7 +735,7 @@ def run(models: pd.DataFrame, window: int = _WINDOW_DAYS, use_serial: bool = Tru
             try:
                 acc = batch_steps(cust, cid, window)
             except MESWebApiError as ex:
-                log.warning("  SKIP %s — #21 unreachable (%s); retry on re-run", cust, ex)
+                log.warning("  SKIP %s - #21 unreachable (%s); retry on re-run", cust, ex)
                 skipped.append(cust)
                 continue
 
@@ -761,7 +761,7 @@ def run(models: pd.DataFrame, window: int = _WINDOW_DAYS, use_serial: bool = Tru
         done.add(cust)
         _flush(summary, steps)
         state.write_text(json.dumps({"done": sorted(done)}))
-        log.info("  ✓ %-24s %4d models (%d serial / %d batch) | %d/%d customers",
+        log.info("  ok %-24s %4d models (%d serial / %d batch) | %d/%d customers",
                  cust, len(by_cust[cust]), n_serial, len(by_cust[cust]) - n_serial,
                  len(done), len(by_cust))
 
@@ -917,7 +917,7 @@ def breakdown(df: pd.DataFrame = None) -> None:
         for v in inc[col].fillna(""):
             codes.update(x.strip() for x in str(v).split(";") if x.strip())
     if codes:
-        print(f"\nTOP GAPS — alias codes missing across {len(inc)} incomplete models:")
+        print(f"\nTOP GAPS - alias codes missing across {len(inc)} incomplete models:")
         for a, n in codes.most_common(20):
             print(f"  {n:>6}  {a}")
 
@@ -1010,7 +1010,7 @@ def _selfcheck():
         globals()["CT_MES_BOARD_DIR"] = orig
     assert len(calls) <= _MAX_MISSES + 3, f"breaker let {len(calls)} calls through, cap ~{_MAX_MISSES}"
     assert len(out) == 0, "a fully dead customer must return no rows"
-    print(f"#132 breaker OK — stopped after {len(calls)} calls, not 1500")
+    print(f"#132 breaker OK - stopped after {len(calls)} calls, not 1500")
 
 
 if __name__ == "__main__":

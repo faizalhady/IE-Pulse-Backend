@@ -30,7 +30,7 @@ _snorm = lambda s: re.sub(r"\s+", " ", str(s).strip().upper())        # step-ins
 
 
 def run() -> bool:
-    log.info("MES process-map load starting — %s", MES_PROCESS_MAP_XLSX)
+    log.info("MES process-map load starting - %s", MES_PROCESS_MAP_XLSX)
     try:
         df = pd.read_excel(MES_PROCESS_MAP_XLSX, sheet_name="MES", header=1)
     except Exception as e:
@@ -63,7 +63,7 @@ def run() -> bool:
 
     CT_MART["mes_process_map"].parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(CT_MART["mes_process_map"], index=False)
-    log.info("mes_process_map.parquet written (%d rows, %d workcells) → %s",
+    log.info("mes_process_map.parquet written (%d rows, %d workcells) -> %s",
              len(out), out["customer"].nunique(), CT_MART["mes_process_map"])
     return True
 

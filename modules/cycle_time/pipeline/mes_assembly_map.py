@@ -66,7 +66,7 @@ def _match_customers(mes_custs: list[dict]) -> dict[str, object]:
         else:
             out[name] = cid
     if missed:
-        log.warning("No MES Customer_ID for %d workcell(s) — add to _MES_NAME_OVERRIDE: %s",
+        log.warning("No MES Customer_ID for %d workcell(s) - add to _MES_NAME_OVERRIDE: %s",
                     len(missed), ", ".join(missed))
     return out
 
@@ -91,7 +91,7 @@ def run() -> bool:
     matched = _match_customers(mes_custs)
     log.info("Matched %d/%d workcells to MES Customer_ID", len(matched), len(CT_CUSTOMERS))
     if not matched:
-        log.error("No workcells matched a MES customer — map not written.")
+        log.error("No workcells matched a MES customer - map not written.")
         return False
 
     rows = []
@@ -99,7 +99,7 @@ def run() -> bool:
         try:
             asms = _list_assemblies(cid)
         except MESWebApiError as e:
-            log.error("  ListAssembly failed for %s (custId=%s): %s — skipping", name, cid, e)
+            log.error("  ListAssembly failed for %s (custId=%s): %s - skipping", name, cid, e)
             continue
         for a in asms:
             rows.append({
@@ -112,14 +112,14 @@ def run() -> bool:
         log.info("  %s: %d assemblies", name, len(asms))
 
     if not rows:
-        log.error("No assemblies fetched — map not written.")
+        log.error("No assemblies fetched - map not written.")
         return False
 
     df = pd.DataFrame(rows)
     df = df[df["assembly_id"].notna() & df["number"].notna()]
     CT_MART["mes_assembly_map"].parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(CT_MART["mes_assembly_map"], index=False)
-    log.info("mes_assembly_map.parquet written (%d rows, %d workcells) → %s",
+    log.info("mes_assembly_map.parquet written (%d rows, %d workcells) -> %s",
              len(df), df["customer"].nunique(), CT_MART["mes_assembly_map"])
     return True
 

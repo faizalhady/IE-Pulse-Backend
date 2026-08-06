@@ -43,10 +43,10 @@ def get_unique_workcells(directories, prefixes, target_columns):
                         unique_names.update(vals)
                         files_scanned += 1
                     else:
-                        print(f"⚠️ No matching column found in: {file_path.name}. Available columns: {list(df.columns)}")
+                        print(f"! No matching column found in: {file_path.name}. Available columns: {list(df.columns)}")
 
                 except Exception as e:
-                    print(f"❌ Error reading {file_path.name}: {e}")
+                    print(f"X Error reading {file_path.name}: {e}")
 
     print(f"\nSuccessfully scanned {files_scanned} files.")
     return sorted(list(unique_names))
@@ -63,8 +63,8 @@ def main():
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(mapping_template, f, indent=4)
 
-    print(f"✅ Found {len(unique_workcells)} unique workcell variations.")
-    print(f"✅ Exported mapping template to: {output_path}")
+    print(f"OK Found {len(unique_workcells)} unique workcell variations.")
+    print(f"OK Exported mapping template to: {output_path}")
 
 if __name__ == "__main__":
     main()

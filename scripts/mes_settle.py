@@ -102,7 +102,7 @@ def main():
         break
 
     # ── 3. equiSetupId — the API's own typo ──────────────────────────────────
-    print("\n[3] GetEquipmentSetupGRNQty — the API misspells it 'equiSetupId'")
+    print("\n[3] GetEquipmentSetupGRNQty - the API misspells it 'equiSetupId'")
     sids = [str(r.get("EquipmentSetup_ID")) for r in setup[:20]
             if r.get("EquipmentSetup_ID") not in (None, "", 0, "0")]
     for sid in list(dict.fromkeys(sids))[:3]:
@@ -166,7 +166,7 @@ def main():
         time.sleep(0.3)
 
     # ── 7. FactoryMARoute_ID from a route that really exists ─────────────────
-    print("\n[7] ListRouteStepByFactoryMARoute — real FactoryMARoute_ID")
+    print("\n[7] ListRouteStepByFactoryMARoute - real FactoryMARoute_ID")
     rs = rowlist(call("Route", "ListRouteStep", {"factory": "", "langId": "0"}, timeout=120))
     fids = list(dict.fromkeys([str(r.get("FactoryMARoute_ID")) for r in rs[:2000]
                                if r.get("FactoryMARoute_ID") not in (None, "", 0, "0")]))[:4]

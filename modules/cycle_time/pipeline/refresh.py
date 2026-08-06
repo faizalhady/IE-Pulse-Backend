@@ -45,13 +45,13 @@ def run(mode: str = "incremental",
     start = datetime.now()
     title = {"incremental": "INCREMENTAL", "full": "FULL", "backfill": "BACKFILL (add-only upsert)"}.get(mode, mode.upper())
 
-    log.info("╔══════════════════════════════════════════════════════════╗")
-    log.info(f"║        CYCLE TIME PIPELINE  —  {title:<28s}║")
-    log.info("╚══════════════════════════════════════════════════════════╝")
+    log.info("+==========================================================+")
+    log.info(f"|        CYCLE TIME PIPELINE  -  {title:<28s}|")
+    log.info("+==========================================================+")
     log.info(f"Started at {start.strftime('%Y-%m-%d %H:%M:%S')}")
 
     if mode == "backfill" and not only:
-        log.error("Backfill requires --only <customer(s)> — it is a targeted, safe upsert.")
+        log.error("Backfill requires --only <customer(s)> - it is a targeted, safe upsert.")
         return False
 
     # Keep the machine awake for the whole ingest so a long unattended pull
@@ -65,21 +65,21 @@ def run(mode: str = "incremental",
         else:
             ingest_ok = run_ingest(mode=mode, only=only, exclude=exclude, overlap_days=overlap_days)
         if not ingest_ok:
-            log.error("Ingest failed — pipeline aborted.")
+            log.error("Ingest failed - pipeline aborted.")
             return False
 
     if not run_transform():
-        log.error("Transform failed — pivoted.parquet not written.")
+        log.error("Transform failed - pivoted.parquet not written.")
         return False
 
     # Efficiency is a best-effort enrichment — if the Summary pull fails the
     # pipeline still completes; assembly_summary just carries NULL eff.
     with keep_system_awake():
         if not run_eff(only=only, exclude=exclude):
-            log.warning("Efficiency build did not produce eff_by_line.parquet — continuing with NULL eff.")
+            log.warning("Efficiency build did not produce eff_by_line.parquet - continuing with NULL eff.")
 
     if not run_assembly_summary():
-        log.error("Assembly-summary build failed — assembly_summary.parquet not written.")
+        log.error("Assembly-summary build failed - assembly_summary.parquet not written.")
         return False
 
     # Snapshot the IEDB coverage report so the endpoint reads a mart instead of

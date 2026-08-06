@@ -138,6 +138,6 @@ def run() -> bool:
 
     # ── Write ─────────────────────────────────────────────────────────────────
     pivoted.to_parquet(CT_MART["pivoted"], index=False)
-    log.info(f"pivoted.parquet written → {CT_MART['pivoted']}")
+    log.info(f"pivoted.parquet written -> {CT_MART['pivoted']}")
     log.info("CYCLE TIME TRANSFORM  complete")
     return True

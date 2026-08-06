@@ -272,7 +272,7 @@ def install_signal_logging(log: logging.Logger) -> None:
             name = signal.Signals(signum).name
         except ValueError:
             name = str(signum)
-        log.warning("SIGNAL RECEIVED: %s — initiating graceful shutdown "
+        log.warning("SIGNAL RECEIVED: %s - initiating graceful shutdown "
                     "(uptime %ss)", name, int(time.time() - _start_time))
         prev = _prev_signal_handlers.get(signum)
         if callable(prev):
@@ -305,7 +305,7 @@ def log_startup_banner(log: logging.Logger, port: int | None = None) -> None:
 
 def log_shutdown_banner(log: logging.Logger) -> None:
     log.info("-" * 72)
-    log.info("IE PULSE BACKEND SHUTTING DOWN — pid %s, uptime %ss",
+    log.info("IE PULSE BACKEND SHUTTING DOWN - pid %s, uptime %ss",
              os.getpid(), int(time.time() - _start_time))
     log.info("-" * 72)
 
@@ -325,11 +325,11 @@ def start_heartbeat(log: logging.Logger, interval_s: int = 300) -> None:
             if proc is not None:
                 try:
                     rss = proc.memory_info().rss / (1024 * 1024)
-                    log.info("heartbeat — uptime %ss, rss %.0f MB", up, rss)
+                    log.info("heartbeat - uptime %ss, rss %.0f MB", up, rss)
                     continue
                 except Exception:
                     pass
-            log.info("heartbeat — uptime %ss", up)
+            log.info("heartbeat - uptime %ss", up)
 
     threading.Thread(target=_run, name="heartbeat", daemon=True).start()
 
@@ -352,7 +352,7 @@ def task_run(log: logging.Logger, mode: str = "", trigger: str = "manual"):
     try:
         yield
     except BaseException as e:
-        log.error("RUN FAILED after %.1fs — %s: %s",
+        log.error("RUN FAILED after %.1fs - %s: %s",
                   time.time() - t0, type(e).__name__, e, exc_info=True)
         raise
     else:

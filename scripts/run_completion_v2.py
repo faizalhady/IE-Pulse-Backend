@@ -70,7 +70,7 @@ SAMPLE_HOURS = [1, 6, 10, 14, 18, 22]                 # 6 windows across the 24h
 
 def phase0(models: pd.DataFrame) -> pd.DataFrame:
     logging.info("=" * 78)
-    logging.info("PHASE 0 — #126 serial sweep (%d windows, completed units)",
+    logging.info("PHASE 0 - #126 serial sweep (%d windows, completed units)",
                  len(SAMPLE_DAYS) * len(SAMPLE_HOURS))
     logging.info("=" * 78)
     sidx = v2.serial_index(SAMPLE_DAYS, SAMPLE_HOURS, per_model=5)
@@ -90,7 +90,7 @@ def phase0(models: pd.DataFrame) -> pd.DataFrame:
 
 def phase6():
     logging.info("=" * 78)
-    logging.info("PHASE 6 — v1 vs v2")
+    logging.info("PHASE 6 - v1 vs v2")
     logging.info("=" * 78)
     v1 = pd.read_parquet(CT_MART["completion_status"])[["customer", "assembly", "status"]]
     n2 = pd.read_parquet(CT_MART["completion_status_v2"])
@@ -126,14 +126,14 @@ def main():
         if not a.no_serial:
             phase0(models)
         logging.info("=" * 78)
-        logging.info("PHASE 1-5 — classify (window=%dd, serial=%s)", a.window, not a.no_serial)
+        logging.info("PHASE 1-5 - classify (window=%dd, serial=%s)", a.window, not a.no_serial)
         logging.info("=" * 78)
         from modules.cycle_time.keep_awake import keep_system_awake
         with keep_system_awake():
             v2.run(models, window=a.window, use_serial=not a.no_serial, resume=not a.no_resume)
         phase6()
 
-    logging.info("DONE — log written to %s", p)
+    logging.info("DONE - log written to %s", p)
     print(f"\nlog: {p}")
 
 

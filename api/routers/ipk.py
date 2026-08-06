@@ -29,7 +29,7 @@ def _run_ipk_pipeline(mode: str) -> None:
 
         log.info(f"IPK pipeline started (mode={mode})")
         if not run_refresh(mode=mode):
-            log.error("IPK pipeline failed — see logs above")
+            log.error("IPK pipeline failed - see logs above")
             return
         log.info(f"IPK pipeline complete (mode={mode})")
     except Exception:

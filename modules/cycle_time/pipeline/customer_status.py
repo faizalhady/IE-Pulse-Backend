@@ -38,16 +38,16 @@ def run(site: str = "pen") -> bool:
         from modules.cycle_time.client import fetch_customer_status
         rows = fetch_customer_status(site=site)
     except Exception:
-        log.exception("CustomerStatus fetch failed — keeping the previous snapshot")
+        log.exception("CustomerStatus fetch failed - keeping the previous snapshot")
         return False
 
     if not rows:
-        log.warning("CustomerStatus returned no rows — keeping the previous snapshot")
+        log.warning("CustomerStatus returned no rows - keeping the previous snapshot")
         return False
 
     df = pd.DataFrame(rows)
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out, index=False)
-    log.info(f"customer_status.parquet written ({len(df)} customers) → {out}")
+    log.info(f"customer_status.parquet written ({len(df)} customers) -> {out}")
     log.info("CYCLE TIME CUSTOMER-STATUS  complete")
     return True

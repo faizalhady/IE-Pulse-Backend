@@ -114,7 +114,7 @@ def main():
                     if v not in (None, "", "0") and nk not in seeds:
                         seeds[nk] = str(v)
 
-    print("sourcing real candidate values…")
+    print("sourcing real candidate values...")
     cands = build_candidates(seeds)
     for k in sorted(cands):
         print(f"  {k:20s} {cands[k][:3]}")
@@ -132,7 +132,7 @@ def main():
                     ok.add((r.get("controller"), r.get("method")))
 
     todo = [e for e in endpoints() if (e["controller"], e["method"]) not in ok]
-    print(f"cracking {len(todo)} endpoints — up to {N_CAND} real values per param\n")
+    print(f"cracking {len(todo)} endpoints - up to {N_CAND} real values per param\n")
 
     results, newly = [], 0
     for i, e in enumerate(todo, 1):
@@ -190,7 +190,7 @@ def main():
     OUT.write_text(json.dumps({"results": results, "newly_ok": newly,
                                "candidates": {k: v for k, v in cands.items()}},
                               indent=1), encoding="utf-8")
-    print("\n" + "═" * 66)
+    print("\n" + "=" * 66)
     print(f"CRACK PASS DONE   newly cracked: {newly}")
     print(f"TOTAL WORKING: {len(ok) + newly}")
     print("\nstill resisting:")

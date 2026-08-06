@@ -52,29 +52,29 @@ log = logging.getLogger(__name__)
 def run(mode: str = "incremental"):
     start = datetime.now()
     title = "INCREMENTAL REFRESH" if mode == "incremental" else "FULL REFRESH"
-    log.info("╔══════════════════════════════════════════════════════════╗")
-    log.info(f"║              OLE PIPELINE  —  {title:<28s}║")
-    log.info("╚══════════════════════════════════════════════════════════╝")
+    log.info("+==========================================================+")
+    log.info(f"|              OLE PIPELINE  -  {title:<28s}|")
+    log.info("+==========================================================+")
     log.info(f"Started at {start.strftime('%Y-%m-%d %H:%M:%S')}")
 
     ok = run_ingest(mode=mode)
     if not ok:
-        log.error("Ingest failed — pipeline aborted.")
+        log.error("Ingest failed - pipeline aborted.")
         sys.exit(1)
 
     ok = run_compute()
     if not ok:
-        log.error("Compute failed — mart may be incomplete.")
+        log.error("Compute failed - mart may be incomplete.")
         sys.exit(1)
 
     ok = run_compute_weekly()
     if not ok:
-        log.error("Weekly compute failed — ole_weekly.parquet not written.")
+        log.error("Weekly compute failed - ole_weekly.parquet not written.")
         sys.exit(1)
 
     ok = run_compute_mh()
     if not ok:
-        log.error("MH-distribution compute failed — mh_distribution.parquet not written.")
+        log.error("MH-distribution compute failed - mh_distribution.parquet not written.")
         sys.exit(1)
 
     elapsed = (datetime.now() - start).total_seconds()

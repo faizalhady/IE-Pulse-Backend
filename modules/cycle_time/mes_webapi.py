@@ -44,7 +44,7 @@ try:
     import truststore
     truststore.inject_into_ssl()
 except Exception as e:                      # never block a call over this
-    log.warning("truststore unavailable (%s) — TLS will use the bundled CA list, "
+    log.warning("truststore unavailable (%s) - TLS will use the bundled CA list, "
                 "which does not include Jabil's internal CA", e)
 
 _MAX_RETRIES = 3          # the MES SP intermittently 404s the same URL — retry helps
@@ -86,7 +86,7 @@ def post(controller: str, method: str, body: dict) -> list[dict]:
                 raise MESWebApiError(f"{controller}/{method} failed: {_err_detail(e)}") from e
             last_err = e
             if attempt < _MAX_RETRIES:
-                log.warning("  %s/%s attempt %d/%d failed (%s) — retrying",
+                log.warning("  %s/%s attempt %d/%d failed (%s) - retrying",
                             controller, method, attempt, _MAX_RETRIES, e)
                 time.sleep(_BACKOFF_S * attempt)
     raise MESWebApiError(f"{controller}/{method} failed after {_MAX_RETRIES} tries: {last_err}") from last_err

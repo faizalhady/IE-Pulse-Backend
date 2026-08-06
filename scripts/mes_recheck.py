@@ -281,7 +281,7 @@ def main():
         prev = json.loads(STATE.read_text(encoding="utf-8")).get("endpoints", {})
     print(f"previous state: {sum(1 for v in prev.values() if v.get('ok'))} known working\n")
 
-    print("building seeds…")
+    print("building seeds...")
     seeds = seed_pool()
     rows = [] if args.quick else joined_rows(seeds)
     print(f"  seed keys={len(seeds)}  joined rows={len(rows)}\n")
@@ -289,7 +289,7 @@ def main():
     eps = endpoints()
     if args.only:
         eps = [e for e in eps if e["folder"].lower() == args.only.lower()]
-    print(f"probing {len(eps)} endpoints…\n")
+    print(f"probing {len(eps)} endpoints...\n")
 
     now_state, newly, lost = {}, [], []
     for i, e in enumerate(eps, 1):
@@ -347,13 +347,13 @@ def main():
             print("  + " + k)
     if lost:
         print(f"\nFAILED THIS RUN but seen working before ({len(lost)}) "
-              f"— burst failure, not death:")
+              f"- burst failure, not death:")
         for k in lost[:12]:
             print("  ~ " + k)
 
     decorative = [k for k, v in now_state.items() if v.get("filters") == "decorative"]
     if decorative:
-        print(f"\n⚠️  IGNORE THEIR ID PARAM ({len(decorative)}) — same rows for a bogus id.")
+        print(f"\n!  IGNORE THEIR ID PARAM ({len(decorative)}) - same rows for a bogus id.")
         print("    Do NOT build a filter on these; they return everything regardless:")
         for k in decorative:
             print(f"  ! {k}  (params: {', '.join(now_state[k].get('id_params', []))})")

@@ -75,7 +75,7 @@ def fetch_page(
             resp = requests.get(_ENDPOINT, headers=_headers(), params=params, timeout=API_TIMEOUT)
 
             if resp.status_code == 401:
-                log.warning("401 from IEDB — invalidating cached token and retrying once")
+                log.warning("401 from IEDB - invalidating cached token and retrying once")
                 invalidate_token()
                 resp = requests.get(_ENDPOINT, headers=_headers(), params=params, timeout=API_TIMEOUT)
                 if resp.status_code == 401:
@@ -98,7 +98,7 @@ def fetch_page(
                 break
             backoff = _BACKOFF_BASE_S * (3 ** attempt)  # 5s, 15s, 45s
             log.warning(
-                f"  page {page} attempt {attempt + 1}/{_MAX_RETRIES + 1} failed ({type(e).__name__}: {e}) — "
+                f"  page {page} attempt {attempt + 1}/{_MAX_RETRIES + 1} failed ({type(e).__name__}: {e}) - "
                 f"retrying in {backoff:.0f}s"
             )
             time.sleep(backoff)
@@ -123,7 +123,7 @@ def fetch_all_pages(
     page = 1
 
     while True:
-        log.debug(f"    page {page} …")
+        log.debug(f"    page {page} ...")
         batch = fetch_page(customer, division, page, page_size, begin_date, end_date)
 
         if not batch:
@@ -163,7 +163,7 @@ def fetch_customer_status(site: str = SITE_CODE) -> list[dict]:
         try:
             resp = requests.get(_CUST_STATUS_ENDPOINT, headers=_headers(), params=params, timeout=API_TIMEOUT)
             if resp.status_code == 401:
-                log.warning("401 from IEDB CustomerStatus — refreshing token, retrying once")
+                log.warning("401 from IEDB CustomerStatus - refreshing token, retrying once")
                 invalidate_token()
                 resp = requests.get(_CUST_STATUS_ENDPOINT, headers=_headers(), params=params, timeout=API_TIMEOUT)
                 if resp.status_code == 401:
@@ -179,7 +179,7 @@ def fetch_customer_status(site: str = SITE_CODE) -> list[dict]:
             if attempt >= _MAX_RETRIES:
                 break
             backoff = _BACKOFF_BASE_S * (3 ** attempt)
-            log.warning(f"  CustomerStatus attempt {attempt + 1} failed ({type(e).__name__}) — retry in {backoff:.0f}s")
+            log.warning(f"  CustomerStatus attempt {attempt + 1} failed ({type(e).__name__}) - retry in {backoff:.0f}s")
             time.sleep(backoff)
 
     raise RuntimeError(f"CustomerStatus failed after {_MAX_RETRIES + 1} attempts: {last_exc}") from last_exc
@@ -210,7 +210,7 @@ def fetch_assemblies(customer: str, division: str = "",
         try:
             resp = requests.get(_ASSEMBLIES_ENDPOINT, headers=_headers(), params=params, timeout=API_TIMEOUT)
             if resp.status_code == 401:
-                log.warning("401 from IEDB Assemblies — refreshing token, retrying once")
+                log.warning("401 from IEDB Assemblies - refreshing token, retrying once")
                 invalidate_token()
                 resp = requests.get(_ASSEMBLIES_ENDPOINT, headers=_headers(), params=params, timeout=API_TIMEOUT)
                 if resp.status_code == 401:
@@ -226,7 +226,7 @@ def fetch_assemblies(customer: str, division: str = "",
             if attempt >= _MAX_RETRIES:
                 break
             backoff = _BACKOFF_BASE_S * (3 ** attempt)
-            log.warning(f"  Assemblies attempt {attempt + 1} failed ({type(e).__name__}) — retry in {backoff:.0f}s")
+            log.warning(f"  Assemblies attempt {attempt + 1} failed ({type(e).__name__}) - retry in {backoff:.0f}s")
             time.sleep(backoff)
 
     raise RuntimeError(f"Assemblies fetch failed after {_MAX_RETRIES + 1} attempts: {last_exc}") from last_exc
@@ -258,7 +258,7 @@ def fetch_summary(customer: str, division: str,
         try:
             resp = requests.get(_SUMMARY_ENDPOINT, headers=_headers(), params=params, timeout=API_TIMEOUT)
             if resp.status_code == 401:
-                log.warning("401 from IEDB summary — refreshing token, retrying once")
+                log.warning("401 from IEDB summary - refreshing token, retrying once")
                 invalidate_token()
                 resp = requests.get(_SUMMARY_ENDPOINT, headers=_headers(), params=params, timeout=API_TIMEOUT)
                 if resp.status_code == 401:
@@ -274,7 +274,7 @@ def fetch_summary(customer: str, division: str,
             if attempt >= _MAX_RETRIES:
                 break
             backoff = _BACKOFF_BASE_S * (3 ** attempt)
-            log.warning(f"  summary {customer} attempt {attempt + 1} failed ({type(e).__name__}) — retry in {backoff:.0f}s")
+            log.warning(f"  summary {customer} attempt {attempt + 1} failed ({type(e).__name__}) - retry in {backoff:.0f}s")
             time.sleep(backoff)
 
     raise RuntimeError(f"Summary for {customer} failed after {_MAX_RETRIES + 1} attempts: {last_exc}") from last_exc

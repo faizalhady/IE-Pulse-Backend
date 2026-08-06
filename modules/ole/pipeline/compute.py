@@ -156,7 +156,7 @@ def run() -> bool:
 
     ORDER BY workcell, date, shift
     """)
-    log.info("Step 3 complete -- OLE computed (FULL OUTER JOIN — paid-hours-only shifts now visible)")
+    log.info("Step 3 complete -- OLE computed (FULL OUTER JOIN - paid-hours-only shifts now visible)")
 
     # ── Step 4: SMH coverage per assembly ─────────────────────────────────────
     con.execute(f"""

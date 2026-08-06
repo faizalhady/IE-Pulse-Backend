@@ -27,9 +27,9 @@ from modules.ole.pipeline.ingest import _WORKCELL_MAP, _normalise_workcell
 
 def banner(title):
     print()
-    print("─" * 70)
+    print("-" * 70)
     print(f"  {title}")
-    print("─" * 70)
+    print("-" * 70)
 
 
 def main():
@@ -45,7 +45,7 @@ def main():
 
     cfg = WORKCELL_CONFIG.get(target_wc)
     if not cfg:
-        print(f"⚠  '{target_wc}' is NOT in WORKCELL_CONFIG. Active workcells:")
+        print(f"!  '{target_wc}' is NOT in WORKCELL_CONFIG. Active workcells:")
         print(f"   {list(WORKCELL_CONFIG.keys())}")
         sys.exit(1)
 
@@ -210,9 +210,9 @@ def main():
         print(f"  {MART['ole']} does not exist.")
 
     print()
-    print("─" * 70)
+    print("-" * 70)
     print("Done. Compare to Excel/dashboard values to identify the divergent layer.")
-    print("─" * 70)
+    print("-" * 70)
 
 
 if __name__ == "__main__":

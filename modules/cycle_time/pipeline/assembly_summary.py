@@ -42,7 +42,7 @@ def run() -> bool:
     out = CT_MART["assembly_summary"]
     eff = CT_MART["eff_by_line"]
     has_eff = eff.exists()
-    log.info(f"eff_by_line {'found — joining efficiency' if has_eff else 'not found — eff will be NULL'}")
+    log.info(f"eff_by_line {'found - joining efficiency' if has_eff else 'not found - eff will be NULL'}")
 
     # SMH per assembly mirrors the API helper: operator content per unit on the
     # PRIMARY routing (priority = 1) = Σ (IMT + Hand) × (S%/100) per build,
@@ -105,7 +105,7 @@ def run() -> bool:
     try:
         con.execute(sql)
         n = con.execute(f"SELECT count(*) FROM read_parquet('{out.as_posix()}')").fetchone()[0]
-        log.info(f"assembly_summary.parquet written ({n:,} assemblies) → {out}")
+        log.info(f"assembly_summary.parquet written ({n:,} assemblies) -> {out}")
     except Exception as e:
         log.error(f"assembly_summary build failed: {e}")
         return False

@@ -61,7 +61,7 @@ def build() -> pd.DataFrame:
                 df.at[i, "division"] = r.get("DivisionName")
                 df.at[i, "active"] = r.get("Active")
     except Exception as e:  # MES down -> ship id/plant/region only, fill names on next run
-        log.warning("workcell_map: MES ListCustomer unavailable (%s) — name/division left blank", e)
+        log.warning("workcell_map: MES ListCustomer unavailable (%s) - name/division left blank", e)
 
     # ── PULL ORDER — smallest workcell first ─────────────────────────────────
     # Every MES pull loops workcells in this order: small ones bank quick wins and

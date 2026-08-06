@@ -238,7 +238,7 @@ def top_models(top_n: int = 100) -> pd.DataFrame:
     pk = pd.DataFrame(sorted(picks), columns=["ck", "assembly"])
     models = (pk.merge(cust, on="ck")[["customer", "assembly", "customer_id"]]
                 .drop_duplicates(["customer", "assembly"]).reset_index(drop=True))
-    log.info("top_models: %d displayed picks → %d in mapped customers", len(picks), len(models))
+    log.info("top_models: %d displayed picks -> %d in mapped customers", len(picks), len(models))
     return models
 
 
@@ -305,9 +305,9 @@ def run(models: pd.DataFrame, resume: bool = True, window: int = _WINDOW_DAYS,
     if resume and state_path.exists():
         try:
             done = set(json.loads(state_path.read_text()).get("done_customers", []))
-            log.info("RESUME — %d customers done, %d models already in mart", len(done), len(summary))
+            log.info("RESUME - %d customers done, %d models already in mart", len(done), len(summary))
         except Exception:
-            log.warning("resume state unreadable — reprocessing all customers")
+            log.warning("resume state unreadable - reprocessing all customers")
             done = set()
 
     by_cust: dict = {}
@@ -326,7 +326,7 @@ def run(models: pd.DataFrame, resume: bool = True, window: int = _WINDOW_DAYS,
     size = amap.groupby(amap["customer"].map(_cnorm)).size().to_dict()
     order = sorted(by_cust, key=lambda c: (size.get(_cnorm(c), 0), str(c)))
 
-    log.info("completion run%s: %d customers, %d remaining (window=%dd) — smallest first",
+    log.info("completion run%s: %d customers, %d remaining (window=%dd) - smallest first",
              " [PLANNER-ONLY]" if planner_only else "",
              len(by_cust), len([c for c in by_cust if c not in done]), window)
 
@@ -340,7 +340,7 @@ def run(models: pd.DataFrame, resume: bool = True, window: int = _WINDOW_DAYS,
         try:
             ctx.batch_steps(cust, by_cust[cust][0].customer_id)
         except MESWebApiError as ex:
-            log.warning("  ⚠ SKIP %s — MES pull failed (%s); will retry on re-run", cust, ex)
+            log.warning("  ! SKIP %s - MES pull failed (%s); will retry on re-run", cust, ex)
             skipped.append(cust)
             continue
         for m in by_cust[cust]:
@@ -353,16 +353,16 @@ def run(models: pd.DataFrame, resume: bool = True, window: int = _WINDOW_DAYS,
         _flush(summary, steps)                                   # ← checkpoint
         state_path.write_text(json.dumps({"done_customers": sorted(done)}))
         ctx._steps.pop(_cnorm(cust), None)                       # free this customer's #21 cache
-        log.info("  ✓ %s (%d/%d customers · %d models)", cust, len(done), len(by_cust), len(summary))
+        log.info("  ok %s (%d/%d customers - %d models)", cust, len(done), len(by_cust), len(summary))
 
     if skipped:
         # Keep the state file so a re-run resumes and retries ONLY the skipped customers.
-        log.warning("run finished with %d customer(s) SKIPPED (MES failed) — re-run to retry: %s",
+        log.warning("run finished with %d customer(s) SKIPPED (MES failed) - re-run to retry: %s",
                     len(skipped), ", ".join(skipped))
     elif planner_only:
         # Partial run BY DESIGN (non-planner workcells untouched) — keep the state so a
         # later run resumes instead of starting fresh and overwriting the whole mart.
-        log.info("planner-only run done — state kept (non-planner workcells not processed).")
+        log.info("planner-only run done - state kept (non-planner workcells not processed).")
     else:
         try:
             state_path.unlink()      # fully done → next run starts fresh
@@ -398,7 +398,7 @@ def reclassify_unverified(customers: list[str], window_start: int = 120,
         cn = _cnorm(cust)
         cid = cidmap.get(cn)
         if cid is None:
-            log.warning("  reclassify: no customer_id for %s — skip", cust)
+            log.warning("  reclassify: no customer_id for %s - skip", cust)
             continue
         targets = [r for r in rows if _cnorm(r["customer"]) == cn and r["status"] == "unverified"]
         if not targets:
@@ -407,7 +407,7 @@ def reclassify_unverified(customers: list[str], window_start: int = 120,
         try:
             ctx.batch_steps(disp, cid)                    # one shifted-window pull for the customer
         except MESWebApiError as ex:
-            log.warning("  reclassify: SKIP %s — MES failed (%s)", cust, ex)
+            log.warning("  reclassify: SKIP %s - MES failed (%s)", cust, ex)
             continue
         for r in targets:
             res = classify_model(ctx, r["customer"], r["assembly"], cid)
@@ -557,7 +557,7 @@ if __name__ == "__main__":
                   .merge(amap, on="customer", how="left")[["customer", "assembly", "customer_id"]])
 
     planner_only = "--planner-only" in sys.argv
-    print(f"classifying {len(models)} models… (window={window}d{', PLANNER-ONLY' if planner_only else ''})")
+    print(f"classifying {len(models)} models... (window={window}d{', PLANNER-ONLY' if planner_only else ''})")
     from modules.cycle_time.keep_awake import keep_system_awake
     with keep_system_awake():                      # block idle-sleep for the whole run
         df = run(models, window=window, planner_only=planner_only)

@@ -122,7 +122,7 @@ def _load_shard_state(customer: str) -> dict:
     try:
         return json.loads(p.read_text())
     except Exception as e:
-        log.warning(f"  Shard state unreadable for {customer} ({e}) — starting fresh")
+        log.warning(f"  Shard state unreadable for {customer} ({e}) - starting fresh")
         return {"last_completed_page": 0, "total_count": None, "complete": False, "rows": 0}
 
 
@@ -164,21 +164,21 @@ def _fetch_customer_resumable(
     # PARTIAL shards — we never throw away in-flight pages, even with --full.
     # If you really want to restart a partial, delete the shard folder by hand.
     if full and shard_dir.exists() and state["complete"]:
-        log.info(f"  → {customer} ({division})  [--full] wiping completed shard ({state['rows']:,} rows) to re-fetch")
+        log.info(f"  -> {customer} ({division})  [--full] wiping completed shard ({state['rows']:,} rows) to re-fetch")
         shutil.rmtree(shard_dir)
         state = {"last_completed_page": 0, "total_count": None, "complete": False, "rows": 0}
 
     if state["complete"]:
-        log.info(f"  → {customer} ({division})  already complete ({state['rows']:,} rows) — skipping")
+        log.info(f"  -> {customer} ({division})  already complete ({state['rows']:,} rows) - skipping")
         return True
 
     shard_dir.mkdir(parents=True, exist_ok=True)
     start_page = state["last_completed_page"] + 1
     if start_page > 1:
-        log.info(f"  → {customer} ({division})  resuming from page {start_page} "
+        log.info(f"  -> {customer} ({division})  resuming from page {start_page} "
                  f"({state['rows']:,} rows already on disk)")
     else:
-        log.info(f"  → {customer} ({division})")
+        log.info(f"  -> {customer} ({division})")
 
     page = start_page
     rows_added = 0
@@ -230,7 +230,7 @@ def _fetch_customer_resumable(
         if page % 10 == 0:
             tc = state["total_count"]
             pct = f"{state['rows'] / tc * 100:.1f}%" if tc else "?"
-            log.info(f"      page {page} done — {state['rows']:,} rows ({pct})")
+            log.info(f"      page {page} done - {state['rows']:,} rows ({pct})")
         page += 1
 
 
@@ -243,7 +243,7 @@ def backfill_shards_from_raw() -> int:
         return 0
     raw = pd.read_parquet(CT_MART["raw"])
     if raw.empty or "customer" not in raw.columns:
-        log.warning("raw.parquet has no customer column — cannot backfill.")
+        log.warning("raw.parquet has no customer column - cannot backfill.")
         return 0
     SHARDS_DIR.mkdir(parents=True, exist_ok=True)
     n_backfilled = 0
@@ -275,7 +275,7 @@ def _merge_all_shards_to_raw() -> int:
     """Concat every customer's shard pages into a single raw.parquet.
     Returns total rows written."""
     if not SHARDS_DIR.exists():
-        log.warning("No shards directory — nothing to merge")
+        log.warning("No shards directory - nothing to merge")
         return 0
 
     parts: list[pd.DataFrame] = []
@@ -297,7 +297,7 @@ def _merge_all_shards_to_raw() -> int:
 
     merged = pd.concat(parts, ignore_index=True)
     merged.to_parquet(CT_MART["raw"], index=False)
-    log.info(f"raw.parquet written: {len(merged):,} rows ← merge of {len(parts)} shard pages")
+    log.info(f"raw.parquet written: {len(merged):,} rows <- merge of {len(parts)} shard pages")
     return len(merged)
 
 
@@ -308,7 +308,7 @@ def _fetch_customer(
 ) -> pd.DataFrame:
     """Legacy in-memory fetch — kept for backwards-compat with the live router.
     The pipeline run() path uses _fetch_customer_resumable instead."""
-    log.info(f"  → {customer} ({division})")
+    log.info(f"  -> {customer} ({division})")
     records = fetch_all_pages(customer, division, begin_date=begin_date)
     if not records:
         log.info(f"      no records returned")
@@ -393,7 +393,7 @@ def _run_incremental(customers: list[dict], state: dict, progress_cb=None,
         try:
             records = fetch_all_pages(cust["customer"], cust["division"], begin_date=begin_date)
         except Exception as e:
-            log.error(f"  delta fetch FAILED for {cust['customer']}: {e} — aborting (watermark not advanced)")
+            log.error(f"  delta fetch FAILED for {cust['customer']}: {e} - aborting (watermark not advanced)")
             return False
         if records:
             df = _normalise_page_df(records, cust["customer"], cust["division"])
@@ -406,7 +406,7 @@ def _run_incremental(customers: list[dict], state: dict, progress_cb=None,
             except Exception: pass
 
     if not deltas:
-        log.info("No changes across all customers — raw.parquet unchanged.")
+        log.info("No changes across all customers - raw.parquet unchanged.")
         return True
 
     with warnings.catch_warnings():
@@ -414,7 +414,7 @@ def _run_incremental(customers: list[dict], state: dict, progress_cb=None,
         new = pd.concat(deltas, ignore_index=True).reindex(columns=existing.columns)
     merged = _upsert(existing, new)
     _atomic_write_parquet(merged, CT_MART["raw"])
-    log.info(f"Incremental upsert complete: {len(new):,} delta row(s) → raw.parquet now {len(merged):,} rows")
+    log.info(f"Incremental upsert complete: {len(new):,} delta row(s) -> raw.parquet now {len(merged):,} rows")
     return True
 
 
@@ -450,7 +450,7 @@ def run_backfill(only: list[str], progress_cb=None) -> bool:
         try:
             records = fetch_all_pages(cust["customer"], cust["division"])  # no begin_date = ALL
         except Exception as e:
-            log.error(f"  backfill fetch FAILED for {cust['customer']}: {e} — aborting (raw.parquet untouched)")
+            log.error(f"  backfill fetch FAILED for {cust['customer']}: {e} - aborting (raw.parquet untouched)")
             return False
         if records:
             parts.append(_normalise_page_df(records, cust["customer"], cust["division"]))
@@ -462,12 +462,12 @@ def run_backfill(only: list[str], progress_cb=None) -> bool:
             except Exception: pass
 
     if not parts:
-        log.info("Backfill: nothing fetched — raw.parquet unchanged.")
+        log.info("Backfill: nothing fetched - raw.parquet unchanged.")
         return True
     new = pd.concat(parts, ignore_index=True).reindex(columns=existing.columns)
     merged = _upsert(existing, new)
     _atomic_write_parquet(merged, CT_MART["raw"])
-    log.info(f"Backfill upsert complete: {len(new):,} fetched row(s) → raw.parquet {len(existing):,} → {len(merged):,} rows")
+    log.info(f"Backfill upsert complete: {len(new):,} fetched row(s) -> raw.parquet {len(existing):,} -> {len(merged):,} rows")
     return True
 
 
@@ -506,7 +506,7 @@ def run(mode: str = "incremental", progress_cb=None,
             if cfg and cfg["customer"].lower() not in seen:
                 customers.append(cfg)
                 seen.add(cfg["customer"].lower())
-        log.info(f"Filter --only:    {only}    → {len(customers)} customer(s) selected (in --only order)")
+        log.info(f"Filter --only:    {only}    -> {len(customers)} customer(s) selected (in --only order)")
     else:
         exclude_set = {c.lower() for c in exclude} if exclude else None
         customers = [
@@ -514,7 +514,7 @@ def run(mode: str = "incremental", progress_cb=None,
             if exclude_set is None or c["customer"].lower() not in exclude_set
         ]
         if exclude:
-            log.info(f"Filter --exclude: {exclude} → {len(customers)} customer(s) remaining")
+            log.info(f"Filter --exclude: {exclude} -> {len(customers)} customer(s) remaining")
 
     # ── INCREMENTAL: delta + upsert; raw.parquet is updated in place, never rebuilt ──
     if mode != "full":

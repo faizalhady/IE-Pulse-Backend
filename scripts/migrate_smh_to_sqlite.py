@@ -41,7 +41,7 @@ def main() -> int:
 
     df = parse_all_smh_files()
     if df.empty:
-        log.error("No SMH rows parsed from the .xls files — nothing to import.")
+        log.error("No SMH rows parsed from the .xls files - nothing to import.")
         return 1
 
     usable = df[df["smh_value"] > 0]

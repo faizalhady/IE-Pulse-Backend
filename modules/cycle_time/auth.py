@@ -76,7 +76,7 @@ class _TokenCache:
                 "previous .NET service used under IEDB:Key."
             )
 
-        log.info("Fetching new IEDB access token …")
+        log.info("Fetching new IEDB access token ...")
         resp = requests.post(
             TOKEN_URL,
             headers={

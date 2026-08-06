@@ -84,7 +84,7 @@ def target_list() -> pd.DataFrame:
                       ("planner_runners.parquet", "planner")]:
         p = EBUILD / name
         if not p.exists():
-            logging.warning("%s missing — that half of the demand list is absent", name)
+            logging.warning("%s missing - that half of the demand list is absent", name)
             continue
         d = pd.read_parquet(p).groupby(["customer", "assembly"], as_index=False)["units"].sum()
         d["src"] = src
@@ -122,12 +122,12 @@ def attach_customer_id(tgt: pd.DataFrame) -> pd.DataFrame:
 
 def report_coverage(tgt: pd.DataFrame) -> None:
     if not CT_MART["mes_serial_index"].exists():
-        logging.warning("no serial index — every model will fall back to the weak #21 source")
+        logging.warning("no serial index - every model will fall back to the weak #21 source")
         return
     sidx = pd.read_parquet(CT_MART["mes_serial_index"])
     have = {_norm(a) for a in sidx["assembly"].dropna()}
     hit = tgt["assembly"].map(lambda a: _norm(a) in have)
-    logging.info("serial coverage: %d/%d models (%.0f%%) — %.0f%% of the volume",
+    logging.info("serial coverage: %d/%d models (%.0f%%) - %.0f%% of the volume",
                  int(hit.sum()), len(tgt), 100 * hit.mean(),
                  100 * tgt.loc[hit, "units"].sum() / max(tgt["units"].sum(), 1))
     logging.info("models WITHOUT a serial fall back to #21 (customer-aggregate, "
@@ -154,14 +154,14 @@ def main() -> None:
 
     if not a.all:
         tgt = tgt.head(a.top)
-        logging.info("taking top %d by units — %.0f%% of the demand volume",
+        logging.info("taking top %d by units - %.0f%% of the demand volume",
                      a.top, 100 * tgt["units"].sum() / max(full_units, 1))
 
     tgt = attach_customer_id(tgt)
     report_coverage(tgt)
 
     if a.dry_run:
-        logging.info("dry run — stopping before any MES call")
+        logging.info("dry run - stopping before any MES call")
         print(tgt.head(25).to_string(index=False))
         return
 
@@ -177,7 +177,7 @@ def main() -> None:
     logging.info("RESULT for this target list (%d models):\n%s",
                  len(mine), mine["status"].value_counts().to_string())
     logging.info("by source:\n%s", mine["source"].value_counts().to_string())
-    logging.info("DONE — log: %s", p)
+    logging.info("DONE - log: %s", p)
 
 
 if __name__ == "__main__":

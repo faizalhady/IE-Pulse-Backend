@@ -39,7 +39,7 @@ def _secret() -> str:
     s = os.getenv("PULSE_JWT_SECRET", "").strip()
     if not s:
         # Loud: this is a misconfiguration, not a user error.
-        log.error("PULSE_JWT_SECRET is not set — identity cannot be verified.")
+        log.error("PULSE_JWT_SECRET is not set - identity cannot be verified.")
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Identity verification is not configured on this server.",
@@ -134,7 +134,7 @@ def require_level(minimum: str):
     def dep(ntid: str = Depends(verified_ntid)) -> str:
         level = level_of(ntid)
         if RANK[level] < RANK[minimum]:
-            log.warning("denied %s (%s) — needs %s", ntid, level, minimum)
+            log.warning("denied %s (%s) - needs %s", ntid, level, minimum)
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
                 f"This needs {minimum.replace('_', ' ')} access.",

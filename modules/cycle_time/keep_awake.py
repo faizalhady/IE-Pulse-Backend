@@ -55,8 +55,8 @@ def keep_system_awake(keep_display: bool = False):
     if prev == 0:
         log.warning("Could not set keep-awake state; system may still sleep mid-run.")
     else:
-        log.info("Keep-awake ON — system idle-sleep blocked for the duration of this run.")
-        log.info("  (Lid-close sleep is NOT covered — keep the lid open or set lid action to 'Do nothing'.)")
+        log.info("Keep-awake ON - system idle-sleep blocked for the duration of this run.")
+        log.info("  (Lid-close sleep is NOT covered - keep the lid open or set lid action to 'Do nothing'.)")
 
     try:
         yield
@@ -64,4 +64,4 @@ def keep_system_awake(keep_display: bool = False):
         # Clear the flag — restore normal power behaviour.
         ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
         if prev != 0:
-            log.info("Keep-awake OFF — normal power behaviour restored.")
+            log.info("Keep-awake OFF - normal power behaviour restored.")

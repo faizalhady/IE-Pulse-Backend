@@ -29,7 +29,7 @@ def _run_lbr_pipeline(mode: str) -> None:
 
         log.info(f"LBR pipeline started (mode={mode})")
         if not run_refresh(mode=mode):
-            log.error("LBR pipeline failed — see logs above")
+            log.error("LBR pipeline failed - see logs above")
             return
         log.info(f"LBR pipeline complete (mode={mode})")
     except Exception:

@@ -10,7 +10,7 @@ import duckdb
 con = duckdb.connect()
 
 print("=" * 60)
-print("PRODUCTION — workcells and stages found")
+print("PRODUCTION - workcells and stages found")
 print("=" * 60)
 con.execute("""
     SELECT workcell, sub_workcell, COUNT(*) as rows, SUM(qty) as total_qty
@@ -21,7 +21,7 @@ con.execute("""
 
 print()
 print("=" * 60)
-print("PAID HOURS — workcells found")
+print("PAID HOURS - workcells found")
 print("=" * 60)
 con.execute("""
     SELECT workcell, COUNT(*) as rows, SUM(total_input_hours) as total_hrs
@@ -32,7 +32,7 @@ con.execute("""
 
 print()
 print("=" * 60)
-print("SMH LOOKUP — coverage per workcell")
+print("SMH LOOKUP - coverage per workcell")
 print("=" * 60)
 con.execute("""
     SELECT workcell, scan_stage,
@@ -45,7 +45,7 @@ con.execute("""
 
 print()
 print("=" * 60)
-print("ASSEMBLY JOIN CHECK — MES vs SMH (first 30 rows)")
+print("ASSEMBLY JOIN CHECK - MES vs SMH (first 30 rows)")
 print("=" * 60)
 con.execute("""
     SELECT
@@ -63,7 +63,7 @@ con.execute("""
 
 print()
 print("=" * 60)
-print("ASSEMBLY JOIN MATCH RATE — per workcell")
+print("ASSEMBLY JOIN MATCH RATE - per workcell")
 print("=" * 60)
 con.execute("""
     SELECT
@@ -85,7 +85,7 @@ con.execute("""
 
 print()
 print("=" * 60)
-print("UNMATCHED ASSEMBLIES — samples per workcell")
+print("UNMATCHED ASSEMBLIES - samples per workcell")
 print("=" * 60)
 con.execute("""
     SELECT DISTINCT
@@ -102,7 +102,7 @@ con.execute("""
 
 print()
 print("=" * 60)
-print("SMH SAMPLES — what assembly names look like in SMH")
+print("SMH SAMPLES - what assembly names look like in SMH")
 print("=" * 60)
 con.execute("""
     SELECT workcell, assembly, smh_value

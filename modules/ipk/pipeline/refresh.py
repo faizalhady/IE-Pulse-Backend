@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 
 
 def run(mode: str = "incremental") -> bool:
-    log.info(f"IPK pipeline placeholder invoked (mode={mode}) — nothing to do yet")
+    log.info(f"IPK pipeline placeholder invoked (mode={mode}) - nothing to do yet")
     return True
 
 

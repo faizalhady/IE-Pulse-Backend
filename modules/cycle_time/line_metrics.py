@@ -229,7 +229,7 @@ def build() -> int:
                                      "n0", "bottleneck_ct", "station_count"])
     CT_MART["line_metrics"].parent.mkdir(parents=True, exist_ok=True)
     res.to_parquet(CT_MART["line_metrics"], index=False)
-    log.info("line_metrics.parquet written (%d models) → %s", len(res), CT_MART["line_metrics"])
+    log.info("line_metrics.parquet written (%d models) -> %s", len(res), CT_MART["line_metrics"])
     return len(res)
 
 

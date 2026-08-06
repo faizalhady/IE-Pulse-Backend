@@ -133,7 +133,7 @@ def build_runners_mart(months: int = 24) -> int:
     """
     to_dt = datetime.now().replace(hour=23, minute=59, second=59, microsecond=0)
     from_dt = (to_dt - timedelta(days=round(months * 30.4))).replace(hour=0, minute=0, second=0)
-    log.info("eBuild runner refresh: pulling buildplan %s → %s", from_dt.date(), to_dt.date())
+    log.info("eBuild runner refresh: pulling buildplan %s -> %s", from_dt.date(), to_dt.date())
 
     rows = _fetch_buildplan(from_dt, to_dt)
     MART_DIR.mkdir(parents=True, exist_ok=True)
@@ -193,7 +193,7 @@ def _has_data_lookup() -> dict:
     from modules.cycle_time.config import CT_MART
     p = CT_MART["assembly_summary"]
     if not p.exists():
-        log.warning("assembly_summary mart missing — plant runners will all show no-data")
+        log.warning("assembly_summary mart missing - plant runners will all show no-data")
         return {}
     s = pd.read_parquet(p, columns=["customer", "assembly"])
     d: dict = {}
@@ -255,7 +255,7 @@ def build_projection_runners_mart(weeks: int = PROJECTION_WEEKS) -> int:
     """
     from_dt = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     to_dt   = (from_dt + timedelta(weeks=weeks)).replace(hour=23, minute=59, second=59)
-    log.info("eBuild projection refresh: pulling planned buildplan %s → %s", from_dt.date(), to_dt.date())
+    log.info("eBuild projection refresh: pulling planned buildplan %s -> %s", from_dt.date(), to_dt.date())
 
     rows = _fetch_buildplan(from_dt, to_dt)
     MART_DIR.mkdir(parents=True, exist_ok=True)

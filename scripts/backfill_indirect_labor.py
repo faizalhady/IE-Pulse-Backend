@@ -97,7 +97,7 @@ def _read_indirect_rows_from_files(files: list[Path]) -> pd.DataFrame:
             d = sorted(new_dates)
             log.info(
                 f"  Stitched indirect rows: {f.name}  "
-                f"({len(df)} rows, {len(new_dates)} new date(s): {d[0]} … {d[-1]})"
+                f"({len(df)} rows, {len(new_dates)} new date(s): {d[0]} ... {d[-1]})"
             )
             frames.append(df)
         except Exception as e:
@@ -178,7 +178,7 @@ def main():
     if not paid_hours_path.exists():
         log.error(
             f"raw_paid_hours.parquet not found at {paid_hours_path}. "
-            "Backfill expects existing workcell data — run pipeline/refresh.py first."
+            "Backfill expects existing workcell data - run pipeline/refresh.py first."
         )
         sys.exit(1)
 
@@ -188,7 +188,7 @@ def main():
     if len(existing_indirect_rows):
         log.info(
             f"  Note: existing mart already contains {len(existing_indirect_rows)} "
-            f"indirect rows — they will be replaced for matching dates."
+            f"indirect rows - they will be replaced for matching dates."
         )
 
     # Date-aware merge: drop existing indirect-labor rows whose date is in the

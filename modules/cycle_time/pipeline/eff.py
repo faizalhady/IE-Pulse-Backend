@@ -81,14 +81,14 @@ def run(only: list[str] | None = None, exclude: list[str] | None = None) -> bool
             else:
                 recs = fetch_summary(name, division)
         except Exception as e:
-            log.warning(f"  {name}: summary fetch failed ({type(e).__name__}: {e}) — skipping")
+            log.warning(f"  {name}: summary fetch failed ({type(e).__name__}: {e}) - skipping")
             continue
         if not recs:
             continue
         df = pd.DataFrame(recs)
         df.columns = [_camel_to_snake(col) for col in df.columns]
         if "sub_workcenter" not in df.columns or "eff_goal" not in df.columns:
-            log.warning(f"  {name}: summary missing sub_workcenter/eff_goal cols — skipping")
+            log.warning(f"  {name}: summary missing sub_workcenter/eff_goal cols - skipping")
             continue
         df["eff_goal"] = pd.to_numeric(df["eff_goal"], errors="coerce")
         # One eff per line: average across that line's GRP rows (they should be
@@ -104,13 +104,13 @@ def run(only: list[str] | None = None, exclude: list[str] | None = None) -> bool
         log.info(f"  {name}: {len(per_line)} lines with efficiency")
 
     if not rows:
-        log.warning("No efficiency rows collected — eff_by_line.parquet not written.")
+        log.warning("No efficiency rows collected - eff_by_line.parquet not written.")
         return False
 
     out = pd.concat(rows, ignore_index=True).rename(columns={"eff_goal": "eff"})
     out.to_parquet(CT_MART["eff_by_line"], index=False)
     log.info(f"eff_by_line.parquet written ({len(out):,} lines across "
-             f"{out['customer'].nunique()} customers) → {CT_MART['eff_by_line']}")
+             f"{out['customer'].nunique()} customers) -> {CT_MART['eff_by_line']}")
     log.info("CYCLE TIME EFF  complete")
     return True
 

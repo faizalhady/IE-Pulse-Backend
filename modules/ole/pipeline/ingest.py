@@ -289,7 +289,7 @@ def ingest_production(since: str | None = None, exclude_dates: set | None = None
 
             # ── Date stitching: take only rows for dates not yet seen ──
             if date_col is None:
-                log.warning(f"  No StartDate column in {f.name} — taking all rows (fallback)")
+                log.warning(f"  No StartDate column in {f.name} - taking all rows (fallback)")
                 frames.append(df)
                 log.info(f"  Loaded production: {f.name}  ({len(df)} rows)")
                 continue
@@ -305,7 +305,7 @@ def ingest_production(since: str | None = None, exclude_dates: set | None = None
             d = sorted(new_dates)
             log.info(
                 f"  Stitched production: {f.name}  "
-                f"({len(df)} rows, {len(new_dates)} new date(s): {d[0]} … {d[-1]})"
+                f"({len(df)} rows, {len(new_dates)} new date(s): {d[0]} ... {d[-1]})"
             )
             frames.append(df)
         except Exception as e:
@@ -426,7 +426,7 @@ def ingest_paid_hours(since: str | None = None, exclude_dates: set | None = None
 
             # ── Date stitching: take only rows for dates not yet seen ──
             if date_col is None:
-                log.warning(f"  No Startdate column in {f.name} — taking all rows (fallback)")
+                log.warning(f"  No Startdate column in {f.name} - taking all rows (fallback)")
                 frames.append(df)
                 log.info(f"  Loaded raw paid hours: {f.name}  ({len(df)} rows)")
                 continue
@@ -442,7 +442,7 @@ def ingest_paid_hours(since: str | None = None, exclude_dates: set | None = None
             d = sorted(new_dates)
             log.info(
                 f"  Stitched raw paid hours: {f.name}  "
-                f"({len(df)} rows, {len(new_dates)} new date(s): {d[0]} … {d[-1]})"
+                f"({len(df)} rows, {len(new_dates)} new date(s): {d[0]} ... {d[-1]})"
             )
             frames.append(df)
         except Exception as e:
@@ -797,8 +797,8 @@ def run(mode: str = "incremental") -> bool:
 
     state = _load_state() if mode == "incremental" else {}
     if mode == "incremental":
-        log.info(f"  Production high-water mark:  {state.get('production')    or '(none — first run)'}")
-        log.info(f"  Paid hours high-water mark:  {state.get('paid_hours_raw') or '(none — first run)'}")
+        log.info(f"  Production high-water mark:  {state.get('production')    or '(none - first run)'}")
+        log.info(f"  Paid hours high-water mark:  {state.get('paid_hours_raw') or '(none - first run)'}")
         log.info("  Reading the full share and merging (high-water marks are diagnostic only).")
 
     # since=None / exclude_dates=None in BOTH modes, deliberately.

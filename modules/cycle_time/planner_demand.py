@@ -305,7 +305,7 @@ def build_report() -> None:
                 if near:  # close but not matched → likely a spelling rule we're missing
                     near_miss.append((wc, m, ctmap[near[0]]))
     if near_miss:
-        print(f"\nNEAR-MISS QA — {len(near_miss)} unmatched-but-close (review for new spelling rules):")
+        print(f"\nNEAR-MISS QA - {len(near_miss)} unmatched-but-close (review for new spelling rules):")
         for wc, m, a in near_miss[:20]:
             print(f"  {wc:<14} {m:<24} ~ {a}")
 

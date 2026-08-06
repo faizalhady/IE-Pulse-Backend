@@ -24,7 +24,7 @@ log = logging.getLogger(__name__)
 
 def run(mode: str = "incremental") -> bool:
     """Placeholder pipeline. Replace with real ingest + transform calls."""
-    log.info(f"PPQT pipeline placeholder invoked (mode={mode}) — nothing to do yet")
+    log.info(f"PPQT pipeline placeholder invoked (mode={mode}) - nothing to do yet")
     return True
 
 
