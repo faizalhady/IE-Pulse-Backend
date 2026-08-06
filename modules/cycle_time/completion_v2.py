@@ -45,6 +45,15 @@ _cnorm = lambda s: re.sub(r"[^A-Z0-9]", "", str(s).upper())       # customer key
 _snorm = lambda s: re.sub(r"\s+", " ", str(s).strip().upper())     # step display key
 _anorm = lambda s: re.sub(r"[^A-Z0-9]", "", str(s).upper())        # exact match key
 
+# `_cnorm` as SQL, for the queries that read the raw mart. The catalogue side
+# has always keyed on _cnorm while the raw side matched the customer string
+# EXACTLY, and the marts carry some workcells under two spellings — demand said
+# "MASIMO", IEDB said "Masimo". The exact match found nothing, the normalised
+# catalogue lookup found the model, and the two together reported a fully timed
+# model (25959-AB, 25 steps, 25 cycle times) as "in IEDB, nobody has timed it".
+# Same normalisation both sides or the bug comes straight back.
+_SQL_CNORM = "regexp_replace(upper(customer), '[^A-Z0-9]', '', 'g')"
+
 # An alias is a compound "CODE n - DISPLAY NAME", and the two sides disagree on
 # how much of it they store. IEDB writes the whole thing ("MA 1 - BACK MECH ASSY 1",
 # "TSTH 1 - TSTH TOP"); a workbook may write only the code ("MA 1", "PACKOUT 1").
@@ -395,8 +404,8 @@ class Ctx:
             SELECT DISTINCT assembly, process, alias, sub_workcenter,
                    "order" AS ord, cycle_time_per_process AS ct
             FROM read_parquet('{self.raw}')
-            WHERE customer = ? AND priority = 1
-        """, [customer]).fetchdf()
+            WHERE {_SQL_CNORM} = ? AND priority = 1
+        """, [_cnorm(customer)]).fetchdf()
         d = {}
         # Keyed on the STRIPPED name: 85 models were reported "not in IEDB" purely
         # because the demand plan carried a trailing space or a literal tab
@@ -425,8 +434,8 @@ class Ctx:
     def models(self, customer: str) -> set:
         if customer not in self._models:
             self._models[customer] = {str(a).strip() for a in self.con.execute(
-                f"SELECT DISTINCT assembly FROM read_parquet('{self.raw}') WHERE customer = ?",
-                [customer]).fetchdf()["assembly"]}
+                f"SELECT DISTINCT assembly FROM read_parquet('{self.raw}') WHERE {_SQL_CNORM} = ?",
+                [_cnorm(customer)]).fetchdf()["assembly"]}
         return self._models[customer]
 
     def resolve(self, customer: str, assembly: str):
