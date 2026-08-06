@@ -1576,6 +1576,17 @@ def _demand_frame() -> pd.DataFrame:
     return agg.merge(dom, on=["customer", "assembly"], how="left")
 
 
+def _completion_demand_key():
+    """Cache key for _completion_demand: the mtimes of every mart it reads.
+
+    Named rather than inlined so scripts/snapshot_completion.py can ask for the
+    exact same joined frame the report serves. Re-deriving demand a second time
+    is how the drawer and the badge ended up disagreeing.
+    """
+    eb = CT_MART["raw"].parent.parent / "ebuild"
+    return mart_key(CT_MART["completion_status_v2"], *(eb / n for n in _DEMAND_MARTS))
+
+
 @lru_cache(maxsize=8)
 def _completion_demand(_key) -> dict:
     """Completion status joined to demand, ranked by units. Cached on the mtimes
@@ -1669,9 +1680,7 @@ def ct_completion_demand(
         raise HTTPException(status_code=503,
                             detail="completion_status_v2 mart not built. Run scripts/run_completion_target.py first.")
 
-    eb = CT_MART["raw"].parent.parent / "ebuild"
-    data = _completion_demand(mart_key(CT_MART["completion_status_v2"],
-                                       *(eb / n for n in _DEMAND_MARTS)))
+    data = _completion_demand(_completion_demand_key())
     rows = data["models"]
     total = len(rows)
 
@@ -1701,6 +1710,90 @@ def ct_completion_demand(
         "unchecked": data["unchecked"],
         "scope": data["scope"],
         "models": rows,
+    }
+
+
+@router.get("/completion/history")
+def ct_completion_history(
+    plants:    Optional[str] = Query(None, description="Comma-separated plant codes. Omit for all."),
+    workcells: Optional[str] = Query(None, description="Comma-separated workcells. Takes precedence over `plants`."),
+    weeks:     int = Query(13, ge=1, le=104, description="How many recent ISO weeks to return."),
+):
+    """The 4Q view: completion measured by DEMAND UNITS, week by week.
+
+      -> { weeks:[{iso_week, units, complete_units, pct, models, complete_models}],
+           latest: {...}, losses:[{status, reason, units, models, pct}],
+           by_plant:[...], by_workcell:[...] }
+
+    Units, not models. Volume is concentrated - the top 500 of ~4,100 models are
+    88% of it - so a rate counted by model flatters the number badly.
+
+    `losses` is the Q3/Q4 half: every non-complete bucket, ranked by the units at
+    stake, and complete + losses sums back to 100%.
+    """
+    from modules.cycle_time import completion_history as hist
+
+    df = hist.load()
+    if df.empty:
+        raise HTTPException(status_code=503,
+                            detail="No completion history yet. Run scripts/snapshot_completion.py "
+                                   "after a completion refresh.")
+
+    if workcells:
+        want = {w.strip().casefold() for w in workcells.split(",") if w.strip()}
+        df = df[df["workcell"].astype(str).str.casefold().isin(want)]
+    elif plants:
+        want = {p.strip().casefold() for p in plants.split(",") if p.strip()}
+        df = df[df["plant"].astype(str).str.casefold().isin(want)]
+    if df.empty:
+        return {"weeks": [], "latest": None, "losses": [], "by_plant": [], "by_workcell": []}
+
+    keep = sorted(df["iso_week"].unique())[-weeks:]
+    df = df[df["iso_week"].isin(keep)]
+    done = df["status"] == "complete"
+
+    def _pct(part, whole):
+        return round(100 * part / whole, 1) if whole else None
+
+    # Q1 - the trend line.
+    trend = []
+    for wk, g in df.groupby("iso_week", sort=True):
+        u, m = int(g["units"].sum()), int(g["models"].sum())
+        cu = int(g.loc[g["status"] == "complete", "units"].sum())
+        cm = int(g.loc[g["status"] == "complete", "models"].sum())
+        trend.append({"iso_week": wk, "as_of": g["as_of"].max(),
+                      "units": u, "complete_units": cu, "pct": _pct(cu, u),
+                      "models": m, "complete_models": cm, "pct_models": _pct(cm, m)})
+
+    latest_week = keep[-1]
+    cur = df[df["iso_week"] == latest_week]
+    cur_units = int(cur["units"].sum())
+
+    # Q3/Q4 - where the missing percentage went. complete + losses = 100%.
+    losses = []
+    for (st, rs), g in cur.groupby(["status", "reason"], sort=False):
+        if st == "complete":
+            continue                     # the other side of the 100%, not a loss
+        u = int(g["units"].sum())
+        losses.append({"status": st, "reason": rs or "", "units": u,
+                       "models": int(g["models"].sum()), "pct": _pct(u, cur_units)})
+    losses.sort(key=lambda r: -r["units"])
+
+    def _split(col):
+        out = []
+        for k, g in cur.groupby(col, sort=False):
+            u = int(g["units"].sum())
+            cu = int(g.loc[g["status"] == "complete", "units"].sum())
+            out.append({col: k, "units": u, "complete_units": cu, "pct": _pct(cu, u),
+                        "models": int(g["models"].sum())})
+        return sorted(out, key=lambda r: -r["units"])
+
+    return {
+        "weeks": trend,
+        "latest": trend[-1] if trend else None,
+        "losses": losses,
+        "by_plant": _split("plant"),
+        "by_workcell": _split("workcell"),
     }
 
 

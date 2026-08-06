@@ -177,6 +177,17 @@ def main() -> None:
     logging.info("RESULT for this target list (%d models):\n%s",
                  len(mine), mine["status"].value_counts().to_string())
     logging.info("by source:\n%s", mine["source"].value_counts().to_string())
+
+    # Snapshot the week BEFORE declaring done. The status mart is overwritten by
+    # the next run, so if this is skipped that week's number is gone for good.
+    # Non-fatal: a failed snapshot must not make a good 4,000-model run look bad.
+    try:
+        from api.routers.cycle_time import _completion_demand, _completion_demand_key
+        from modules.cycle_time import completion_history as chist
+        chist.append(_completion_demand(_completion_demand_key())["models"], datetime.now())
+    except Exception as e:
+        logging.warning("weekly snapshot skipped: %s", e)
+
     logging.info("DONE - log: %s", p)
 
 

@@ -42,6 +42,11 @@ CT_MART = {
     # ── completion v2 (parallel marts — v1 above is left untouched as fallback) ──
     "completion_status_v2": CT_MART_DIR / "completion_status_v2.parquet",
     "completion_steps_v2":  CT_MART_DIR / "completion_steps_v2.parquet",
+    # One row per (iso_week, plant, workcell, status, reason) with models + units.
+    # The status marts above are SNAPSHOTS - each run overwrites them - so there
+    # was no way to answer "are we getting better?". This is the only cycle-time
+    # mart that accumulates.
+    "completion_history":   CT_MART_DIR / "completion_history.parquet",
     "mes_serial_index":     CT_MART_DIR / "mes_serial_index.parquet",  # (customer, assembly, serial) from #94
     # IEDB CustomerStatus coverage report, snapshotted by the pipeline instead of
     # fetched live per request. The live call cost 3.6s on every cold start and
