@@ -1592,7 +1592,7 @@ def _completion_demand(_key) -> dict:
                    + "|"
                    + f["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True))
 
-    keep = [c for c in ("status", "reason", "source", "expected", "present", "no_ct",
+    keep = [c for c in ("status", "reason", "near_match", "source", "expected", "present", "no_ct",
                         "not_in_iedb", "unmapped", "non_iedb", "actual_steps",
                         "coverage") if c in st.columns]
     # The status mart still carries both spellings of a few workcells (RESMED and
@@ -1712,12 +1712,46 @@ def ct_completion_steps(
     """MES actual route vs IEDB route for one model — the FE side-by-side.
       → { customer, assembly, mes:[{order,step,alias,qty,status}], iedb:[{process,alias,sub_workcenter,cycle_time}] }
     mes step status: present | missing | non_iedb | unmapped."""
-    p = CT_MART["completion_steps"]
-    if not p.exists():
+    # v2 FIRST. The Incompletion Report's badge comes from the v2 mart, so reading
+    # v1 here made the drawer disagree with the badge beside it — LIFE360
+    # 410-10152-00-Z1 showed a full IEDB route under a "Not in IEDB" chip, because
+    # the two panels were quoting different computations. v1 stays as the fallback
+    # for models v2 has not reached.
+    marts = [CT_MART["completion_steps_v2"], CT_MART["completion_steps"]]
+    if not any(m.exists() for m in marts):
         raise HTTPException(status_code=503, detail="completion_steps mart not built. POST /completion/refresh first.")
-    df = pd.read_parquet(p)
-    df = df[(df["customer"].astype(str).str.casefold() == customer.casefold())
-            & (df["assembly"].astype(str) == assembly)]
+    slices = []
+    for p in marts:
+        if not p.exists():
+            continue
+        d = pd.read_parquet(p)
+        # Demand plans carry stray whitespace and tabs in model names — match on
+        # the stripped value or the drawer 404s on a model the report just listed.
+        d = d[(d["customer"].astype(str).str.casefold() == customer.casefold())
+              & (d["assembly"].astype(str).str.strip() == assembly.strip())]
+        if not d.empty:
+            # The mart carries some workcells under two spellings (MASIMO and
+            # Masimo). Matching case-insensitively pulled BOTH copies in, so the
+            # drawer drew every step twice — once judged against IEDB, once
+            # unmapped. Keep one spelling: the copy that actually has an IEDB
+            # route, else the fuller one.
+            if d["customer"].nunique() > 1:
+                best = max(d["customer"].unique(),
+                           key=lambda c: (int((d[(d["customer"] == c)]["side"] == "IEDB").sum()),
+                                          int((d["customer"] == c).sum())))
+                d = d[d["customer"] == best]
+            slices.append(d)
+    # Take each side from the first mart that actually HAS it. v2 leads, but the
+    # two marts pull MES from different sources, so v2 can hold the IEDB route
+    # while only v1 saw production (LIFE360 410-10152-00-Z1). Preferring v2
+    # wholesale blanked the MES panel for those.
+    def _side(name):
+        for d in slices:
+            s = d[d["side"] == name]
+            if not s.empty:
+                return s
+        return pd.DataFrame(columns=slices[0].columns) if slices else pd.DataFrame()
+    df = pd.concat([_side("MES"), _side("IEDB")]) if slices else pd.DataFrame()
     if not df.empty:
         mes = [{"order": None if pd.isna(r["order"]) else int(r["order"]), "step": r["name"],
                 "alias": r["alias"], "qty": None if pd.isna(r["value"]) else int(r["value"]), "status": r["status"]}
@@ -1739,7 +1773,10 @@ def ct_completion_steps(
     """, [customer, assembly]).fetchdf()
     con.close()
     if idf.empty:
-        raise HTTPException(status_code=404, detail=f"No cycle-time data for {customer} / {assembly}.")
+        # 200 with empty sides, not 404. The drawer's query retried the 404 with
+        # backoff, so a model with nothing to show sat on a spinner instead of
+        # saying so. "Nothing here" is a result, not an error.
+        return {"customer": customer, "assembly": assembly, "mes": [], "iedb": []}
     iedb = [{"process": r["process"], "alias": r["alias"], "sub_workcenter": r["sub_workcenter"],
              "order": None if pd.isna(r["ord"]) else int(r["ord"]),
              "cycle_time": None if pd.isna(r["ct"]) else float(r["ct"])}
