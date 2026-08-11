@@ -26,6 +26,7 @@ load_dotenv(_ROOT / ".env")
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 import api.routers.cycle_time as ct_router_mod
 from core.database import init_db
@@ -55,6 +56,10 @@ from api.routers.smh         import router as smh_router
 log = setup_logging()
 
 app = FastAPI(title="IE Pulse API", version="1.0.0")
+
+# The big list endpoints (SMH's 32k rows, cycle-time raw) are repetitive JSON
+# that compresses ~10x. Nothing in front of this process compresses.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 app.add_middleware(
     CORSMiddleware,

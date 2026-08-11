@@ -18,14 +18,97 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+import json
 import logging
+import os
+
 import duckdb
 import pandas as pd
 
+from core.paths import DATA_MART_DIR
+from modules.ole import smh_scope
 from modules.ole.config import MART, WORKCELL_CONFIG, INDIRECT_LABOR_CONFIG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
+
+# Written by ingest; `coverage.share_from` is the oldest date the source share
+# still holds. Same file ingest and /api/health read.
+STATE_FILE = DATA_MART_DIR / ".ingest_state.json"
+
+# What a model with no SMH row earns.
+#   zero — it earns nothing (the truthful default; a gap looks like a gap)
+#   avg  — it earns its workcell's volume-weighted average SMH
+#
+# An env var, not a constant, so switching it back is a restart rather than an
+# edit-and-redeploy. The switch is fully reversible: the estimate is computed
+# here at run time and never written to the `smh` table, so flipping back to
+# `zero` and re-running reproduces the old numbers exactly.
+# Keep already-published OLE for dates the share can no longer supply. See
+# _freeze_history. Default off: the first run with it on locks that history for
+# good, so it is a decision, not a deploy side effect.
+FREEZE_HISTORY = os.getenv("OLE_FREEZE_HISTORY", "").strip().lower() in ("1", "true", "yes")
+
+SMH_FALLBACK = os.getenv("OLE_SMH_FALLBACK", "zero").strip().lower()
+if SMH_FALLBACK not in ("zero", "avg"):
+    log.warning(f"OLE_SMH_FALLBACK={SMH_FALLBACK!r} is not 'zero' or 'avg' -- using 'zero'.")
+    SMH_FALLBACK = "zero"
+
+
+def _share_cutoff() -> pd.Timestamp | None:
+    """Oldest date the share still covers, or None if unknown.
+
+    None means "recompute everything", which is the old behaviour — a missing
+    or unreadable state file must not silently freeze the whole mart.
+    """
+    try:
+        share_from = (json.loads(STATE_FILE.read_text(encoding="utf-8")).get("coverage")
+                      or {}).get("share_from")
+        return pd.Timestamp(share_from) if share_from else None
+    except Exception as e:                       # missing, corrupt, unparseable date
+        log.warning(f"Could not read share cutoff ({e}); recomputing all dates.")
+        return None
+
+
+def _planner_demand() -> pd.DataFrame | None:
+    """Planner demand, or None if that mart hasn't been built.
+
+    Written by a different pipeline (modules/cycle_time/planner_demand.py) that
+    is not in OLE's refresh chain. OLE must still compute without it, so a
+    missing file is a warning and a narrower report — never a failed run.
+    """
+    p = DATA_MART_DIR / "demand" / "planner_demand.parquet"
+    if not p.exists():
+        log.warning("No planner demand mart at %s -- SMH scope will be MES-only.", p)
+        return None
+    return pd.read_parquet(p)
+
+
+def _freeze_history(new: pd.DataFrame, cutoff: pd.Timestamp) -> pd.DataFrame:
+    """Keep published OLE for dates whose source files the share no longer has.
+
+    compute rebuilds every date from the raw marts each run, so an SMH edit today
+    moves numbers for every past week. That is right while the source data is
+    still there to check against — and wrong once retention has deleted it, since
+    those weeks were reported and can no longer be verified.
+
+    So: dates from `cutoff` on are recomputed as always; older dates keep the rows
+    already in the mart. The cutoff moves forward on its own as retention eats the
+    share, which means each run freezes a little more history.
+
+    The catch, and it is not small: a frozen row can never be regenerated. The
+    mart is its only copy — a later fix to this file will not reach it either.
+    """
+    if not MART["ole"].exists():
+        return new
+    old = pd.read_parquet(MART["ole"])
+    kept = old[old["date"] < cutoff]
+    if kept.empty:
+        return new
+    merged = pd.concat([kept, new[new["date"] >= cutoff]], ignore_index=True)
+    log.info(f"History frozen before {cutoff.date()}: {len(kept)} rows kept as published, "
+             f"{len(merged) - len(kept)} recomputed")
+    return merged.sort_values(["workcell", "date", "shift"]).reset_index(drop=True)
 
 
 def run() -> bool:
@@ -45,8 +128,27 @@ def run() -> bool:
     con.execute(f"CREATE VIEW smh_lookup AS SELECT * FROM read_parquet('{MART['smh']}')")
     log.info("Parquet views created")
 
-    # ── Step 1: Output SMH per workcell / date / shift ────────────────────────
+    # ── Step 0: per-workcell average SMH, for the fallback ────────────────────
+    # Weighted by volume, not a plain mean of the values: a model built 10,000
+    # times should shape the average more than one built twice.
     con.execute("""
+    CREATE TEMP TABLE smh_avg AS
+    SELECT p.workcell,
+           SUM(p.qty * s.smh_value) / NULLIF(SUM(p.qty), 0)      AS avg_smh
+    FROM production p
+    JOIN smh_lookup s
+      ON p.workcell = s.workcell
+     AND p.assembly = s.assembly
+    WHERE s.smh_value > 0
+    GROUP BY p.workcell
+    """)
+    # Per WORKCELL, not plant-wide: SMH differs by an order of magnitude between
+    # an SMT workcell and a box-build one, and each workcell is one scan stage.
+    fb = "COALESCE(a.avg_smh, 0)" if SMH_FALLBACK == "avg" else "0"
+    log.info(f"SMH fallback for models with no SMH: {SMH_FALLBACK}")
+
+    # ── Step 1: Output SMH per workcell / date / shift ────────────────────────
+    con.execute(f"""
     CREATE TEMP TABLE output_smh AS
     SELECT
         p.workcell,
@@ -55,7 +157,15 @@ def run() -> bool:
         COUNT(DISTINCT p.assembly)                              AS assembly_count,
         SUM(p.qty)                                             AS total_qty,
         SUM(CASE WHEN s.smh_value > 0
-                 THEN p.qty * s.smh_value ELSE 0 END)          AS effective_output_smh,
+                 THEN p.qty * s.smh_value
+                 ELSE p.qty * {fb} END)                        AS effective_output_smh,
+        -- How much of the above is guessed. 0 when the fallback is off, so the
+        -- number is always answerable: "how much of this OLE % is estimated?"
+        SUM(CASE WHEN s.smh_value > 0
+                 THEN 0
+                 ELSE p.qty * {fb} END)                        AS estimated_output_smh,
+        -- Still counted as missing even when the fallback fills it. An estimate
+        -- is not a measurement, and this is what the coverage page chases.
         SUM(CASE WHEN s.smh_value IS NULL OR s.smh_value = 0
                  THEN p.qty ELSE 0 END)                        AS qty_missing_smh,
         COUNT(DISTINCT CASE WHEN s.smh_value IS NULL
@@ -65,6 +175,8 @@ def run() -> bool:
     LEFT JOIN smh_lookup s
            ON p.workcell = s.workcell
           AND p.assembly = s.assembly
+    LEFT JOIN smh_avg a
+           ON p.workcell = a.workcell
     GROUP BY p.workcell, p.date, p.shift
     """)
     log.info("Step 1 complete -- output SMH computed")
@@ -113,6 +225,7 @@ def run() -> bool:
         COALESCE(o.assembly_count,        0)                    AS assembly_count,
         COALESCE(o.total_qty,             0)                    AS total_qty,
         ROUND(COALESCE(o.effective_output_smh, 0), 4)           AS effective_output_smh,
+        ROUND(COALESCE(o.estimated_output_smh, 0), 4)           AS estimated_output_smh,
         COALESCE(o.qty_missing_smh,       0)                    AS qty_missing_smh,
         COALESCE(o.assemblies_missing_smh, 0)                   AS assemblies_missing_smh,
 
@@ -223,9 +336,19 @@ def run() -> bool:
         * 100
     ).round(1)
 
+    # Off by default. Freezing is effectively irreversible — a frozen row can
+    # never be regenerated from source — so it has to be switched on
+    # deliberately, not acquired by deploying a new build.
+    cutoff = _share_cutoff() if FREEZE_HISTORY else None
+    if cutoff is not None:
+        result = _freeze_history(result, cutoff)
     result.to_parquet(MART["ole"], index=False)
 
+    # NOT frozen — coverage is a to-do list ("which assemblies still need an
+    # SMH"), not a reported number. It should always reflect the SMH table as it
+    # is now, including for assemblies last built before the cutoff.
     smh_status = con.execute("SELECT * FROM smh_assembly_status").df()
+    smh_status = smh_scope.apply_scope(smh_status, _planner_demand())
     smh_status.to_parquet(MART["smh_status"], index=False)
 
     # Indirect labor — attach plant + label from config, then write to its own mart

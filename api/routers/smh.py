@@ -77,7 +77,10 @@ def _ok(payload: dict) -> dict:
 def list_smh(
     workcell: Optional[str] = Query(None),
     search:   Optional[str] = Query(None, description="Substring match on assembly"),
-    limit:    int = Query(5000, ge=1, le=20000),
+    # The SMH page overlays the WHOLE live table on the coverage snapshot, so a
+    # cap below the row count (32k and growing) silently hid edits: any row past
+    # the cap kept showing the stale parquet value after a save.
+    limit:    int = Query(100000, ge=1, le=200000),
     offset:   int = Query(0, ge=0),
 ):
     return smh_store.list_smh(workcell=workcell, search=search, limit=limit, offset=offset)
@@ -141,6 +144,31 @@ def delete_smh(workcell: str, assembly: str, who: str = Depends(_editor)):
     except SmhError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return _ok({"deleted": {"workcell": workcell, "assembly": assembly}})
+
+
+@router.post("/notify")
+def notify(dry_run: bool = Query(True, description="Preview only. Set false to actually send."),
+           recipients: Optional[str] = Query(None, description="Comma-separated. Default: everyone opted into ole_smh."),
+           who: str = Depends(_editor)):
+    """Email the SMH coverage digest — one table, every workcell, PIC per row.
+
+    dry_run defaults to TRUE. This mails real colleagues, so sending has to be
+    the deliberate choice rather than the one you get by forgetting a flag.
+    """
+    from modules.ole import smh_email
+
+    rows = smh_email.build()
+    to = ([t.strip() for t in recipients.split(",") if t.strip()]
+          if recipients else smh_email.default_recipients())
+    if dry_run:
+        return {"dry_run": True, "to": to, "workcells": rows}
+
+    try:
+        sent = smh_email.send(rows, to)
+    except RuntimeError as e:                 # unset PULSE_BASE_URL, no relay, no recipients
+        raise HTTPException(status_code=503, detail=str(e))
+    log.info("SMH digest sent to %d recipients, triggered by %s", sent, who)
+    return {"dry_run": False, "sent": sent, "to": to, "workcells": rows}
 
 
 @router.post("/import")
