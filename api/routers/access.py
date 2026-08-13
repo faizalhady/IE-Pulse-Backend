@@ -12,8 +12,10 @@ One row per PERSON, not one per grant. A person has:
 Deliberately NOT a proxy to AD_GET. That service needs Windows auth and this
 backend runs as LocalSystem, so it would authenticate as the machine account
 rather than a person. The browser does NTLM for free in the intranet zone, so
-the UI searches AD_GET directly and posts whoever it picked. Everything here
-stores and serves what the UI already resolved.
+the UI searches AD_GET directly and posts whoever it picked.
+
+POSITION AND CUSTOMER ARE THE EXCEPTION — they are resolved HERE, not trusted
+from the client. See `_hc_index`.
 
 Endpoints:
   GET    /api/access                users, with workcells + notifications
@@ -24,6 +26,9 @@ Endpoints:
 """
 
 import logging
+import os
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -40,6 +45,120 @@ Level = Literal["viewer", "admin", "super_admin", "developer"]
 
 # Weakest to strongest — used for "is this person at least X?" checks.
 _RANK = {"viewer": 0, "admin": 1, "super_admin": 2, "developer": 3}
+
+
+# ─── Headcount lookup ────────────────────────────────────────────────────────
+# position/customer used to come from the client: the UI read them off AD_GET
+# when you picked the person and posted them along. That made every browser
+# tab a source of truth. A build that omitted the two fields sent no value,
+# Pydantic defaulted them to None, and the upsert wrote NULL over whatever was
+# there — three people were added that way before anyone noticed, and editing
+# an existing person would have wiped theirs too.
+#
+# HC.xlsx is the file AD_GET itself serves from, and it sits on this box, so
+# read it directly. No Windows auth involved — it is a file, not a service.
+# Now it does not matter what the client sends, or which bundle version the
+# browser is running: the values come from headcount either way.
+HC_XLSX = Path(os.getenv("HC_XLSX", r"D:\Application\RetrieveUserInfo\data\HC.xlsx"))
+
+# Spreadsheet column -> what we call it. Header text as AD_GET's HeadcountStore
+# reads it; a rename there breaks the lookup loudly (empty index) rather than
+# silently writing the wrong person's title.
+_HC_COLS = {"NT Account Name": "ntid", "Employee ID": "employee_id",
+            "Primary Work Email": "email", "Business Title": "position",
+            "Customer": "customer"}
+
+
+def _hc_mtime() -> int:
+    """Cache key — a headcount refresh must invalidate the index."""
+    try:
+        return HC_XLSX.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+@lru_cache(maxsize=2)
+def _hc_index(_key: int) -> dict[str, tuple[Optional[str], Optional[str]]]:
+    """lookup key -> (position, customer). ~12,300 rows, read once per refresh.
+
+    Indexed under NTID, employee id AND email because `user_access.ntid` holds
+    both spellings people are known by — numeric ('123755') and account name
+    ('LawC2'). All keys are casefolded.
+    """
+    if not HC_XLSX.exists():
+        log.warning("access: headcount not found at %s — position/customer "
+                    "will fall back to whatever the client sent", HC_XLSX)
+        return {}
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(HC_XLSX, read_only=True, data_only=True)
+        ws = wb[wb.sheetnames[0]]
+        rows = ws.iter_rows(values_only=True)
+        header = [str(h).strip() if h is not None else "" for h in next(rows)]
+        idx = {_HC_COLS[h]: i for i, h in enumerate(header) if h in _HC_COLS}
+        missing = set(_HC_COLS.values()) - set(idx)
+        if missing:
+            log.error("access: headcount is missing columns %s — not indexing", missing)
+            return {}
+
+        out: dict[str, tuple[Optional[str], Optional[str]]] = {}
+        for r in rows:
+            def cell(name: str) -> Optional[str]:
+                v = r[idx[name]]
+                return str(v).strip() or None if v is not None else None
+            pair = (cell("position"), cell("customer"))
+            if pair == (None, None):
+                continue
+            for key_col in ("ntid", "employee_id", "email"):
+                k = cell(key_col)
+                if k:
+                    out.setdefault(k.casefold(), pair)
+        wb.close()
+        log.info("access: headcount indexed — %d keys from %s", len(out), HC_XLSX.name)
+        return out
+    except Exception:                                   # noqa: BLE001
+        # Never take the roster down because a spreadsheet moved or is locked.
+        log.exception("access: could not read headcount — falling back to client values")
+        return {}
+
+
+def hc_person(key: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """(position, customer) from headcount, or (None, None) if unknown."""
+    if not key:
+        return (None, None)
+    return _hc_index(_hc_mtime()).get(key.casefold(), (None, None))
+
+
+def resolve_hc(ntid: Optional[str], email: Optional[str],
+               position: Optional[str] = None,
+               customer: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    """Headcount first, the caller's values only as a fallback.
+
+    Neither field is editable in the UI, so a client value is at best a stale
+    copy of this same file. Falling back to it still matters for people
+    headcount has never heard of — contractors, or someone added before their
+    HC row lands.
+    """
+    pos, cust = hc_person(ntid)
+    if not (pos or cust):                       # NTID unknown — try their email
+        pos, cust = hc_person(email)
+    return (pos or position, cust or customer)
+
+
+# One statement, one place. The COALESCEs are the guarantee that a save can
+# never destroy a value it did not supply — tests/test_access_hc.py runs THIS
+# string, so weakening it here fails the check rather than passing quietly.
+UPSERT_SQL = """
+    INSERT INTO user_access (ntid, name, email, position, customer, level, apps, added_by)
+    VALUES (?,?,?,?,?,?,?,?)
+    ON CONFLICT (ntid) DO UPDATE SET
+        name     = COALESCE(excluded.name,     user_access.name),
+        email    = COALESCE(excluded.email,    user_access.email),
+        position = COALESCE(excluded.position, user_access.position),
+        customer = COALESCE(excluded.customer, user_access.customer),
+        level = excluded.level, apps = excluded.apps,
+        updated_at = datetime('now')
+"""
 
 
 class UserIn(BaseModel):
@@ -117,10 +236,32 @@ def _guard_demotion(conn, ntid: str, caller: str, new_level: Optional[str]) -> N
         raise HTTPException(403, "This is the last developer — promote someone else first.")
 
 
+def _heal_missing_hc(conn, users: list[dict]) -> None:
+    """Fill any NULL position/customer from headcount, in place and in the DB.
+
+    Self-healing rather than a one-off migration: rows can be NULL because they
+    were written by an old client, because HC was unreachable at save time, or
+    because the person's HC record only landed later. Opening the page fixes
+    all three. Only touches rows that are actually missing something.
+    """
+    for u in users:
+        if u.get("position") and u.get("customer"):
+            continue
+        pos, cust = resolve_hc(u["ntid"], u.get("email"),
+                               u.get("position"), u.get("customer"))
+        if (pos, cust) == (u.get("position"), u.get("customer")):
+            continue                                    # headcount knows no more
+        conn.execute("UPDATE user_access SET position = ?, customer = ? WHERE ntid = ?",
+                     (pos, cust, u["ntid"]))
+        u["position"], u["customer"] = pos, cust
+        log.info("access: filled %s from headcount — %s / %s", u["ntid"], pos, cust)
+
+
 @router.get("", dependencies=[Depends(verified_ntid)])
 def list_users():
     with get_conn() as conn:
         users = _load_users(conn)
+        _heal_missing_hc(conn, users)
     return {"count": len(users), "users": users}
 
 
@@ -204,18 +345,13 @@ def recipients(key: str = Query("ole_smh", description="Notification key, e.g. '
 @router.put("/{ntid}")
 def upsert_user(ntid: str, body: UserIn, caller: str = Depends(require_level("developer"))):
     apps = ",".join(body.apps) if body.apps else "all"
+
+    position, customer = resolve_hc(ntid, body.email, body.position, body.customer)
+
     with get_conn() as conn:
         _guard_demotion(conn, ntid, caller, body.level)
-        conn.execute("""
-            INSERT INTO user_access (ntid, name, email, position, customer, level, apps, added_by)
-            VALUES (?,?,?,?,?,?,?,?)
-            ON CONFLICT (ntid) DO UPDATE SET
-                name = excluded.name, email = excluded.email,
-                position = excluded.position, customer = excluded.customer,
-                level = excluded.level, apps = excluded.apps,
-                updated_at = datetime('now')
-        """, (ntid, body.name, body.email, body.position, body.customer,
-              body.level, apps, body.added_by))
+        conn.execute(UPSERT_SQL, (ntid, body.name, body.email, position, customer,
+                                  body.level, apps, body.added_by))
 
         # Replace rather than merge: the dialog always sends the full intended
         # set, so anything absent was deliberately un-ticked.
