@@ -96,6 +96,17 @@ def startup():
     _warm_caches()
 
 
+def _warm_universe(ct, CT_MART):
+    """Warm /universe/summary. Its cache key is the mtimes of six marts, so it
+    is built here rather than inlined in the job list."""
+    from core.mart_cache import mart_key
+    ct_dir, eb = CT_MART["raw"].parent, CT_MART["raw"].parent.parent / "ebuild"
+    return ct._universe_summary(mart_key(
+        ct_dir / "assembly_catalog.parquet", ct_dir / "raw.parquet",
+        ct_dir / "completion_status_v2.parquet", eb / "runners.parquet",
+        eb / "projection_runners.parquet", eb / "planner_runners.parquet"))
+
+
 def _warm_caches() -> None:
     """Populate the mart caches in the background so the first real visitor
     doesn't pay for them.
@@ -119,6 +130,13 @@ def _warm_caches() -> None:
             ("cycle-time/customer-status",
              lambda: ct_router_mod._customer_status_from_mart(mart_key(CT_MART["customer_status"]))
                      if CT_MART["customer_status"].exists() else None),
+            # The demand table and the Coverage page. `demand` is warmed as
+            # SERIALISED BYTES, not just the frame — the encoding was 0.3s of a
+            # 2s response and the first visitor after every restart paid it.
+            ("cycle-time/completion-demand",
+             lambda: ct_router_mod._completion_demand_json(
+                 ct_router_mod._completion_demand_key())),
+            ("cycle-time/universe-summary", lambda: _warm_universe(ct_router_mod, CT_MART)),
         ]
         for name, fn in jobs:
             t0 = time.time()
