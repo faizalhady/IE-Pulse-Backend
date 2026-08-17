@@ -335,13 +335,24 @@ class Ctx:
     def __init__(self):
         self.con = duckdb.connect()
         self.raw = CT_MART["raw"].as_posix()
-        pm = pd.read_parquet(CT_MART["mes_process_map"])
-        self.pmap, self.pknown = {}, set()
-        for c, s, a, isie in zip(pm["customer"], pm["step_instance"], pm["iedb_alias"], pm["is_iedb"]):
-            k = (_cnorm(c), s)
-            self.pknown.add(k)
-            if isie:
-                self.pmap[k] = a
+        # ONE bridge loader, not a workbook read plus a decision overlay bolted
+        # on. `process_bridge` layers the workbook, the names real scans taught
+        # us, and the engineers' answers — in that order — and its selfcheck
+        # asserts it never resolves fewer names than the workbook alone.
+        # Before this, the registry that was built to BE the bridge was read by
+        # nobody and 105 answered names were stranded.
+        from modules.cycle_time.process_bridge import load as _load_bridge
+        self.pmap, self.pknown, _bstats = _load_bridge(CT_MART["raw"].parent.parent)
+        self._load_iedb()
+
+    def _load_iedb(self) -> None:
+        """The IEDB side: catalogue, per-model cycle-time index, suffix keys.
+
+        This used to be the tail of a method called `_apply_decisions`, which by
+        then did two unrelated jobs — overlay the engineers' answers AND load
+        every IEDB structure. The overlay moved to `process_bridge`; what is left
+        is the loading, so it is named for that.
+        """
         self._iedb, self._models, self._desuf, self._desufkeys = {}, {}, {}, {}
         # The FULL IEDB catalogue, including assemblies with no cycle time. `raw`
         # only holds rows that HAVE a cycle time, so a model that exists in IEDB
@@ -472,6 +483,13 @@ class Ctx:
             return True
         return _front_match(self._catkeys[cn], d, k) is not None
 
+    def in_catalog_exact(self, cn: str, assembly: str) -> bool:
+        """Does IEDB list this model under THIS EXACT name — no suffix or front
+        matching. Used to stop a model borrowing a neighbour's route: if IEDB
+        knows the name, that name answers for itself or not at all."""
+        d = self.catalog.get(cn)
+        return bool(d) and _anorm(str(assembly).strip()) in d
+
     def near(self, cn: str, assembly: str) -> str:
         """The catalogue entry this model most likely IS, when nothing matched.
         Surfaced rather than applied — `853-238767-003-OP2` and `-S1` and `-OP3`
@@ -559,8 +577,15 @@ REASONS = {
 def classify(ctx: Ctx, customer: str, assembly: str, steps: list[tuple], source: str) -> tuple[dict, list]:
     """`steps` = [(names:list[str], order:int, qty:int), ...] already deduped."""
     cn = _cnorm(customer)
+    # `graded_on` is stamped HERE, not at _flush(). run() upserts, so a flush
+    # rewrites every row including the thousands it never touched — stamping
+    # there would date the whole mart to the last run and destroy the one fact
+    # this column exists to record. Until 2026-08-17 there was no timestamp at
+    # all: a row graded in June and a row graded this morning were
+    # indistinguishable, which is how 1,666 rows carrying statuses the code can
+    # no longer emit sat unnoticed behind numbers people were reporting upward.
     r = {"customer": customer, "assembly": assembly, "status": None, "reason": "",
-         "source": source,
+         "source": source, "graded_on": pd.Timestamp.now().isoformat(timespec="seconds"),
          "expected": 0, "present": 0, "no_ct": 0, "not_in_iedb": 0, "unmapped": 0,
          "non_iedb": 0, "actual_steps": len(steps), "coverage": None,
          "missing_ct": "", "gap_steps": "", "near_match": ""}
@@ -592,6 +617,22 @@ def classify(ctx: Ctx, customer: str, assembly: str, steps: list[tuple], source:
              "alias": "", "sub_workcenter": None, "order": order, "value": qty,
              "status": "unmapped", "source": source}
             for names, order, qty in sorted(steps, key=lambda x: (x[1], x[0][0]))]
+    # resolve() falls back to a suffix / front-name match after an exact miss.
+    # That is right for spelling differences ('AK-01-AKMCAC2-SUB' vs
+    # 'AK01-AKMCAC2') and wrong for neighbouring part numbers: 810-495659-106C
+    # has no cycle time of its own, matched 810-495659-106A, and was reported
+    # COMPLETE off a route belonging to a different model. 15 LAM RESEARCH
+    # models read that way, ~3,700 planner units behind them.
+    #
+    # If IEDB lists this EXACT name, it answers for itself or not at all.
+    if akey != str(assembly).strip() and ctx.in_catalog_exact(cn, assembly):
+        return {**r, "status": "no_cycle_time", "reason": "in_iedb_untimed"}, [
+            {"customer": customer, "assembly": assembly, "side": "MES",
+             "name": names[0], "name2": names[1] if len(names) > 1 else "",
+             "alias": "", "sub_workcenter": None, "order": order, "value": qty,
+             "status": "unmapped", "source": source}
+            for names, order, qty in sorted(steps, key=lambda x: (x[1], x[0][0]))]
+
     if cn in _NON_MES:
         return {**r, "status": "not_in_mes", "reason": "workcell_not_on_mes",
                 "actual_steps": 0, "source": "none"}, []
@@ -634,17 +675,37 @@ def classify(ctx: Ctx, customer: str, assembly: str, steps: list[tuple], source:
               "coverage": round((len(steps) - counts["unmapped"]) / len(steps), 2),
               "missing_ct": "; ".join(sorted(set(no_ct))),
               "gap_steps": "; ".join(sorted(set(gap)))})
-    if counts["no_ct"] or counts["not_in_iedb"]:
-        r["status"] = "incomplete"
-        r["reason"] = ("missing_ct+step" if counts["no_ct"] and counts["not_in_iedb"]
-                       else "missing_ct" if counts["no_ct"] else "missing_step")
-    elif counts["present"]:
-        r["status"] = "complete"
-    else:
-        # MES ran steps but not one of them could be tied to the IEDB route. We
-        # cannot show it as complete on evidence we do not have.
-        r["status"], r["reason"] = "incomplete", "unmapped"
+    r["status"], r["reason"] = _verdict(counts)
     return r, rows + _iedb_rows(customer, assembly, ie)
+
+
+def _verdict(counts: dict) -> tuple[str, str]:
+    """(status, reason) from the per-step tally. Pure — see _selfcheck.
+
+    COMPLETE means every step MES ran was checked and passed, so a step we could
+    not even NAME has to count against it. Until 2026-08-16 this ignored
+    `unmapped` and one matched step was enough to be called complete: 206 of
+    1,139 complete rows in prod carried unmapped steps, worst being ELENION
+    `3KC93830ACAA01Z1` at 2 matched / 39 unmapped — a model nobody had verified,
+    showing green.
+
+    `unmapped` keeps its OWN reason rather than folding into missing_ct /
+    missing_step, because it is OUR gap (the naming bridge could not identify the
+    step) not IEDB's (a cycle time is genuinely absent). The report and the FE
+    both rely on that split — the FE renders it "steps unrecognised". Collapsing
+    them would blame IEDB for our own mapping holes.
+    """
+    if counts["no_ct"] or counts["not_in_iedb"] or counts["unmapped"]:
+        return "incomplete", (
+            "missing_ct+step" if counts["no_ct"] and counts["not_in_iedb"]
+            else "missing_ct" if counts["no_ct"]
+            else "missing_step" if counts["not_in_iedb"]
+            else "unmapped")
+    if counts["present"]:
+        return "complete", ""
+    # Every step was excluded as non_iedb, or there were none. Nothing was
+    # verified, so it cannot be complete. Unreachable in prod today (0 rows).
+    return "incomplete", "unmapped"
 
 
 def _iedb_rows(customer: str, assembly: str, ie) -> list:
@@ -984,6 +1045,27 @@ def _selfcheck():
     # after one can only match if the ALIAS backs it up.
     assert m(["ASSEMBLY 2"])[0] == "unmapped"
     print("match ladder OK")
+
+    # ── COMPLETE <=> nothing left unchecked ─────────────────────────────────
+    # The 16 Aug fix. A model is complete only when every step MES ran was both
+    # named AND timed. Delete `or counts["unmapped"]` in _verdict and the third
+    # assert fails — that one line was worth 206 false greens in prod.
+    v = lambda **k: _verdict({"present": 0, "no_ct": 0, "not_in_iedb": 0,
+                              "unmapped": 0, "non_iedb": 0, **k})
+    assert v(present=17) == ("complete", "")
+    assert v(present=17, non_iedb=3) == ("complete", "")      # excluded by design, harmless
+    assert v(present=17, unmapped=1) == ("incomplete", "unmapped")   # 810-028298-005C
+    assert v(present=2, unmapped=39) == ("incomplete", "unmapped")   # ELENION
+    assert v(present=10, no_ct=2) == ("incomplete", "missing_ct")
+    assert v(present=10, not_in_iedb=2) == ("incomplete", "missing_step")
+    assert v(present=10, no_ct=1, not_in_iedb=2) == ("incomplete", "missing_ct+step")
+    # IEDB's gap outranks ours: a real missing time is the headline, not our
+    # inability to name some other step.
+    assert v(present=10, no_ct=1, unmapped=5) == ("incomplete", "missing_ct")
+    assert v(non_iedb=4) == ("incomplete", "unmapped")        # nothing verified at all
+    for st, rs in [v(present=1), v(present=1, unmapped=1), v(present=1, no_ct=1)]:
+        assert rs in REASONS[st], (st, rs)                    # reason stays in vocabulary
+    print("verdict rule OK")
 
     # ── #132 circuit breaker: an all-404 customer must bail, not grind ────────
     # Fake 500 models x 3 serials. Without the breaker this is 1,500 calls; with

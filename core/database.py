@@ -201,6 +201,40 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_smh_audit_row
                 ON smh_audit (workcell, assembly, changed_at DESC);
+
+            -- An engineer's answer to "what IS this MES step?".
+            --
+            -- IEDB's step name is a free-text box, so MES scans names that no
+            -- mapping covers - 105 of them across 14 workcells. They cannot be
+            -- derived: matching by name is 38% right, by neighbouring scan 27%,
+            -- by bay 55%. Only someone who works the line knows, and until now
+            -- there was nowhere for them to say so.
+            --
+            -- answer:  'mapped'    -> iedb_alias names the IEDB process
+            --          'non_iedb'  -> real work, but IEDB never prices it
+            --                         (rework, RMA, debug, handling)
+            --          'unknown'   -> asked and could not say. Kept on purpose:
+            --                         "nobody answered" and "nobody looked" are
+            --                         different, and one hard step must never
+            --                         stall the queue.
+            --
+            -- evidence is what was on screen when they decided - so a verdict
+            -- can be re-read later without re-deriving it.
+            CREATE TABLE IF NOT EXISTS process_decision (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                workcell    TEXT NOT NULL,
+                mes_step    TEXT NOT NULL,   -- byte-exact; trailing spaces matter
+                answer      TEXT NOT NULL CHECK (answer IN
+                                ('mapped', 'non_iedb', 'unknown')),
+                iedb_alias  TEXT,            -- NULL unless answer='mapped'
+                evidence    TEXT,
+                decided_by  TEXT NOT NULL,   -- NTID, from the bearer token
+                decided_on  TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (workcell, mes_step)  -- one live answer; re-deciding replaces
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_process_decision_wc
+                ON process_decision (workcell);
         """)
     _migrate_saved_reports()
 

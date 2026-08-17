@@ -21,18 +21,87 @@ Design notes
 """
 
 from __future__ import annotations
+import os
 import re
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 BASE = Path(__file__).parent.parent.parent          # IE-Pulse-Backend/
-DEMAND_DIR = BASE / "data" / "demand" / "CH" / "Original Demand"
-ROOT_DIR = BASE / "data" / "demand"                 # Arista lives here, not in CH/
+
+# The planners' folder IS Choi Hui's SharePoint, synced by OneDrive ("Add shortcut to My
+# files" on Desktop/8020 AP/8020). Reading the live sync is what keeps this mart fresh —
+# the previous hand-copied snapshot under data/demand/CH/ went 3 weeks stale unnoticed.
+# Override with PLANNER_DEMAND_DIR on a box with no OneDrive session (mypenm0iesvr02).
+_SYNCED = Path.home() / "OneDrive - Jabil" / "Choihui Law's files - 8020" / "Original Demand"
+DEMAND_DIR = Path(os.environ.get("PLANNER_DEMAND_DIR") or _SYNCED)
+ROOT_DIR = BASE / "data" / "demand"                 # Arista lives here, not in the share
 DIRS = {"od": DEMAND_DIR, "root": ROOT_DIR}
 OUT_PARQUET = BASE / "data" / "mart" / "demand" / "planner_demand.parquet"
 
 _DATE_HDR = re.compile(r"^\d{2}-\d{2}-\d{2}$")       # MM-DD-YY weekly capmodel header
+
+# Month words accepted in a monthly-grid header. Exact membership, never prefix matching
+# — a column called "Marketing" must not read as March.
+_MONTH_WORDS = {w: i for i, names in enumerate(
+    [("jan", "january"), ("feb", "february"), ("mar", "march"), ("apr", "april"),
+     ("may",), ("jun", "june"), ("jul", "july"), ("aug", "august"),
+     ("sep", "sept", "september"), ("oct", "october"), ("nov", "november"),
+     ("dec", "december")], 1) for w in names}
+
+
+def _resolve(base: str, pattern: str) -> Path | None:
+    """Newest file matching a manifest glob, or None. The planners re-date their own
+    filenames ("...Capmodel 062326.xlsx" -> "...072826.xlsx") and OneDrive leaves
+    "(1) (2)" duplicates behind, so match a pattern and take the newest hit."""
+    hits = sorted(DIRS[base].glob(pattern), key=lambda p: p.stat().st_mtime)
+    return hits[-1] if hits else None
+
+
+def _as_of(path: Path) -> date:
+    """Freshness of a source = when the planner last saved it. The date inside a
+    filename is a content label they do not reliably bump — the Danaher capmodel still
+    reads 062326 but was re-saved 3 Aug — so mtime is the only honest signal."""
+    return date.fromtimestamp(path.stat().st_mtime)
+
+
+def _month_cols(cells, ref: date) -> dict:
+    """Header cells -> {col: first-of-month date}. Accepts real datetimes, 'YYYY-MM'
+    strings, and month words ("July", "Sept'26").
+
+    Any year written in the cell is IGNORED: Micron ships "Sept'27" for Sep-26 and Cohu
+    ships a bare "July"/"Aug"/"Sep". The year is anchored on the file's own date instead,
+    then rolled forward whenever the month sequence decreases (Dec -> Jan).
+    """
+    found = []
+    for c in cells.index:
+        s = str(cells[c]).strip()
+        if not s or s.lstrip("-").replace(".", "").isdigit():
+            continue            # bare numbers are quantities/ids, not months
+                                # (lstrip only, so "2026-09-01" still reaches the parser)
+        d = pd.to_datetime(s, errors="coerce")
+        if pd.notna(d) and 2000 <= d.year <= 2100:
+            found.append((c, d.month))
+            continue
+        w = re.match(r"[A-Za-z]+", s)
+        if w and w.group().lower() in _MONTH_WORDS:
+            found.append((c, _MONTH_WORDS[w.group().lower()]))
+    if not found:
+        return {}
+    found.sort()
+    # ponytail: anchor = the year putting the FIRST column nearest the file's own date.
+    # Assumes these are forward-looking plans (they are). A grid that opens with months
+    # already >6 months in the past would anchor a year late.
+    first = found[0][1]
+    year = min((abs((date(y, first, 1) - ref).days), y)
+               for y in (ref.year - 1, ref.year, ref.year + 1))[1]
+    out, prev = {}, None
+    for c, mon in found:
+        if prev is not None and mon < prev:
+            year += 1
+        out[c], prev = date(year, mon, 1), mon
+    return out
 
 # Profit-center code → cycle-time workcell (config) name. '(skip)' = extract but drop.
 PC2WC = {
@@ -136,25 +205,15 @@ def _parse_weekly_wide(path: Path, sheet: str, workcell: str, model_col: int = 0
 
 
 def _parse_monthly(path: Path, sheet: str, workcell: str, header_row: int, model_col: int,
-                   month_spec, drop_models: tuple = (), rollover: bool = False) -> list[tuple]:
-    """Single-workcell monthly-wide grid. month_spec='auto' parses the header cells as
-    dates (rollover=True fixes the 'all stamped 2026 but sequence rolls into 2027' glitch);
-    or pass an explicit {col: 'YYYY-MM-DD'} for files with string/typo month labels."""
-    from datetime import date as _date
+                   drop_models: tuple = ()) -> list[tuple]:
+    """Single-workcell monthly-wide grid. Month columns are read from the header via
+    _month_cols(), which tolerates real dates, 'YYYY-MM' strings and bare month words.
+    The old hardcoded {col: 'YYYY-MM-DD'} maps are gone — they silently mislabelled a
+    quarter the moment a planner rolled their sheet forward."""
     raw = pd.read_excel(path, sheet_name=sheet, header=None)
-    if month_spec == "auto":
-        hdr = raw.iloc[header_row]
-        cols = sorted((c, pd.to_datetime(str(hdr[c]), errors="coerce")) for c in raw.columns
-                      if pd.notna(pd.to_datetime(str(hdr[c]), errors="coerce"))
-                      and 2025 <= pd.to_datetime(str(hdr[c]), errors="coerce").year <= 2030)
-        months, off, prev = {}, 0, 0
-        for c, d in cols:
-            if rollover and d.month < prev:
-                off += 1
-            prev = d.month
-            months[c] = _date(d.year + off, d.month, 1)
-    else:
-        months = {c: pd.to_datetime(v).date().replace(day=1) for c, v in month_spec.items()}
+    months = _month_cols(raw.iloc[header_row], _as_of(path))
+    if not months:
+        raise ValueError(f"{path.name} [{sheet}]: no month columns found in row {header_row}")
     rows = []
     for _, r in raw.iloc[header_row + 1:].iterrows():
         m = str(r[model_col]).strip()
@@ -168,45 +227,66 @@ def _parse_monthly(path: Path, sheet: str, workcell: str, header_row: int, model
 
 
 # ─── Manifest — kept, deduped sources only (one per workcell). ──────────────────
+# "file" is a GLOB, matched against the synced folder and resolved newest-first, because
+# the planners re-date their filenames. Keep a pattern tight enough not to swallow a
+# sibling file for a different workcell (see LAMMECH below).
 MANIFEST = [
-    {"file": "Danaher, TMO, Fortive, Masimo & BD SMT Capmodel 062326.xlsx",
-     "shape": "capmodel", "sheet": "MPS (PO)", "part_col": 10, "label_col": 11, "as_of": "2026-06-23"},
-    {"file": "AOP1 SMT Capmodel 062426 rev00.xlsx",
-     "shape": "capmodel", "sheet": "MPS (PO)", "part_col": 10, "label_col": 11, "as_of": "2026-06-24"},
-    {"file": "Schedule Xtab_SCR_260622 Keysight TOP Model AOP.xlsx",
-     "shape": "capmodel", "sheet": "Schedule Xtab", "part_col": 5, "label_col": 6, "as_of": "2026-06-22"},
-    {"file": "PLAN ORDER-060326_ppqt date 5 June26 Resmed.xlsx",
+    {"file": "Danaher, TMO, Fortive, Masimo & BD SMT Capmodel *.xlsx",
+     "shape": "capmodel", "sheet": "MPS (PO)", "part_col": 10, "label_col": 11},
+    {"file": "AOP1 SMT Capmodel *.xlsx",
+     "shape": "capmodel", "sheet": "MPS (PO)", "part_col": 10, "label_col": 11},
+    {"file": "Schedule Xtab_SCR_*Keysight*.xlsx",
+     "shape": "capmodel", "sheet": "Schedule Xtab", "part_col": 5, "label_col": 6},
+    {"file": "PLAN ORDER-*Resmed.xlsx",
      "shape": "order", "sheet": "Sheet1", "workcell": "ResMed",
-     "model_col": 0, "qty_col": 2, "date_col": 3, "as_of": "2026-06-03"},
+     "model_col": 0, "qty_col": 2, "date_col": 3},
+    # exact, NOT a glob: "LAMMECH Forecast_LBR 1 LAMGB.xlsx" sits beside it and is LAMGB
     {"file": "LAMMECH Forecast_LBR.xlsx",
      "shape": "long", "sheet": "Output", "workcell": "LAMMEC",
-     "model_col": "Part", "qty_col": "Quantity", "date_col": "Date", "as_of": "2026-06-08"},
+     "model_col": "Part", "qty_col": "Quantity", "date_col": "Date"},
     {"file": "ARISTA.xlsx", "base": "root",
      "shape": "weekly_wide", "sheet": "Sheet2", "workcell": "ARISTANETWORKS",
-     "model_col": 0, "as_of": "2026-06-29"},
-    {"file": "Demand Plan Jun26 - Advantest.xlsx",
+     "model_col": 0},
+    {"file": "Demand Plan *Advantest.xlsx",
      "shape": "monthly", "sheet": "Sheet1", "workcell": "ADVANTEST",
-     "header_row": 1, "model_col": 0, "month_spec": "auto", "drop_models": ["Total System"], "as_of": "2026-06-01"},
+     "header_row": 1, "model_col": 0, "drop_models": ["Total System"]},
     {"file": "Medtronic CTB.xlsx",
      "shape": "monthly", "sheet": "Medtronic CTB", "workcell": "Medtronic",
-     "header_row": 0, "model_col": 0, "month_spec": "auto", "rollover": True, "as_of": "2026-06-01"},
+     "header_row": 0, "model_col": 0},
     {"file": "Micron CTB.xlsx",
      "shape": "monthly", "sheet": "Micron CTB", "workcell": "MICRON SIG",
-     "header_row": 0, "model_col": 2, "month_spec": {3: "2026-07-01", 4: "2026-08-01", 5: "2026-09-01"}, "as_of": "2026-06-01"},
-    {"file": "COHU HLA - CTB (July_Aug_Sep).xlsx",
+     "header_row": 0, "model_col": 2},
+    {"file": "COHU HLA - CTB*.xlsx",
      "shape": "monthly", "sheet": "HLA (Sub Assy) - CTB", "workcell": "Cohu",
-     "header_row": 2, "model_col": 2, "month_spec": {3: "2026-07-01", 4: "2026-08-01", 5: "2026-09-01"}, "as_of": "2026-06-01"},
-    {"file": "COHU HLA - CTB (July_Aug_Sep).xlsx",
+     "header_row": 2, "model_col": 2},
+    {"file": "COHU HLA - CTB*.xlsx",
      "shape": "monthly", "sheet": "HLA (Base system) - CTB", "workcell": "Cohu",
-     "header_row": 2, "model_col": 2, "month_spec": {3: "2026-07-01", 4: "2026-08-01", 5: "2026-09-01"}, "as_of": "2026-06-01"},
+     "header_row": 2, "model_col": 2},
 ]
 
 
 def build_planner_demand() -> int:
-    """Parse every manifest source → write planner_demand.parquet. Returns row count."""
-    all_rows = []
+    """Parse every manifest source → write planner_demand.parquet. Returns row count.
+
+    A source whose glob matches nothing is reported and skipped, never fatal: one file
+    renamed past its pattern must not take the other 11 workcells down with it. A missing
+    FOLDER is fatal, though — see below."""
+    # Guard the whole-folder case first. Path.glob() on a non-existent directory raises
+    # nothing, so without this a box with no OneDrive session (mypenm0iesvr02) would skip
+    # all 11 shared sources, still parse ARISTA.xlsx out of the repo, and quietly
+    # overwrite a good 28k-row mart with an Arista-only one.
+    if not DEMAND_DIR.exists():
+        raise RuntimeError(
+            f"planner-demand: {DEMAND_DIR} does not exist. That is the OneDrive-synced "
+            f"SharePoint folder; this box has no sync. Set PLANNER_DEMAND_DIR to a copy, "
+            f"or run this on a machine where the share is synced. Refusing to write.")
+
+    all_rows, missing = [], []
     for m in MANIFEST:
-        path = DIRS[m.get("base", "od")] / m["file"]
+        path = _resolve(m.get("base", "od"), m["file"])
+        if path is None:
+            missing.append(m["file"])
+            continue
         if m["shape"] == "capmodel":
             rows = _parse_capmodel(path, m["sheet"], m["part_col"], m["label_col"])
         elif m["shape"] == "order":
@@ -216,12 +296,27 @@ def build_planner_demand() -> int:
         elif m["shape"] == "weekly_wide":
             rows = _parse_weekly_wide(path, m["sheet"], m["workcell"], m.get("model_col", 0))
         elif m["shape"] == "monthly":
-            rows = _parse_monthly(path, m["sheet"], m["workcell"], m["header_row"], m["model_col"],
-                                  m["month_spec"], tuple(m.get("drop_models", ())), m.get("rollover", False))
+            rows = _parse_monthly(path, m["sheet"], m["workcell"], m["header_row"],
+                                  m["model_col"], tuple(m.get("drop_models", ())))
         else:
             continue
-        src = m["file"].split(" SMT")[0].split(".xlsx")[0][:40]
-        all_rows += [(*r, src, m["as_of"]) for r in rows]
+        src = path.name.split(" SMT")[0].split(".xlsx")[0][:40]
+        all_rows += [(*r, src, _as_of(path)) for r in rows]
+
+    if missing:
+        print(f"WARNING: {len(missing)} manifest source(s) matched no file in {DEMAND_DIR}")
+        for f in missing:
+            print(f"  - {f}")
+
+    # A missing folder makes every glob return empty, which would otherwise sail through
+    # and overwrite a good mart with nothing. Path.glob() on a non-existent directory
+    # raises no error, so this is the only thing standing between a box with no OneDrive
+    # session (mypenm0iesvr02) and a wiped planner_demand.parquet.
+    if not all_rows:
+        raise RuntimeError(
+            f"planner-demand: no manifest source matched under {DEMAND_DIR} "
+            f"(exists={DEMAND_DIR.exists()}). Refusing to overwrite {OUT_PARQUET.name} "
+            f"with an empty mart. Set PLANNER_DEMAND_DIR if the folder lives elsewhere.")
 
     df = pd.DataFrame(all_rows, columns=["workcell", "model", "period_start", "period_type", "qty", "source", "as_of"])
     # collapse dup (workcell, model, period) — sum qty (e.g. multiple orders same week)

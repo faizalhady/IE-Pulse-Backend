@@ -14,6 +14,7 @@ Steps:
   2. transform        — pivot raw → pivoted.parquet (Image 2 layout)
   3. eff              — fetch GRP Summary → eff_by_line.parquet (efficiency/line)
   4. assembly_summary — precompute the per-assembly list mart (SMH + eff + flags)
+  5. planner_demand   — parse the OneDrive-synced planner Excels → planner_demand.parquet
 """
 
 import sys
@@ -30,6 +31,9 @@ from modules.cycle_time.pipeline.transform        import run as run_transform
 from modules.cycle_time.pipeline.eff              import run as run_eff
 from modules.cycle_time.pipeline.assembly_summary import run as run_assembly_summary
 from modules.cycle_time.pipeline.customer_status  import run as run_customer_status
+from modules.cycle_time.pipeline.assembly_catalog import run as run_assembly_catalog
+from modules.cycle_time.planner_demand            import (build_planner_demand,
+                                                          build_planner_runners_mart)
 from modules.cycle_time.keep_awake                 import keep_system_awake
 
 # Logging is configured in __main__ for standalone/scheduled runs, or by the API
@@ -86,6 +90,56 @@ def run(mode: str = "incremental",
     # calling IEDB live on every request. Best-effort — a failure keeps the
     # previous snapshot and does not fail the pipeline.
     run_customer_status()
+
+    # ── raw process entities: what each system DEFINES, not what it ran ───────
+    # Every process name we had came from production_scan — one month of what
+    # actually ran. That answers "what happened lately", not "what exists".
+    # Best-effort: each keeps its previous file on failure and never fails the
+    # pipeline, same contract as customer_status above.
+    #
+    # ⚠️ mes_process_master calls MES as usrId=142 — a REAL EMPLOYEE (`khoom`,
+    # Khoo MN), not a service account. Every nightly call is attributed to them
+    # and this breaks the day their account changes. Chained on 2026-08-17 on
+    # the explicit instruction to run it anyway and log the username loudly if
+    # it stops working. REPLACE WITH A SERVICE ACCOUNT.
+    for _name, _fn in (("mes_process_master", "modules.cycle_time.pipeline.mes_process_master"),
+                       ("iedb_process_master", "modules.cycle_time.pipeline.iedb_process_master")):
+        try:
+            import importlib
+            n = importlib.import_module(_fn).run()
+            log.info("%s: %s rows", _name, f"{n:,}")
+        except Exception as e:
+            log.error("%s FAILED - keeping the previous file: %s", _name, e)
+            if _name == "mes_process_master":
+                log.error("  if this is an auth/permission error, usrId=142 (MES user "
+                          "'khoom', Khoo MN) is no longer usable - get a service account")
+
+    # The IEDB model list + has_data flag. NOT chained until 2026-08-17, because
+    # it lived in api/routers/cycle_time.py and the pipeline cannot import a
+    # router. Consequence: prod's catalogue was a 9 JUL snapshot while
+    # raw.parquet refreshed nightly, so every model created after that date read
+    # as "Not in IEDB" - including two Faiz flagged by hand on 14 Aug. Two IEDB
+    # calls per customer, ~5 min. Best-effort: a failure keeps the previous
+    # catalogue (the builder rolls back a partial pull itself) and must not stop
+    # the run.
+    try:
+        n = run_assembly_catalog()
+        log.info(f"Assembly catalogue refreshed - {n} rows")
+    except Exception as e:
+        log.error(f"Assembly-catalogue refresh FAILED, mart left stale: {e}")
+
+    # Planner demand — reads Choi Hui's SharePoint workbooks through the OneDrive sync
+    # and rebuilds planner_demand.parquet + planner_runners.parquet. Unlike the eBuild
+    # rebuild below, this is local file parsing only: no MES, no SQL, seconds not
+    # minutes, so it is safe to chain. Best-effort, but LOUD on failure — this mart sat
+    # 6 weeks stale (as_of 29 Jun, read in Aug) precisely because nothing rebuilt it and
+    # nothing complained.
+    try:
+        n = build_planner_demand()
+        r = build_planner_runners_mart()
+        log.info(f"Planner demand refreshed - {n} rows, {r} planner-runner rows")
+    except Exception as e:
+        log.error(f"Planner-demand refresh FAILED, mart left stale: {e}")
 
     # NOTE: the eBuild runner rebuild used to be chained here, so the Plant
     # Runners `has_data` badges would reflect freshly-synced cycle-time data.

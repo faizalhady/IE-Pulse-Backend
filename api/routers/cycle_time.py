@@ -25,7 +25,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 
-from core.auth import require_level
+from core.auth import require_level, verified_ntid
 from core.mart_cache import mart_key
 from modules.cycle_time.config import (
     CT_CUSTOMERS,
@@ -428,46 +428,13 @@ _CATALOG_STATE: dict = {"status": "idle", "started": None, "finished": None, "ro
 
 
 def build_assembly_catalog() -> int:
-    """
-    Pull the FULL IEDB assembly catalogue for every configured customer and
-    write assembly_catalog.parquet — one row per (customer, assembly) with a
-    `has_data` flag (contrast assembly_summary, which only holds with-data
-    assemblies). Fast: two /api/Assemblies calls per customer, no heavy ingest.
-    Per-customer failures are logged and skipped. Returns total row count.
-    """
-    from modules.cycle_time.client import fetch_assemblies
-
-    rows: list[dict] = []
-    for c in CT_CUSTOMERS:
-        cust, div = c["customer"], c.get("division", "")
-        try:
-            full = fetch_assemblies(cust, div, has_raw_data=None)
-            with_data = fetch_assemblies(cust, div, has_raw_data=True)
-        except Exception as e:
-            log.warning("assembly catalog: skipping %s (%s)", cust, e)
-            continue
-        with_ids = {a.get("AssemblyId") for a in with_data}
-        for a in full:
-            rows.append({
-                "customer":     cust,
-                "assembly_id":  a.get("AssemblyId"),
-                "assembly":     a.get("AssemblyName"),
-                "assembly_full": a.get("Assembly"),
-                "revision":     a.get("AssemblyRevision"),
-                "description":  a.get("AssemblyDescription"),
-                "family":       a.get("CustomerFamily"),
-                "updated_on":   a.get("UpdatedOn"),
-                "has_data":     a.get("AssemblyId") in with_ids,
-            })
-
-    cols = ["customer", "assembly_id", "assembly", "assembly_full", "revision",
-            "description", "family", "updated_on", "has_data"]
-    df = pd.DataFrame(rows, columns=cols)
-    CT_MART["assembly_catalog"].parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(CT_MART["assembly_catalog"], index=False)
-    log.info("assembly catalog: wrote %d rows across %d customers",
-             len(df), df["customer"].nunique() if len(df) else 0)
-    return len(df)
+    """Delegates to the pipeline module. The logic moved there 2026-08-17 so the
+    NIGHTLY REFRESH could call it — a router cannot be imported by the pipeline
+    (the router already imports the pipeline), which is why the catalogue was
+    never chained and sat five weeks stale on prod while raw.parquet refreshed
+    every night. Kept as a thin alias so this endpoint keeps working."""
+    from modules.cycle_time.pipeline.assembly_catalog import run
+    return run()
 
 
 def _run_catalog_refresh():
@@ -1165,6 +1132,43 @@ def ct_assemblies(
         con.close()
 
 
+def _with_untimed(df: pd.DataFrame, customer: str) -> pd.DataFrame:
+    """Append the models IEDB has NEVER priced to a cycle-time assembly list.
+
+    `raw.parquet` and `assembly_summary` are both built FROM cycle times, so a
+    model nobody has timed has no row in either and never appeared on this page
+    at all. That is the worst thing to hide: an untimed model is precisely the
+    one somebody needs to go and time. LAM RESEARCH listed 6,374 here out of the
+    7,790 it actually has.
+
+    Metrics come back NULL, never zero. A zero SMH reads as "this model takes no
+    work", which is a lie about a model that has simply never been measured.
+
+    Additive only — every existing row and column is untouched, so the table and
+    everything else reading this endpoint keep working exactly as before.
+    """
+    df = df.copy()
+    df["has_cycle_time"] = True
+    df["verdict"] = None
+    try:
+        from modules.cycle_time.model_universe import build as _ubuild, canon as _canon
+        u = _ubuild(CT_MART["raw"].parent.parent)
+        u = u[(u["wc"] == _canon(customer)) & (~u["in_iedb_ct"].fillna(False))]
+        extra = u[~u["assembly"].astype(str).isin(set(df["assembly"].astype(str)))]
+        if not len(extra):
+            return df
+        add = pd.DataFrame(index=range(len(extra)), columns=df.columns)
+        add["assembly"] = extra["assembly"].astype(str).values
+        add["has_cycle_time"] = False
+        add["verdict"] = extra["verdict"].values
+        out = pd.concat([df, add], ignore_index=True)
+        return out.sort_values(["has_cycle_time", "assembly"],
+                               ascending=[False, True], ignore_index=True)
+    except Exception as e:                       # never break the timed list
+        log.warning("assembly-list: could not append untimed models: %s", e)
+        return df
+
+
 @router.get("/assembly-list")
 def ct_assembly_list(
     customer:       str = Query(..., description="Customer name — must match a /customers entry"),
@@ -1215,7 +1219,7 @@ def ct_assembly_list(
                 """,
                 [customer],
             ).df()
-            return _df_to_json(df)
+            return _df_to_json(_with_untimed(df, customer))
         finally:
             con.close()
 
@@ -1274,7 +1278,8 @@ def ct_assembly_list(
             """,
             scope,
         ).df()
-        return _df_to_json(df)
+        return _df_to_json(_with_untimed(df, customer) if not sub_workcenter
+                           else df.assign(has_cycle_time=True, verdict=None))
     finally:
         con.close()
 
@@ -1457,11 +1462,26 @@ def ct_completion(
     customer: Optional[str] = Query(None, description="Filter to one workcell (case-insensitive)."),
     status:   Optional[str] = Query(None, description="Filter to one status (incomplete/complete/no_data/unavailable/unverified)."),
 ):
-    """Completion-status summary per model. → { as_of, count, counts:{status:n}, models:[...] }."""
-    p = CT_MART["completion_status"]
+    """Completion-status summary per model. → { as_of, count, counts:{status:n}, models:[...] }.
+
+    DEPRECATED - kept only so an old caller does not 404. It used to serve the v1
+    mart, whose vocabulary (`no_data`, `unavailable`, `unverified`) the current
+    code cannot even emit, and whose verdicts were never corrected. Nothing in
+    the app calls it, so nobody noticed it disagreeing with every other screen.
+
+    It now returns the same corrected verdicts as everything else. Prefer
+    /completion/demand (ranked, with demand) or /universe/summary (per workcell).
+    """
+    p = CT_MART["completion_status_v2"]
     if not p.exists():
-        raise HTTPException(status_code=503, detail="completion_status mart not built. POST /completion/refresh first.")
+        raise HTTPException(status_code=503, detail="completion mart not built. POST /completion/refresh first.")
     df = pd.read_parquet(p)
+    from modules.cycle_time.model_universe import canon, norm, verdicts
+    v = verdicts(CT_MART["raw"].parent.parent)
+    if len(v):
+        vk = v.assign(_k=v["wc"] + "|" + v["a"]).drop_duplicates("_k").set_index("_k")["verdict"]
+        df["status"] = (df["customer"].map(canon) + "|" + df["assembly"].map(norm)).map(vk)
+        df = df[df["status"].notna()]
     # join per-model LBR% + IPK trolleys (line_metrics mart) when available
     lm = CT_MART["line_metrics"]
     if lm.exists():
@@ -1605,14 +1625,34 @@ def _completion_demand(_key) -> dict:
 
     keep = [c for c in ("status", "reason", "near_match", "source", "expected", "present", "no_ct",
                         "not_in_iedb", "unmapped", "non_iedb", "actual_steps",
-                        "coverage") if c in st.columns]
+                        "coverage", "graded_on") if c in st.columns]
     # The status mart still carries both spellings of a few workcells (RESMED and
     # ResMed), so one model can have two rows — one judged, one a phantom "absent".
     # Keep the row that actually saw production, or dedupe picks whichever landed
     # first and a complete model reads as not_in_iedb.
     if "actual_steps" in st.columns:
         st = st.sort_values("actual_steps", ascending=False)
-    out = dem.merge(st[["_k"] + keep].drop_duplicates("_k"), on="_k", how="left")
+
+    # OUTER, not left. A left join answers "of the models in demand, what is the
+    # status" — which quietly hid 2,845 models that were already checked and
+    # simply no longer sit in the 13-week planner window. Nobody chose to hide
+    # them; the join did. They cost nothing to show, they are the same verdicts,
+    # and a workcell asking "what have we actually got?" wants all of them.
+    #
+    # Demand still decides RANK, so the top of the list is unchanged.
+    stk = st[["_k", "customer", "assembly"] + keep].drop_duplicates("_k")
+    out = dem.merge(stk, on="_k", how="outer", suffixes=("", "_st"), indicator=True)
+    for c in ("customer", "assembly"):
+        out[c] = out[c].fillna(out[f"{c}_st"])
+    # Collapse the mart's spelling onto the same canonical name demand already
+    # uses, or one workcell arrives as two rows in the picker all over again.
+    _canon = _canonical_customers()
+    out["customer"] = [_canon.get(_cnorm_key(c), c) for c in out["customer"]]
+    out["has_demand"] = out["_merge"] != "right_only"
+    out["units"] = pd.to_numeric(out["units"], errors="coerce").fillna(0)
+    out["plant"] = out["plant"].fillna("Unassigned")
+    out["sources"] = out["sources"].fillna("")
+    out = out.drop(columns=["customer_st", "assembly_st", "_merge"])
 
     # LBR% and IPK trolleys — the two line-design indicators. Only meaningful
     # once a model's route is complete, so they are frequently null; the table
@@ -1626,6 +1666,20 @@ def _completion_demand(_key) -> dict:
                     + lm["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True))
         out = out.merge(lm.drop(columns=["customer", "assembly"]).drop_duplicates("_k"),
                         on="_k", how="left")
+    # THE verdict, not a locally re-derived one. This endpoint used to serve the
+    # mart's raw `status`, the Coverage page applied the gap rule to it, and the
+    # report applied the gap rule AND the catalogue check — so LAM RESEARCH read
+    # 279 / 236 / 208 complete on three screens describing the same workcell.
+    # One join, one answer, everywhere.
+    from modules.cycle_time.model_universe import canon, norm, verdicts
+    v = verdicts(CT_MART["raw"].parent.parent)
+    if len(v):
+        v["_k"] = v["wc"] + "|" + v["a"]
+        vk = v.drop_duplicates("_k").set_index("_k")["verdict"]
+        # Rebuild the key through canon(): `_k` above normalises punctuation only,
+        # so Cohu and LTX would miss each other.
+        key = out["customer"].map(canon) + "|" + out["assembly"].map(norm)
+        out["status"] = key.map(vk)
     out["status"] = out["status"].fillna("not_checked")
     out = out.sort_values("units", ascending=False).reset_index(drop=True)
     out["rank"] = out.index + 1
@@ -1644,6 +1698,12 @@ def _completion_demand(_key) -> dict:
     for plant, g in home.groupby("plant"):
         by_plant[str(plant)] = sorted(g["customer"].astype(str).unique().tolist())
 
+    # Age of every mart behind these verdicts. `assembly_catalog` once sat five
+    # weeks stale and silently turned real models into "Not in IEDB" — nothing in
+    # the statuses themselves showed it, because a stale verdict looks exactly
+    # like a fresh one. Imported from completion_report so there is ONE list of
+    # what feeds a verdict, not one per renderer.
+    from modules.cycle_time.completion_report import freshness
     return {
         "scope": {
             "plants": by_plant,
@@ -1653,6 +1713,7 @@ def _completion_demand(_key) -> dict:
         },
         "counts": out["status"].value_counts().to_dict(),
         "unchecked": int((out["status"] == "not_checked").sum()),
+        "freshness": freshness(CT_MART["raw"].parent.parent),
         "models": _df_to_json(out.drop(columns=["_k"])),
     }
 
@@ -1893,3 +1954,257 @@ def ct_completion_line_metrics(
     if not m:
         raise HTTPException(status_code=404, detail=f"No line metrics for {customer} / {assembly} (no priority-1 cycle-time data).")
     return {"customer": customer, "assembly": assembly, **m}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PROCESS REGISTRY  —  /api/cycle-time/registry/*
+# ═══════════════════════════════════════════════════════════════════════════
+# MES and IEDB name the same process differently and neither name is
+# controlled. The registry lines them up per workcell. Most of it is derived;
+# 105 MES step names across 14 workcells cannot be — matching them by name is
+# 38% right, by neighbouring scan 27%, by bay 55%, and a wrong mapping is worse
+# than a blank. These endpoints hand the question to the engineer who works the
+# line, with the evidence, and record the answer.
+
+@router.get("/report")
+def ct_report(workcell: str = Query(..., description="Workcell name, any spelling.")):
+    """The completion report for one workcell, as the Excel builds it.
+      -> {workcell, models, summary[], freshness[], rows[]}
+
+    SAME MODULE the Excel uses (modules/cycle_time/completion_report). A second
+    copy of this logic behind an endpoint is how a model ends up reading
+    Complete on screen and Incomplete in the file - which is the exact bug that
+    cost a day on 14 Aug. One implementation, two renderers.
+
+    `freshness` travels with the numbers on purpose: a stale input distorts them
+    and nothing in the statuses themselves would tell you."""
+    from pathlib import Path
+    from modules.cycle_time.completion_report import report
+    mart = CT_MART["raw"].parent.parent
+    try:
+        return report(Path(mart), workcell)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=f"mart not ready: {e}")
+
+
+@lru_cache(maxsize=4)
+def _universe_summary(_key):
+    from modules.cycle_time.completion_report import freshness
+    from modules.cycle_time.model_universe import STATUSES, canon, excluded, summary
+    mart = CT_MART["raw"].parent.parent
+    df = summary(mart)
+    ex = excluded(mart)
+
+    # ── reconciliation against IEDB's OWN count ──────────────────────────────
+    # Our catalogue is a snapshot and has been short before — on 2026-08-05 it
+    # was a month old and 11,953 assemblies light on KEYSIGHT alone, which made
+    # 898 "not in IEDB" verdicts unprovable. IEDB publishes its own assembly
+    # count per customer, so the honest thing is to show ours beside theirs
+    # rather than present ours as fact.
+    #
+    # UNITS MATTER: IEDB counts ASSEMBLY_IDs (assembly + revision); we count
+    # MODELS (revisions collapsed). Ours is expected to be SMALLER. Only the
+    # sign is meaningful, never the difference.
+    cs = CT_MART["customer_status"]
+    if cs.exists():
+        d = pd.read_parquet(cs)
+        theirs: dict = {}
+        for cd, n_ in zip(d["CustomerDivision"], d["NoOfAssemblies"]):
+            theirs.setdefault(canon(str(cd).split("/")[0]), int(n_ or 0))
+        df["iedb_assembly_ids"] = df["workcell"].map(lambda w: theirs.get(canon(w)))
+
+    return {
+        "workcells": _df_to_json(df),
+        "statuses": STATUSES,
+        "totals": {c: int(df[c].sum()) for c in
+                   ["models", "in_iedb", "built_24mo", "in_demand", "graded", "ungraded", *STATUSES]},
+        # What was NOT counted, so the total can be reconciled instead of trusted.
+        "excluded": {"rows": int(len(ex)),
+                     "why": ex["why"].value_counts().to_dict() if len(ex) else {}},
+        # Every number on this page is a snapshot. A stale one looks identical to
+        # a fresh one, so the age travels with it.
+        "freshness": freshness(mart),
+    }
+
+
+@router.get("/universe/summary")
+def ct_universe_summary():
+    """One row per workcell: how many models exist, how many we have judged, and
+    what the judgements were.
+      -> {workcells[], statuses[], totals{}, excluded{}}
+
+    WHY IT IS NOT BUILT FROM THE COMPLETION MART ALONE
+      That mart only holds models somebody ran a check on, and every check ever
+      run targeted forward demand - so reading it answers "of the models we
+      looked at, how are we doing?" and silently drops the 49,839 nobody has
+      looked at. The denominator is the point of this endpoint.
+
+    `graded` and `complete` are different questions and must never be summed: a
+    workcell can be fully graded and zero percent complete. `ungraded` is the
+    honest "not looked at yet" column.
+    """
+    from pathlib import Path
+    ct, eb = CT_MART["raw"].parent, CT_MART["raw"].parent.parent / "ebuild"
+    try:
+        return _universe_summary(mart_key(
+            ct / "assembly_catalog.parquet", ct / "raw.parquet",
+            ct / "completion_status_v2.parquet", eb / "runners.parquet",
+            *(eb / n for n in _DEMAND_MARTS)))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=f"mart not ready: {e}")
+
+
+@lru_cache(maxsize=8)
+def _workcell_models(workcell: str, _key):
+    """EVERY model a workcell has — not the demand slice, not the judged slice.
+
+    The workcell page used to list only models with forward demand, so a model
+    IEDB has never priced simply did not appear anywhere. You cannot fix what the
+    screen will not show you.
+    """
+    from modules.cycle_time.model_universe import build, canon
+    mart = CT_MART["raw"].parent.parent
+    u = build(mart)
+    u = u[u["wc"] == canon(workcell)].copy()
+    if u.empty:
+        return {"workcell": workcell, "models": 0, "rows": []}
+
+    # Demand units + dates, for the models that have them.
+    dem = _demand_frame()
+    if not dem.empty:
+        dem = dem.assign(_k=dem["assembly"].map(lambda x: re.sub(r"[^A-Z0-9]", "", str(x).upper())))
+        d1 = dem.drop_duplicates("_k").set_index("_k")
+        for col, out in (("units", "units"), ("next_build", "next_build"),
+                         ("last_build", "last_build")):
+            if col in d1:
+                u[out] = u["a"].map(d1[col])
+    u["has_cycle_time"] = u["in_iedb_ct"]
+    keep = ["assembly", "verdict", "has_cycle_time", "in_iedb_catalog", "in_mes_history",
+            "in_demand", "units", "next_build", "last_build"]
+    for c in keep:
+        if c not in u:
+            u[c] = None
+    # Worst first, then by demand: the models somebody can act on today lead.
+    order = {v: i for i, v in enumerate(
+        ["incomplete", "no_cycle_time", "not_in_iedb", "not_built", "cannot_check", "complete"])}
+    u["_o"] = u["verdict"].map(order).fillna(99)
+    u = u.sort_values(["_o", "units"], ascending=[True, False], na_position="last")
+    return {"workcell": workcell, "models": int(len(u)), "rows": _df_to_json(u[keep])}
+
+
+@router.get("/universe/workcell")
+def ct_workcell_models(workcell: str = Query(..., description="Workcell, any spelling.")):
+    """Every model for one workcell, with its verdict. -> {workcell, models, rows[]}"""
+    ct, eb = CT_MART["raw"].parent, CT_MART["raw"].parent.parent / "ebuild"
+    try:
+        return _workcell_models(workcell, mart_key(
+            ct / "assembly_catalog.parquet", ct / "raw.parquet",
+            ct / "completion_status_v2.parquet", eb / "runners.parquet",
+            *(eb / n for n in _DEMAND_MARTS)))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=f"mart not ready: {e}")
+
+
+@router.get("/registry/workcells")
+def registry_workcells():
+    """Every workcell with a registry + how much is still unanswered.
+      → [{workcell, processes, agreed, iedb_only, gap, questions_total, questions_left}]
+    Sorted by questions_left descending — where the work is."""
+    from modules.cycle_time import registry
+    return registry.workcells()
+
+
+@router.get("/registry/processes")
+def registry_processes(workcell: str = Query(..., description="Workcell name, any spelling.")):
+    """The browse view: every process this workcell runs, both systems' names.
+      → [{process_key, process_family, process_name, source, iedb_aliases,
+          mes_steps, iedb_models, mes_scans, review}]
+    `source`: both = agreed · iedb_only = priced, not seen · mes_only = the
+    floor runs it and IEDB never priced it · mes_non_iedb = rework/handling.
+    Worst first — the gap is what people come here to see."""
+    from modules.cycle_time import registry
+    return registry.processes(workcell)
+
+
+@router.get("/registry/questions")
+def registry_questions(
+    workcell: str = Query(..., description="Workcell name, any spelling."),
+    include_answered: bool = Query(False, description="Include already-decided steps."),
+):
+    """The queue: MES step names nothing maps, each with its evidence.
+      → [{mes_step, models, scans, bay, scanned_before, scanned_after,
+          candidates[], suggestion, confidence, answered, prior_answer}]
+    Sorted by scans DESCENDING, always. Someone who answers the top 20 and stops
+    has still covered most of the volume."""
+    from modules.cycle_time import registry
+    return registry.questions(workcell, include_answered)
+
+
+@router.get("/registry/aliases")
+def registry_aliases(workcell: str = Query(..., description="Workcell name, any spelling.")):
+    """This workcell's own IEDB process names — the pick-list for 'mapped'.
+    Scoped to the workcell on purpose: `MA 1` is Mech Assy at ARISTA, Smart
+    Torque at BD and Deposition OPT 10 at LAM GAS BOX."""
+    from modules.cycle_time import registry
+    return registry.aliases(workcell)
+
+
+@router.get("/registry/search")
+def registry_search(
+    q: str = Query(..., min_length=2, description="Workcell, model or process name."),
+    limit: int = Query(8, ge=1, le=50),
+):
+    """One box, three kinds of answer.
+      → {query, workcells:[…], models:[…], processes:[…]}
+    Someone arriving at Cycle Time knows a part number, or a workcell, or a step
+    name they saw on the floor — and should not have to know which of those it
+    is before they can look for it. Matching ignores case and punctuation,
+    because nobody spells these the same way twice."""
+    from modules.cycle_time import registry
+    return registry.search(q, limit)
+
+
+@router.get("/registry/steps")
+def registry_steps(
+    workcell: str = Query(..., description="Workcell name, any spelling."),
+    q: str = Query("", description="Filter by MES step name or process key."),
+):
+    """EVERY MES step this workcell scans, with its mapping and where it came from.
+      → [{mes_step, process_key, source, iedb_alias, decided_by, models, scans}]
+    `source`: decision (an engineer said so) · workbook (the Excel sheet) ·
+    auto (plant-wide id, weakest) · none (nothing maps it).
+
+    /registry/questions only serves the UNMAPPED, which left a wrong mapping
+    permanent. A mapping is a decision someone made, and decisions get revised."""
+    from modules.cycle_time import registry
+    return registry.steps(workcell, q)
+
+
+@router.post("/registry/decision")
+def registry_decide(body: dict, ntid: str = Depends(verified_ntid)):
+    """Record one answer. Re-deciding replaces — one live answer per step.
+    Body: {workcell, mes_step, answer, iedb_alias?, evidence?}
+      answer: 'mapped' (iedb_alias required) | 'non_iedb' | 'unknown'
+    'unknown' is kept on purpose: "asked and could not say" is not the same as
+    "nobody looked", and one hard step must never stall the queue."""
+    from modules.cycle_time import registry
+    try:
+        return registry.decide(
+            workcell=str(body.get("workcell", "")).strip(),
+            mes_step=str(body.get("mes_step", "")),      # byte-exact: spaces matter
+            answer=str(body.get("answer", "")).strip(),
+            iedb_alias=body.get("iedb_alias"),
+            evidence=body.get("evidence"),
+            ntid=ntid,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/registry/export", dependencies=[Depends(require_level("admin"))])
+def registry_export():
+    """Write the answers to process_decision.csv — the file the registry
+    generators read, and which overrides the hand-typed Excel workbook so
+    answers survive it being regenerated."""
+    from modules.cycle_time import registry
+    return {"exported": registry.export_decisions()}
