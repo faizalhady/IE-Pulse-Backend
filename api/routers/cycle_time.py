@@ -23,7 +23,7 @@ from typing import Optional
 import duckdb
 import pandas as pd
 import pyarrow.parquet as pq
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
 
 from core.auth import require_level, verified_ntid
 from core.mart_cache import mart_key
@@ -1718,6 +1718,36 @@ def _completion_demand(_key) -> dict:
     }
 
 
+@lru_cache(maxsize=2)
+def _completion_demand_json(_key) -> bytes:
+    """The unfiltered payload, serialised ONCE per mart version.
+
+    Keyed on the same mart mtimes as the frame itself, so a refresh invalidates
+    both together and a stale body can never outlive the data it describes.
+    """
+    import json
+    data = _completion_demand(_key)
+    rows = data["models"]
+    as_of = None
+    try:
+        as_of = datetime.fromtimestamp(CT_MART["completion_status_v2"].stat().st_mtime).isoformat()
+    except OSError:
+        pass
+    body = {
+        "as_of": as_of,
+        "total": len(rows),
+        "count": len(rows),
+        "counts": data["counts"],
+        "unchecked": data["unchecked"],
+        "freshness": data.get("freshness", []),
+        "scope": data["scope"],
+        "models": rows,
+    }
+    # allow_nan=False would raise on a stray NaN rather than emit invalid JSON;
+    # _df_to_json already nulls them, so this is the assertion that it did.
+    return json.dumps(body, allow_nan=False, default=str).encode()
+
+
 @router.get("/completion/demand")
 def ct_completion_demand(
     plants:    Optional[str] = Query(None, description="Comma-separated plant codes (e.g. 'Plant 1,JBK'). Omit for all."),
@@ -1740,6 +1770,18 @@ def ct_completion_demand(
     if not CT_MART["completion_status_v2"].exists():
         raise HTTPException(status_code=503,
                             detail="completion_status_v2 mart not built. Run scripts/run_completion_target.py first.")
+
+    # FAST PATH: unfiltered is what the table asks for on every page load, and
+    # it is 7,246 models / 3.6MB. Serving it as PRE-SERIALISED bytes skips
+    # FastAPI's jsonable_encoder, which walks the whole structure recursively on
+    # every response and cost 0.32s of the ~2s this endpoint took. The compute
+    # was already cached; the encoding was not.
+    #
+    # Filtered calls fall through to the normal path — they are rare, small, and
+    # not worth a cache key each.
+    if not (workcells or plants or status or limit):
+        return Response(content=_completion_demand_json(_completion_demand_key()),
+                        media_type="application/json")
 
     data = _completion_demand(_completion_demand_key())
     rows = data["models"]
