@@ -77,17 +77,43 @@ def freshness(mart: Path) -> list[dict]:
 
 
 def _load(mart: Path, workcell: str):
+    """The six frames this report needs, filtered to one workcell.
+
+    `only()` matches on the DISTINCT customer strings, not per row. It used to
+    run `_norm` — a Python regex call — once per row, and on `raw.parquet` that
+    is 4.8M calls to keep the ~100k rows of a single workcell. That was most of
+    the 14s this endpoint took.
+
+    `raw.parquet` is pushed down to DuckDB instead of loaded: only one workcell's
+    (assembly, alias) pairs ever leave the file, so the other 4.7M rows are never
+    materialised in pandas at all.
+    """
     wc = _norm(workcell)
     ct, eb = mart / "cycle_time", mart / "ebuild"
-    only = lambda df: df[df["customer"].map(_norm) == wc].copy()
+
+    def only(df):
+        # One _norm per distinct customer (there are ~50), then a vectorised
+        # isin. Same answer, three orders of magnitude fewer Python calls.
+        keep = {c for c in df["customer"].dropna().unique() if _norm(c) == wc}
+        return df[df["customer"].isin(keep)].copy()
+
     cat = only(pd.read_parquet(ct / "assembly_catalog.parquet",
                                columns=["customer", "assembly", "revision", "has_data"]))
     status = only(pd.read_parquet(ct / "completion_status_v2.parquet"))
     planner = only(pd.read_parquet(eb / "planner_runners.parquet"))
     edash = only(pd.read_parquet(eb / "projection_runners.parquet"))
     history = only(pd.read_parquet(eb / "runners.parquet"))
-    raw = only(pd.read_parquet(ct / "raw.parquet", columns=["customer", "assembly", "alias"]))
-    route = raw.groupby("assembly")["alias"].nunique().rename("iedb_route_steps")
+
+    import duckdb
+    con = duckdb.connect()
+    try:
+        route = con.execute(
+            f"""SELECT assembly, COUNT(DISTINCT alias) AS iedb_route_steps
+                FROM read_parquet('{(ct / "raw.parquet").as_posix()}')
+                WHERE regexp_replace(upper(customer), '[^A-Z0-9]', '', 'g') = ?
+                GROUP BY assembly""", [wc]).df().set_index("assembly")["iedb_route_steps"]
+    finally:
+        con.close()
     return cat, status, planner, edash, history, route
 
 
