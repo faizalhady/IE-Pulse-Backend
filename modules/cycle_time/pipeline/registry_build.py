@@ -13,15 +13,23 @@ WHY IT HAD TO BE PORTED
 
   A file that must be hand-copied to stay correct will eventually be wrong.
 
-THE THREE LAYERS, unchanged in meaning
-    iedb_alias   what IEDB was told to price      raw.parquet
-    mes_step     what MES defines as a step       mes_process_master.parquet
-    bridge       the hand-curated map between     mes_process_map.parquet
+FOUR LAYERS, AND THE DIFFERENCE BETWEEN TWO OF THEM IS THE POINT
+    iedb_alias      what IEDB was told to price     raw.parquet
+    mes_step        what this workcell PROVABLY ran completion_steps_v2 (scans)
+    mes_configured  what MES has configured on a    route master + process master
+                    route its models can reach      — evidence only, never answered
+    bridge          the hand-curated map between    mes_process_map.parquet
 
-  The original read SCANS for the mes_step layer — one month of what actually
-  ran. This reads the ROUTE MASTER instead: what MES DEFINES, whether or not a
-  board walked it lately. That is a superset (6,705 step instances against
-  1,733 seen in a month) and it does not decay when a model pauses.
+  Only `mes_step` carries an answer, because only a scan proves a workcell runs
+  a step. The first version of this file used the route master for that, and a
+  route is shared between customers — so joining route -> model -> customer gave
+  every workcell every step on the bay. 7,251 names became 62,612 rows,
+  `MI BTM 3` was filed under 34 workcells, and the unanswered count went from
+  141 to 62,612. Splitting the two layers puts it back to 564.
+
+  `mes_configured` is still worth keeping: the difference between it and
+  `mes_step` is "configured on the route, never seen in a scan" — dead config,
+  or a process that quietly stopped.
 
 IDENTITY IS WORKCELL-SCOPED, ALWAYS
   `MA 1` is Mech Assy at ARISTA, Smart Torque at BD, Deposition OPT 10 at LAM
@@ -89,22 +97,93 @@ def _iedb() -> pd.DataFrame:
     return d
 
 
-def _mes() -> pd.DataFrame:
-    """What MES DEFINES as a step, from the route master.
+def _mes_scanned() -> pd.DataFrame:
+    """Steps this workcell PROVABLY ran, from scan history.
 
-    `description` is the step INSTANCE ('AOI TOP') and the level that joins to an
-    IEDB alias; `step_name` is the general step ('AOI'). Both are kept — carrying
-    only one of them is what made `MA 1` look like a single process plant-wide.
+    A scan row is direct evidence: this workcell, this model, this step, this
+    date. It is the only honest basis for saying a workcell owns a step, and it
+    is what `answer` is computed against.
 
-    The route master has no customer column, so the workcell comes from the
-    assembly link. A step MES defines but no model of ours runs is not this
-    workcell's step.
+    Coverage is limited to models the completion check has reached (3,465 of
+    56,882), which is a real limit and the right one — an unproven claim is
+    worse than a missing row.
+    """
+    import duckdb
+    from modules.cycle_time.config import CT_MES_SCAN_DIR
+
+    frames = []
+    # The #21 scan cache: one parquet per customer-day, written by the completion
+    # runs and already on the server (4,278 files). This is the real scan record
+    # and it grows on its own, so the registry stays current with no extra pull.
+    if CT_MES_SCAN_DIR.exists():
+        glob = (CT_MES_SCAN_DIR / "*" / "*.parquet").as_posix()
+        con = duckdb.connect()
+        try:
+            # The cache has no customer COLUMN — the customer is the folder
+            # name (mes_scans/<customer>/<date>.parquet), so it comes from the
+            # path. Columns are (assembly, step, order, qty).
+            d = con.execute(f"""
+                -- chr(92) is a backslash. Writing it literally inside this
+                -- f-string is a fight between Python, DuckDB and Windows paths
+                -- that nobody wins.
+                SELECT regexp_extract(replace(filename, chr(92), '/'),
+                                      'mes_scans/([^/]+)/', 1) AS workcell,
+                       step AS name_raw,
+                       COUNT(*) AS rows, COUNT(DISTINCT assembly) AS models
+                FROM read_parquet('{glob}', union_by_name=true, filename=true)
+                WHERE step IS NOT NULL AND trim(step) <> ''
+                GROUP BY 1, 2
+                HAVING workcell <> ''
+            """).df()
+            frames.append(d)
+        except Exception as e:
+            log.warning("scan cache unreadable (%s) - falling back to graded steps", str(e)[:90])
+        finally:
+            con.close()
+
+    # Fallback / supplement: the MES side of the completion steps mart. Narrower
+    # (only models the check has reached) but always present.
+    p = CT_MART["completion_steps_v2"]
+    if p.exists():
+        con = duckdb.connect()
+        try:
+            frames.append(con.execute(f"""
+                SELECT customer AS workcell, name AS name_raw,
+                       COUNT(*) AS rows, COUNT(DISTINCT assembly) AS models
+                FROM read_parquet('{p.as_posix()}')
+                WHERE side = 'MES' AND name IS NOT NULL AND trim(name) <> ''
+                GROUP BY customer, name
+            """).df())
+        finally:
+            con.close()
+
+    if not frames:
+        log.warning("no scan source - mes_step layer will be empty")
+        return pd.DataFrame()
+    d = (pd.concat(frames, ignore_index=True)
+           .groupby(["workcell", "name_raw"], as_index=False)[["rows", "models"]].sum())
+    d["system"] = "mes_step"
+    d["is_iedb"] = False
+    return d
+
+
+def _mes_configured() -> pd.DataFrame:
+    """Steps MES has CONFIGURED on a route one of this workcell's models can run.
+
+    NOT the same claim as `_mes_scanned`, and the distinction is the whole point.
+    A route is shared between customers, so joining route -> model -> customer
+    hands every workcell every step on the bay. Done that way on 2026-08-18 it
+    turned 7,251 names into 62,612 rows: `MI BTM 3` was filed under 34 workcells,
+    and `AOI BTM` appeared as unanswered in 33 workcells that never scan it.
+
+    So these rows are kept as EVIDENCE and never answered. They are what makes
+    "configured on the route, never seen in a scan" computable — which is the
+    real prize from the route pull — but they never imply ownership.
     """
     steps, routes = (CT_MART["raw"].parent / "mes_process_master.parquet",
                      CT_MART["raw"].parent / "mes_route_master.parquet")
     amap = CT_MART["mes_assembly_map"]
     if not (steps.exists() and routes.exists() and amap.exists()):
-        log.warning("mes route/process master missing - mes_step layer will be empty")
         return pd.DataFrame()
     import duckdb
     con = duckdb.connect()
@@ -123,7 +202,7 @@ def _mes() -> pd.DataFrame:
         """).df()
     finally:
         con.close()
-    d["system"] = "mes_step"
+    d["system"] = "mes_configured"
     d["is_iedb"] = False
     return d
 
@@ -140,7 +219,7 @@ def _bridge() -> pd.DataFrame:
 
 
 def run() -> int:
-    frames = [f for f in (_iedb(), _mes(), _bridge()) if len(f)]
+    frames = [f for f in (_iedb(), _mes_scanned(), _mes_configured(), _bridge()) if len(f)]
     if not frames:
         log.error("registry_build: no inputs - keeping the previous file")
         return 0
@@ -163,6 +242,10 @@ def run() -> int:
     def answer(r):
         if r["system"] == "iedb_alias":
             return "mapped"
+        if r["system"] == "mes_configured":
+            # Evidence, not a claim. Answering these would put 62,612 questions
+            # in front of an engineer, most about steps their workcell never runs.
+            return "configured"
         k = (r["workcell_id"], r["name_key"])
         if k in non_iedb:
             return "non_iedb"                       # declared rework/handling
