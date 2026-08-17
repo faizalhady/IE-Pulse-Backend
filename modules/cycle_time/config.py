@@ -18,7 +18,12 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 BASE_URL    = "https://iedb2api-prd.jblapps.com"
 TOKEN_URL   = "https://jabil.okta.com/oauth2/default/v1/token"
 SITE_CODE   = "PEN"
-PAGE_SIZE   = 500           # records per API page
+# IEDB charges per REQUEST, not per row: a page costs ~18-25s whether it holds 500
+# rows or 50,000 (probed 2026-08-13 against KEYSIGHT). At 500 the 10-Aug bulk load
+# of 342,848 KEYSIGHT rows needed 686 pages = 3h43m, which overran the nightly task's
+# time limit and froze the app's marts for three days. At 10,000 the same pull is
+# ~35 pages = ~11 min. Raise further only after re-probing; 50,000 also worked.
+PAGE_SIZE   = 10000         # records per API page
 API_TIMEOUT = 90            # seconds per request (big customers like KEYSIGHT can be slow)
 
 # Token refresh buffer — fetch a new token this many seconds before expiry.
