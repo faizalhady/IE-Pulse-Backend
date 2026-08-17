@@ -128,7 +128,12 @@ def questions(workcell: str, include_answered: bool = False) -> list[dict]:
         answered = {r["mes_step"]: dict(r) for r in c.execute(
             "SELECT * FROM process_decision WHERE workcell = ?", (workcell,))}
 
-    g["answered"] = g["name_raw"].map(lambda s: s in answered)
+    # .astype(bool) is load-bearing. On a workcell with NO questions, `.map()`
+    # returns an empty OBJECT-dtype Series, `~` on it does not give a boolean
+    # mask, and `g[mask]` is then read as COLUMN selection — which returns a
+    # frame with no columns at all, and the next line dies on KeyError 'scans'.
+    # Every workcell whose queue is empty 500s without this.
+    g["answered"] = g["name_raw"].map(lambda s: s in answered).astype(bool)
     if not include_answered:
         g = g[~g["answered"]]
     g["scans"] = pd.to_numeric(g["scans"], errors="coerce").fillna(0)
