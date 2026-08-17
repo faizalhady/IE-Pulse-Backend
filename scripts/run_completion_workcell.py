@@ -56,6 +56,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workcell", required=True, help="any spelling; matched normalised")
     ap.add_argument("--go", action="store_true", help="make MES calls. Without it: list only")
+    ap.add_argument("--limit", type=int,
+                    help="check only the top N models by demand units. For a SAMPLE "
+                         "run you can eyeball in the UI before committing hours. "
+                         "run() upserts, so the rest of the workcell is untouched "
+                         "and a later full run simply re-checks these too.")
     a = ap.parse_args()
 
     try:
@@ -123,6 +128,10 @@ def main() -> int:
               f"Add the alias to workcell_alias.csv if it is a naming problem.")
         return 0
     tgt["customer_id"] = tgt["customer_id"].astype(int)
+
+    if a.limit:
+        tgt = tgt.nlargest(a.limit, "units").copy()
+        print(f"SAMPLE          : top {len(tgt)} models by units")
 
     st = pd.read_parquet(CT_MART["completion_status_v2"])
     have = {norm(c) + "|" + norm(x) for c, x in zip(st["customer"], st["assembly"])}

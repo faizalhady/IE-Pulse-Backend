@@ -110,13 +110,29 @@ def _canonical_spelling() -> dict:
 
 
 def _pairs(path: Path, cols: list[str] | None = None) -> pd.DataFrame:
-    """(workcell, assembly) from one mart, canonicalised and deduped."""
+    """(workcell, assembly) from one mart, canonicalised and deduped.
+
+    DEDUPE FIRST, THEN NORMALISE. It used to run `canon` and `norm` — Python
+    functions, one call per row — across all 4.8M rows of `raw.parquet` and then
+    throw ~99% of the result away in drop_duplicates. Normalising is
+    order-preserving on duplicates, so doing it after the dedupe gives the same
+    answer for ~40k calls instead of 4.8M. That alone was most of build()'s 12s.
+
+    The workcell map is tiny (50 entries), so `canon` is applied to the distinct
+    customer strings and joined back rather than run per row.
+    """
     if not path.exists():
         log.warning("missing source: %s", path)
         return pd.DataFrame(columns=["wc", "a", "assembly", "customer"])
     d = pd.read_parquet(path, columns=["customer", "assembly"] + (cols or []))
-    d["wc"] = d["customer"].map(canon)
-    d["a"] = d["assembly"].map(norm)
+    # Raw dedupe first — cheap, vectorised, and it is what shrinks the frame.
+    d = d.drop_duplicates(["customer", "assembly"])
+    # `canon` per DISTINCT customer, not per row. There are 50 of them.
+    cmap = {c: canon(c) for c in d["customer"].dropna().unique()}
+    d["wc"] = d["customer"].map(cmap)
+    # Vectorised: same regex, run in pandas' C path instead of once per row.
+    d["a"] = d["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+    # A second dedupe: two spellings can collapse onto one canonical pair.
     return d.drop_duplicates(["wc", "a"])
 
 
@@ -178,8 +194,16 @@ def _rescue_blank(blank: pd.DataFrame, cat: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build(mart: Path | None = None) -> pd.DataFrame:
-    """One row per model, with a flag per source. Nothing is aggregated yet."""
+def build(mart: Path | None = None, _use_mart: bool = True) -> pd.DataFrame:
+    """One row per model, with a flag per source. Nothing is aggregated yet.
+
+    Reads the stored frame when it is newer than every input, which is the
+    normal case between nightly runs. `_use_mart=False` forces a recompute and
+    is what `write()` uses.
+    """
+    root = mart or CT_MART["raw"].parent.parent
+    if _use_mart and _mart_is_fresh(root):
+        return pd.read_parquet(root / MART)
     ct = (mart / "cycle_time") if mart else CT_MART["raw"].parent
     eb = (mart / "ebuild") if mart else CT_MART["raw"].parent.parent / "ebuild"
 
@@ -267,6 +291,54 @@ def verdicts(mart: Path | None = None) -> pd.DataFrame:
     if "verdict" not in u:
         return pd.DataFrame(columns=["wc", "a", "verdict"])
     return u.loc[u["verdict"].notna(), ["wc", "a", "verdict"]].reset_index(drop=True)
+
+
+#: Where build()'s answer is cached between runs. Every user gets the same
+#: frame until the marts change at 02:00, so computing it per request is work we
+#: already know the answer to — the same rule the rest of this codebase follows
+#: ("computed data -> parquet mart"). Written by the nightly refresh.
+MART = "cycle_time/model_universe.parquet"
+
+
+def write(mart: Path | None = None) -> int:
+    """Compute the universe once and store it. Called by the pipeline."""
+    root = mart or CT_MART["raw"].parent.parent
+    u = build(root, _use_mart=False)
+    if u.empty:
+        log.error("model_universe: build produced nothing - keeping the previous file")
+        return 0
+    out = root / MART
+    before = 0
+    if out.exists():
+        import pyarrow.parquet as pq
+        before = pq.ParquetFile(out).metadata.num_rows
+    # Same shrink guard as every other pull: a collapsed rebuild would quietly
+    # drop models out of every denominator on the site.
+    if before and len(u) < before * 0.9:
+        log.error("model_universe SHRANK %d -> %d - keeping the previous file", before, len(u))
+        return before
+    out.parent.mkdir(parents=True, exist_ok=True)
+    u.to_parquet(out, index=False)
+    log.info("model_universe: %d models -> %s", len(u), out.name)
+    return len(u)
+
+
+#: The pipeline calls every step as `.run()`. Same function, expected name.
+run = write
+
+
+def _mart_is_fresh(root: Path) -> bool:
+    """The stored frame is usable only if it is NEWER than every input. Serving a
+    stale universe is worse than recomputing: it looks identical on screen."""
+    out = root / MART
+    if not out.exists():
+        return False
+    ct, eb = root / "cycle_time", root / "ebuild"
+    srcs = [ct / "assembly_catalog.parquet", ct / "raw.parquet",
+            ct / "completion_status_v2.parquet", eb / "runners.parquet",
+            eb / "planner_runners.parquet", eb / "projection_runners.parquet"]
+    newest = max((p.stat().st_mtime for p in srcs if p.exists()), default=0)
+    return out.stat().st_mtime >= newest
 
 
 def excluded(mart: Path | None = None) -> pd.DataFrame:

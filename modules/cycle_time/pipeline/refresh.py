@@ -108,7 +108,12 @@ def run(mode: str = "incremental",
     # workbook-only and changed verdicts with nothing on screen to say why.
     for _name, _fn in (("mes_process_master", "modules.cycle_time.pipeline.mes_process_master"),
                        ("iedb_process_master", "modules.cycle_time.pipeline.iedb_process_master"),
-                       ("registry", "modules.cycle_time.pipeline.registry_build")):
+                       ("registry", "modules.cycle_time.pipeline.registry_build"),
+                       # LAST: it reads the catalogue, raw, the status mart and
+                       # demand, so it must see this run's versions. Precomputed
+                       # because every user gets the same frame until tomorrow —
+                       # computing it per request cost 12s on six endpoints.
+                       ("model_universe", "modules.cycle_time.model_universe")):
         try:
             import importlib
             n = importlib.import_module(_fn).run()
