@@ -141,21 +141,33 @@ def load(mart: Path) -> tuple[dict, set, dict]:
             stats["mes_step"] += 1
 
     # ── layer 3: what an engineer answered. Authored, so it wins ─────────────
-    dec = reg / "process_decision.csv"
-    if dec.exists():
-        try:
-            dd = pd.read_csv(dec, dtype=str, keep_default_na=False)
-            for wc, step, ans, alias in zip(dd["workcell"], dd["mes_step"],
-                                            dd["answer"], dd["iedb_alias"]):
-                k = (_cnorm(wc), _snorm(step))
-                if ans == "mapped" and alias.strip():
-                    pmap[k] = alias
-                    stats["decisions"] += 1
-                elif ans == "non_iedb":
-                    pknown.add(k)          # declared, so it leaves the gap
-                    pmap.pop(k, None)
-        except Exception as e:                       # a bad CSV must not kill a run
-            log.warning("process_decision.csv unreadable, ignoring: %s", e)
+    #
+    # READ FROM SQLITE, which is where the registry page WRITES. It used to read
+    # `process_decision.csv`, a second copy produced only when an admin
+    # remembered to POST /registry/export — so every answer an engineer gave was
+    # invisible to the grader until somebody pressed a button. Nothing scheduled
+    # that button.
+    #
+    # One store. The CSV still exists as an export for the laptop generators and
+    # as something a human can read, but nothing depends on it being current.
+    try:
+        from core.database import get_conn
+        with get_conn() as c:
+            rows = [dict(r) for r in c.execute(
+                "SELECT workcell, mes_step, answer, iedb_alias FROM process_decision")]
+        for r in rows:
+            k = (_cnorm(r["workcell"]), _snorm(r["mes_step"]))
+            alias = (r["iedb_alias"] or "").strip()
+            if r["answer"] == "mapped" and alias:
+                pmap[k] = alias
+                stats["decisions"] += 1
+            elif r["answer"] == "non_iedb":
+                pknown.add(k)              # declared, so it leaves the gap
+                pmap.pop(k, None)
+            # 'unknown' is skipped: it records that somebody looked and could not
+            # say, which is not a mapping.
+    except Exception as e:                  # a DB problem must not kill a run
+        log.warning("could not read process_decision from SQLite, ignoring: %s", e)
 
     log.info("bridge: %d mapped (%d workbook, %d from scans, %d authored) | "
              "%d known names, %d non-IEDB, %d still unanswered",
