@@ -102,8 +102,13 @@ def run(mode: str = "incremental",
     # and this breaks the day their account changes. Chained on 2026-08-17 on
     # the explicit instruction to run it anyway and log the username loudly if
     # it stops working. REPLACE WITH A SERVICE ACCOUNT.
+    # registry_build LAST of the three: it reads the two masters above, so it has
+    # to see this run's versions. It was a file copied by hand from a laptop —
+    # on 2026-08-18 the server had none, which silently dropped process_bridge to
+    # workbook-only and changed verdicts with nothing on screen to say why.
     for _name, _fn in (("mes_process_master", "modules.cycle_time.pipeline.mes_process_master"),
-                       ("iedb_process_master", "modules.cycle_time.pipeline.iedb_process_master")):
+                       ("iedb_process_master", "modules.cycle_time.pipeline.iedb_process_master"),
+                       ("registry", "modules.cycle_time.pipeline.registry_build")):
         try:
             import importlib
             n = importlib.import_module(_fn).run()

@@ -59,12 +59,24 @@ def _registry(mart: Path) -> Path:
 def load(mart: Path) -> tuple[dict, set, dict]:
     """-> (pmap, pknown, stats)
 
-    pmap   {(cnorm workcell, snorm mes_name): iedb_alias}  — the resolvable ones
-    pknown {(cnorm workcell, snorm mes_name)}              — every name we have
-                                                             SEEN, mapped or not
-    `pknown` matters as much as `pmap`: a name that is absent from it is one
-    nobody has ever looked at, which is a different problem from a name somebody
-    looked at and declared non-IEDB.
+    pmap   {(cnorm workcell, snorm mes_name): iedb_alias}  — resolves to an alias
+    pknown {(cnorm workcell, snorm mes_name)}              — DECLARED not-IEDB
+
+    `pknown` IS NOT "every name we have seen". It is the set a human has ruled
+    on and said is not IEDB work — rework, handling, a scan point. The grader
+    reads it that way:
+
+        completion_v2.py:540
+            known = any((cn, n) in ctx.pknown for n in names)
+            if alias is None and known:
+                return "non_iedb", ""      # excluded from the gap entirely
+
+    So anything added here is REMOVED FROM THE GAP. Filling it with every name
+    the registry has ever seen (73,005 of them) would have silently swallowed
+    62,612 unnamed steps on the next grading run — they would read as "not IEDB
+    work" instead of "we could not name it", which is the opposite of true and
+    invisible afterwards. Only the workbook's is_iedb=False rows and explicit
+    `non_iedb` decisions belong in it.
     """
     reg = _registry(mart)
     raw_csv = reg / "workcell_process_raw.csv"
@@ -97,21 +109,24 @@ def load(mart: Path) -> tuple[dict, set, dict]:
         for c, s, a, isie in zip(w_["customer"], w_["step_instance"],
                                  w_["iedb_alias"], w_["is_iedb"]):
             k = (_cnorm(c), _snorm(s))
-            pknown.add(k)
             if isie and str(a).strip() and str(a) != "nan":
                 pmap[k] = a
                 stats["bridge"] += 1
+            elif not isie:
+                # The workbook says this is NOT IEDB work. Only these belong in
+                # pknown — see the contract in load()'s docstring.
+                pknown.add(k)
 
     # ── layer 2: names seen in real scans, resolved through the identity ─────
     sub = d[d["system"] == "mes_step"]
     for w, nm, key, ans in zip(sub["_wc"], sub["_nm"], sub["process_key"], sub["answer"]):
         if not nm:
             continue
-        pknown.add((w, nm))
         if ans == "non_iedb":
-            # Declared rework/handling. Recorded as KNOWN and deliberately left
-            # out of pmap, so it stops inflating the gap instead of looking like
-            # a missing cycle time.
+            # Somebody ruled this rework/handling. THIS is what pknown is for,
+            # and it is why the answer matters rather than merely having seen
+            # the name.
+            pknown.add((w, nm))
             pmap.pop((w, nm), None)
             stats["non_iedb"] += 1
             continue
@@ -133,11 +148,11 @@ def load(mart: Path) -> tuple[dict, set, dict]:
             for wc, step, ans, alias in zip(dd["workcell"], dd["mes_step"],
                                             dd["answer"], dd["iedb_alias"]):
                 k = (_cnorm(wc), _snorm(step))
-                pknown.add(k)
                 if ans == "mapped" and alias.strip():
                     pmap[k] = alias
                     stats["decisions"] += 1
                 elif ans == "non_iedb":
+                    pknown.add(k)          # declared, so it leaves the gap
                     pmap.pop(k, None)
         except Exception as e:                       # a bad CSV must not kill a run
             log.warning("process_decision.csv unreadable, ignoring: %s", e)
@@ -172,7 +187,17 @@ def _selfcheck(mart: Path) -> None:
     if lost[:5]:
         print("  e.g.  ", lost[:5])
     assert len(pmap) >= len(old) * 0.95, "registry bridge resolves FEWER names than the workbook"
-    print("selfcheck OK - the registry bridge does not regress the workbook")
+
+    # pknown REMOVES steps from the gap (completion_v2:540). It must stay the
+    # set of DECLARED not-IEDB names, never "every name seen" — filling it from
+    # the whole registry once put 73,005 names in it, which would have swallowed
+    # 62,612 unnamed steps as "not IEDB work" on the next grading run.
+    wb_declared = sum(1 for isie in wb["is_iedb"] if not isie)
+    assert len(pknown) <= wb_declared * 1.5, (
+        f"pknown has {len(pknown)} entries against {wb_declared} declared in the "
+        f"workbook - it is being filled with SEEN names, not DECLARED ones")
+    print(f"selfcheck OK - no regression, and pknown stays declared-only "
+          f"({len(pknown)} vs {wb_declared} in the workbook)")
 
 
 if __name__ == "__main__":
