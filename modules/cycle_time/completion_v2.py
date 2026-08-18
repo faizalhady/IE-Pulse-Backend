@@ -30,6 +30,7 @@ import bisect
 import json
 import logging
 import re
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -148,11 +149,23 @@ _iid = lambda x: str(int(float(x)))     # pandas hands ids back as 59.0 — MES 
 # line; OBA/OQA is the last gate before it and is good enough to call the route run.
 _FINAL = ("PACKOUT", "PACK OUT", "OQA", "OBA", "SHIP")
 
-# #132 circuit breaker. Each failed serial burns ~7s (3 retries + backoff), so 20
-# consecutive misses ≈ 2 min before we abandon #132 for this customer and let #21
-# cover the rest. Without this a customer whose serials all 404 hangs the run —
-# it burned 3 hours on 2026-07-24 before being killed by hand.
+# #132 circuit breakers. TWO of them, because they catch different failures.
+#
+#   _MAX_MISSES  consecutive API failures. A 404 fails fast (~7s for 3 tries
+#                with backoff), so 20 of them is ~2 min. Catches "this customer's
+#                serials are all dead" — 2026-07-24, 3 hours before a manual kill.
+#
+#   _MAX_SECONDS total time spent on #132 for ONE customer. Added 2026-08-18
+#                after KEYSIGHT sat for 4.6 HOURS. The miss counter could not
+#                catch it: a TIMEOUT costs ~95s (30s x 3 retries), not 7s, and
+#                `misses` RESETS to 0 on any success — so an alternating
+#                slow-success / timeout pattern never reaches 20 in a row while
+#                burning 95s a time. 343 serial models is ~1,715 calls; it only
+#                takes a fraction timing out to lose the night.
+#
+# The counter measures failures. This one measures what actually costs us.
 _MAX_MISSES = 20
+_MAX_SECONDS = 600
 
 
 def scan_day(customer: str, customer_id, day: datetime) -> pd.DataFrame:
@@ -270,7 +283,13 @@ def board_steps(customer: str, customer_id, picks: pd.DataFrame) -> pd.DataFrame
     cid = _iid(customer_id)
     rows, done, partial, dead = [], 0, 0, 0
     misses = 0                    # consecutive API failures — the circuit breaker
+    t_start = time.time()         # ...and the one that actually caught KEYSIGHT
     for asm in todo:
+        if time.time() - t_start > _MAX_SECONDS:
+            log.warning("  #132 %s: %.0f min spent, abandoning the serial path "
+                        "after %d/%d models - #21 covers the rest",
+                        customer, (time.time() - t_start) / 60, done + partial, len(todo))
+            break
         best = None
         for serial in picks.loc[picks["assembly"] == asm, "serial"]:
             try:
