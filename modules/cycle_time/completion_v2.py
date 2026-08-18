@@ -137,6 +137,9 @@ def _alias_name(s: str) -> str:
 
 _WINDOW_DAYS = 120
 _NON_MES = {"LAMMEC", "ADVANTEST"}        # verified-zero MES production
+#: Models between two checkpoints. Small enough that a crash costs minutes;
+#: large enough that writing both marts is not the dominant cost.
+_CKPT_EVERY = 500
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -663,15 +666,15 @@ def classify(ctx: Ctx, customer: str, assembly: str, steps: list[tuple], source:
         # time — saying "no cycle time" here would send someone to re-time a model
         # that is already fully timed.
         return {**r, "status": "incomplete", "reason": "no_alias"}, \
-            _iedb_rows(customer, assembly, ie)
+            _iedb_rows(customer, assembly, ie, akey)
     if ie is None or not ie["ct_codes"]:
         # In IEDB's catalogue but not one cycle time entered — same practical hole
         # as not being there at all, so it lands in the same bucket.
         return {**r, "status": "not_in_iedb", "reason": "no_cycle_time"}, \
-            _iedb_rows(customer, assembly, ie)
+            _iedb_rows(customer, assembly, ie, akey)
     if not steps:
         return {**r, "status": "not_in_mes", "reason": "no_production"}, \
-            _iedb_rows(customer, assembly, ie)
+            _iedb_rows(customer, assembly, ie, akey)
 
     rows, no_ct, gap = [], [], []
     counts = {"present": 0, "no_ct": 0, "not_in_iedb": 0, "unmapped": 0, "non_iedb": 0}
@@ -695,7 +698,7 @@ def classify(ctx: Ctx, customer: str, assembly: str, steps: list[tuple], source:
               "missing_ct": "; ".join(sorted(set(no_ct))),
               "gap_steps": "; ".join(sorted(set(gap)))})
     r["status"], r["reason"] = _verdict(counts)
-    return r, rows + _iedb_rows(customer, assembly, ie)
+    return r, rows + _iedb_rows(customer, assembly, ie, akey)
 
 
 def _verdict(counts: dict) -> tuple[str, str]:
@@ -727,15 +730,29 @@ def _verdict(counts: dict) -> tuple[str, str]:
     return "incomplete", "unmapped"
 
 
-def _iedb_rows(customer: str, assembly: str, ie) -> list:
+def _iedb_rows(customer: str, assembly: str, ie, route_of: str | None = None) -> list:
+    """IEDB's route rows for one model.
+
+    `route_of` is the assembly the route ACTUALLY belongs to. resolve() falls
+    back to a suffix / front-name match, so K_CTEC `AE3649-66500EV10` — which has
+    no rows in raw.parquet at all — was handed the 13 timed steps of
+    `AE3649-66500` and the drawer rendered them as its own. Somebody reading that
+    would sign off a model nobody has ever timed.
+
+    The rows still carry the REQUESTED assembly, because that is what the drawer
+    looks them up by. `source` records where they came from, so a borrowed route
+    can be labelled rather than passed off as the model's own.
+    """
     if not ie:
         return []
+    borrowed = bool(route_of) and str(route_of).strip() != str(assembly).strip()
+    src = f"iedb:{route_of}" if borrowed else "iedb"
     return [{"customer": customer, "assembly": assembly, "side": "IEDB",
              "name": s["process"], "name2": "", "alias": s["alias"],
              "sub_workcenter": s["sub_workcenter"], "order": s.get("order"),
              "value": s["cycle_time"],
              "status": "has_ct" if s["cycle_time"] is not None else "no_ct",
-             "source": "iedb"} for s in ie["detail"]]
+             "source": src} for s in ie["detail"]]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -767,13 +784,21 @@ def run(models: pd.DataFrame, window: int = _WINDOW_DAYS, use_serial: bool = Tru
     state = CT_MART["completion_status_v2"].parent / ".completion_v2_state.json"
     ctx = Ctx()
     summary, steps = _load_existing()
-    done = set()
+    done: set = set()
+    part: dict = {}
     if resume and state.exists():
         try:
-            done = set(json.loads(state.read_text()).get("done", []))
-            log.info("RESUME - %d customers done, %d models in v2 mart", len(done), len(summary))
+            _st = json.loads(state.read_text())
+            done = set(_st.get("done", []))
+            part = {k: set(v) for k, v in (_st.get("partial") or {}).items()}
+            log.info("RESUME - %d customers done, %d part-done, %d models in v2 mart",
+                     len(done), len(part), len(summary))
         except Exception:
             log.warning("resume state unreadable - starting over")
+
+    def _save():
+        state.write_text(json.dumps({"done": sorted(done),
+                                     "partial": {k: sorted(v) for k, v in part.items()}}))
 
     by_cust: dict = {}
     for m in models.itertuples(index=False):
@@ -819,8 +844,19 @@ def run(models: pd.DataFrame, window: int = _WINDOW_DAYS, use_serial: bool = Tru
                 skipped.append(cust)
                 continue
 
+        # Checkpoint INSIDE the customer. The state used to record whole
+        # customers, which is fine for a 200-model workcell and useless for
+        # KEYSIGHT's 21,173: a crash at model 20,000 threw away every one of
+        # them and started the workcell again. The two MES pulls above are
+        # per-customer and stay outside this loop, so a resumed customer
+        # re-fetches once — not once per block.
         n_serial = 0
-        for m in by_cust[cust]:
+        seen_ok = part.get(cust, set())
+        todo = [m for m in by_cust[cust] if m.assembly not in seen_ok]
+        if seen_ok:
+            log.info("  resume %-22s %d/%d models already done",
+                     cust, len(seen_ok), len(by_cust[cust]))
+        for i, m in enumerate(todo, 1):
             if m.assembly in serial_models:
                 sub = bs[bs["assembly"] == m.assembly]
                 seen, sl = set(), []
@@ -837,10 +873,18 @@ def run(models: pd.DataFrame, window: int = _WINDOW_DAYS, use_serial: bool = Tru
             r, rows = classify(ctx, m.customer, m.assembly, sl, src)
             summary[(m.customer, m.assembly)] = r
             steps[(m.customer, m.assembly)] = rows
+            seen_ok.add(m.assembly)
+            if i % _CKPT_EVERY == 0:
+                part[cust] = seen_ok
+                _flush(summary, steps)
+                _save()
+                log.info("  ... %-22s %d/%d models checkpointed",
+                         cust, len(seen_ok), len(by_cust[cust]))
 
         done.add(cust)
+        part.pop(cust, None)
         _flush(summary, steps)
-        state.write_text(json.dumps({"done": sorted(done)}))
+        _save()
         log.info("  ok %-24s %4d models (%d serial / %d batch) | %d/%d customers",
                  cust, len(by_cust[cust]), n_serial, len(by_cust[cust]) - n_serial,
                  len(done), len(by_cust))

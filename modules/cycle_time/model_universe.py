@@ -109,7 +109,7 @@ def _canonical_spelling() -> dict:
     return {canon(c["customer"]): c["customer"] for c in CT_CUSTOMERS}
 
 
-def _pairs(path: Path, cols: list[str] | None = None) -> pd.DataFrame:
+def _pairs(path: Path, cols: list[str] | None = None, newest: str | None = None) -> pd.DataFrame:
     """(workcell, assembly) from one mart, canonicalised and deduped.
 
     DEDUPE FIRST, THEN NORMALISE. It used to run `canon` and `norm` — Python
@@ -125,6 +125,15 @@ def _pairs(path: Path, cols: list[str] | None = None) -> pd.DataFrame:
         log.warning("missing source: %s", path)
         return pd.DataFrame(columns=["wc", "a", "assembly", "customer"])
     d = pd.read_parquet(path, columns=["customer", "assembly"] + (cols or []))
+    # `newest` decides WHICH duplicate survives. The completion mart holds some
+    # models twice under two spellings of one workcell — 'MOTOROLA' and
+    # 'Motorola' — one row fresh from v2 and one a legacy v1 row whose status
+    # ('unavailable') no longer maps to any verdict. Deduping on first-seen
+    # picked whichever pandas happened to hit first, so 49 models that HAD been
+    # checked read as ungraded. Sort by the grading timestamp, newest first, and
+    # the fresh row always wins.
+    if newest and newest in d.columns:
+        d = d.assign(_ts=pd.to_datetime(d[newest], errors="coerce"))              .sort_values("_ts", ascending=False, na_position="last")              .drop(columns="_ts")
     # Raw dedupe first — cheap, vectorised, and it is what shrinks the frame.
     d = d.drop_duplicates(["customer", "assembly"])
     # `canon` per DISTINCT customer, not per row. There are 50 of them.
@@ -158,7 +167,7 @@ def _read_status(path: Path) -> pd.DataFrame:
     from modules.cycle_time.completion_v2 import _verdict
 
     cnt = ["no_ct", "not_in_iedb", "unmapped", "present"]
-    d = _pairs(path, cols=["status", "reason"] + cnt)
+    d = _pairs(path, cols=["status", "reason", "graded_on"] + cnt, newest="graded_on")
     if d.empty:
         return d.assign(verdict=None)
     for c in cnt:
@@ -273,10 +282,55 @@ def build(mart: Path | None = None, _use_mart: bool = True) -> pd.DataFrame:
         idx = u.set_index(["wc", "a"]).index
         in_cat = idx.isin(hd.index)
         timed = idx.map(hd).fillna(False) if len(hd) else pd.Series(False, index=u.index)
-        judged = u["verdict"].notna()
+        # ONLY correct a verdict the MES comparison actually reached.
+        #
+        # `not_built` and `cannot_check` mean the comparison found no production
+        # to compare against — a real answer, and the catalogue cannot improve on
+        # it. Overriding them said "no cycle time" for K_CTEC AE3649-66500EV10,
+        # whose stored verdict was `not_in_mes / no_production`: MES was asked,
+        # returned 0 steps, and the model simply has not been built recently.
+        # Both facts were true and the wrong one was shown.
+        #
+        # They no longer compete, because the cycle-time state is its OWN column
+        # now. A row reads "Not built yet" in Status and "NO" under Cycle time,
+        # which is the whole story with nothing overridden.
+        comparable = u["verdict"].isin(["complete", "incomplete"])
         # Order matters: "does not exist" outranks "exists but untimed".
-        u.loc[judged & ~in_cat, "verdict"] = "not_in_iedb"
-        u.loc[judged & in_cat & ~pd.Series(timed, index=u.index), "verdict"] = "no_cycle_time"
+        u.loc[comparable & ~in_cat, "verdict"] = "not_in_iedb"
+        u.loc[comparable & in_cat & ~pd.Series(timed, index=u.index), "verdict"] = "no_cycle_time"
+
+        # ── the UNGRADED verdicts ──────────────────────────────────────────
+        # Four of the six answers never needed the MES comparison. "Not in
+        # IEDB", "No CT" and "Unbuilt" come from the catalogue and the build
+        # history, both of which we hold for all 57,059 models; "Can't check"
+        # is a property of the workcell. Only complete/incomplete require
+        # walking the route step by step.
+        #
+        # Leaving them null meant the table said "not checked" to 51,459 models
+        # when it had a true answer for 44,102 of them. "We did not look" and
+        # "there is nothing there" are different sentences, and the reader was
+        # only ever shown the first. `graded` is now its own column and is set
+        # ABOVE this block, so filling a verdict here never claims a comparison
+        # that did not run.
+        from modules.cycle_time.completion_v2 import _NON_MES
+        built = (src["in_mes_history"].set_index(["wc", "a"]).index
+                 if "in_mes_history" in src else pd.Index([]))
+        # `timed` is the CATALOGUE's has_data flag. For "does this model have a
+        # cycle time" the authority is `raw.parquet` itself — it IS the
+        # cycle-time table. The two disagree on 35 KEYSIGHT models the catalogue
+        # calls timed and raw has no rows for; asking the catalogue left them
+        # with no verdict at all. Ask the data.
+        has_ct = u["in_iedb_ct"].fillna(False)
+        blank = u["verdict"].isna()
+        u.loc[blank & u["wc"].isin(_NON_MES), "verdict"] = "cannot_check"
+        blank = u["verdict"].isna()
+        u.loc[blank & ~pd.Series(in_cat, index=u.index) & ~has_ct, "verdict"] = "not_in_iedb"
+        blank = u["verdict"].isna()
+        u.loc[blank & ~has_ct, "verdict"] = "no_cycle_time"
+        blank = u["verdict"].isna()
+        u.loc[blank & ~idx.isin(built), "verdict"] = "not_built"
+        # What is left is timed, built, and never compared — the 7,357 models a
+        # grading run still owes an answer to. They stay null on purpose.
     return u.reset_index(drop=True)
 
 
@@ -289,8 +343,11 @@ def verdicts(mart: Path | None = None) -> pd.DataFrame:
     """
     u = build(mart)
     if "verdict" not in u:
-        return pd.DataFrame(columns=["wc", "a", "verdict"])
-    return u.loc[u["verdict"].notna(), ["wc", "a", "verdict"]].reset_index(drop=True)
+        return pd.DataFrame(columns=["wc", "a", "verdict", "graded"])
+    # `graded` rides along. A verdict says WHAT is true; `graded` says whether a
+    # comparison established it. Callers that separate the two columns must not
+    # have to re-open the mart to get the second one.
+    return u.loc[u["verdict"].notna(), ["wc", "a", "verdict", "graded"]].reset_index(drop=True)
 
 
 #: Where build()'s answer is cached between runs. Every user gets the same
@@ -453,7 +510,22 @@ def _selfcheck() -> None:
                  ("ARISTANETWORKS", "ARISTA_NETWORKS_GLACIER")]:
         assert canon(a) != canon(b), f"{a} and {b} are separate workcells"
     assert canon("ResMed") == canon("RESMED"), "case must not split a workcell"
-    print("selfcheck OK - alias collapses, separate workcells stay separate")
+
+    # `checked` and `verdict` answer different questions and must never be
+    # re-fused. Filling the ungraded verdicts is only safe while these hold:
+    # a derived verdict may not claim a comparison, and only a comparison may
+    # say complete/incomplete.
+    # Recompute. Reading the stored mart would check yesterday's file, not
+    # today's code, and pass whatever the last run happened to write.
+    u = build(_use_mart=False)
+    cmp_only = u["verdict"].isin(["complete", "incomplete"])
+    assert bool(u.loc[cmp_only, "graded"].all()),         "complete/incomplete on an ungraded model - only the MES comparison can say that"
+    assert not bool(u.loc[u["graded"], "verdict"].isna().any()),         "a graded model with no verdict - the comparison ran and said nothing"
+    left = int(u["verdict"].isna().sum())
+    assert (u["verdict"].notna().sum() + left) == len(u), "verdict is not a partition"
+    print(f"selfcheck OK - alias collapses, separate workcells stay separate; "
+          f"{len(u):,} models, {int(u['graded'].sum()):,} checked, "
+          f"{len(u) - left:,} with a verdict, {left:,} still need the comparison")
 
 
 if __name__ == "__main__":

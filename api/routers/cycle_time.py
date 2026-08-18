@@ -1768,12 +1768,16 @@ def _completion_demand(_key) -> dict:
     v = verdicts(CT_MART["raw"].parent.parent)
     if len(v):
         v["_k"] = v["wc"] + "|" + v["a"]
-        vk = v.drop_duplicates("_k").set_index("_k")["verdict"]
+        v1 = v.drop_duplicates("_k").set_index("_k")
         # Rebuild the key through canon(): `_k` above normalises punctuation only,
         # so Cohu and LTX would miss each other.
         key = out["customer"].map(canon) + "|" + out["assembly"].map(norm)
-        out["status"] = key.map(vk)
+        out["status"] = key.map(v1["verdict"])
+        out["checked"] = key.map(v1["graded"])
     out["status"] = out["status"].fillna("not_checked")
+    # `== True` rather than fillna(False).astype(bool): the mapped column is
+    # object dtype with NaNs, and fillna downcasting on that is deprecated.
+    out["checked"] = (out["checked"] == True) if "checked" in out else False  # noqa: E712
     out = out.sort_values("units", ascending=False).reset_index(drop=True)
     out["rank"] = out.index + 1
     out["region"] = out["plant"].map(_PLANT_REGION).fillna("Other")
@@ -2045,9 +2049,13 @@ def ct_completion_steps(
         mes = [{"order": None if pd.isna(r["order"]) else int(r["order"]), "step": r["name"],
                 "alias": r["alias"], "qty": None if pd.isna(r["value"]) else int(r["value"]), "status": r["status"]}
                for _, r in df[df["side"] == "MES"].sort_values("order").iterrows()]
+        # `source` is "iedb" for the model's own route and "iedb:<other assembly>"
+        # when resolve() fell back to a suffix match. The drawer must say so —
+        # a borrowed route drawn as fact is how a model nobody timed gets signed off.
         iedb = [{"process": r["name"], "alias": r["alias"], "sub_workcenter": r["sub_workcenter"],
                  "order": None if pd.isna(r["order"]) else int(r["order"]),
-                 "cycle_time": None if pd.isna(r["value"]) else float(r["value"])}
+                 "cycle_time": None if pd.isna(r["value"]) else float(r["value"]),
+                 "source": r.get("source") if isinstance(r.get("source"), str) else None}
                 for _, r in df[df["side"] == "IEDB"].sort_values("order", na_position="last").iterrows()]
         return {"customer": customer, "assembly": assembly, "mes": mes, "iedb": iedb}
 
@@ -2068,7 +2076,8 @@ def ct_completion_steps(
         return {"customer": customer, "assembly": assembly, "mes": [], "iedb": []}
     iedb = [{"process": r["process"], "alias": r["alias"], "sub_workcenter": r["sub_workcenter"],
              "order": None if pd.isna(r["ord"]) else int(r["ord"]),
-             "cycle_time": None if pd.isna(r["ct"]) else float(r["ct"])}
+             "cycle_time": None if pd.isna(r["ct"]) else float(r["ct"]),
+             "source": "iedb"}
             for _, r in idf.iterrows()]
     return {"customer": customer, "assembly": assembly, "mes": [], "iedb": iedb}
 
@@ -2151,8 +2160,13 @@ def _universe_summary(_key):
     return {
         "workcells": _df_to_json(df),
         "statuses": STATUSES,
+        # `has_ct` / `no_ct` / `not_iedb` are the THREE BUCKETS — the partition
+        # every model falls into with no MES call at all. They were on the
+        # per-workcell rows but never on totals, so the four headline cards on
+        # the landing page rendered empty dashes.
         "totals": {c: int(df[c].sum()) for c in
-                   ["models", "in_iedb", "built_24mo", "in_demand", "graded", "ungraded", *STATUSES]},
+                   ["models", "in_iedb", "has_ct", "no_ct", "not_iedb", "built_24mo",
+                    "in_demand", "graded", "ungraded", *STATUSES] if c in df},
         # What was NOT counted, so the total can be reconciled instead of trusted.
         "excluded": {"rows": int(len(ex)),
                      "why": ex["why"].value_counts().to_dict() if len(ex) else {}},
@@ -2214,8 +2228,13 @@ def _workcell_models(workcell: str, _key):
             if col in d1:
                 u[out] = u["a"].map(d1[col])
     u["has_cycle_time"] = u["in_iedb_ct"]
-    keep = ["assembly", "verdict", "has_cycle_time", "in_iedb_catalog", "in_mes_history",
-            "in_demand", "units", "next_build", "last_build"]
+    # Did the completion run judge this model. `graded` is the universe's own
+    # column and means "has a readable row in completion_status_v2" — the mart
+    # the run writes. Sent as its own field so the table can ask "did we look?"
+    # without reading it out of the status word.
+    u["checked"] = u["graded"].fillna(False).astype(bool) if "graded" in u else False
+    keep = ["assembly", "verdict", "checked", "has_cycle_time", "in_iedb_catalog",
+            "in_mes_history", "in_demand", "units", "next_build", "last_build"]
     for c in keep:
         if c not in u:
             u[c] = None
