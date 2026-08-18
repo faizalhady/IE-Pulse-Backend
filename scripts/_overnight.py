@@ -85,37 +85,74 @@ def step1_fix_duplicate_workcells() -> int:
     return before - len(s)
 
 
-def step2_regrade_all() -> None:
-    """Re-grade every workcell with forward demand, one at a time."""
+def _run_one(runner, wc: str, timeout: int):
+    """One workcell, killed by its TREE if it overruns.
+
+    subprocess.run(timeout=) did not work here. On 2026-08-18 a KEYSIGHT run sat
+    for 4.6 HOURS against a 1-hour timeout: the timeout fires, Python kills the
+    direct child, then blocks re-reading a stdout pipe that the child's own
+    grandchildren still hold open. The whole queue stopped behind it.
+
+    So: Popen, wait with a timeout, and on overrun `taskkill /T` the entire tree
+    before touching the pipes. Returns (returncode, stdout, timed_out).
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-u", str(runner), "--workcell", str(wc), "--go"],
+        cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out, False
+    except subprocess.TimeoutExpired:
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       capture_output=True)
+        try:
+            out, _ = proc.communicate(timeout=30)
+        except Exception:
+            out = ""
+        return -1, out, True
+
+
+def step2_regrade_all(timeout: int = 1800) -> None:
+    """Re-grade every workcell with forward demand, one at a time.
+
+    SMALLEST FIRST. It used to run largest-first, so KEYSIGHT (744 models, the
+    slow per-serial path) sat at position 2 and blocked the other 36 workcells
+    behind it for the whole night. Smallest-first means the queue drains even if
+    the big ones fail, and a stuck workcell costs its timeout, not the run.
+    """
     eb = CT_MART["completion_status_v2"].parent.parent / "ebuild"
     dem = pd.concat([
         pd.read_parquet(eb / "planner_runners.parquet")[["customer", "assembly"]],
         pd.read_parquet(eb / "projection_runners.parquet")[["customer", "assembly"]],
     ]).drop_duplicates()
-    counts = dem.groupby("customer")["assembly"].nunique().sort_values(ascending=False)
+    counts = dem.groupby("customer")["assembly"].nunique().sort_values()   # ascending
 
     runner = ROOT / "scripts" / "run_completion_workcell.py"
-    log.info("STEP 2: %d workcells, %d demand models", len(counts), int(counts.sum()))
+    log.info("STEP 2: %d workcells, %d demand models, smallest first, %d min cap each",
+             len(counts), int(counts.sum()), timeout // 60)
 
+    ok = failed = timed = 0
     for i, (wc, n) in enumerate(counts.items(), 1):
         t0 = time.time()
         log.info("[%2d/%d] %-24s %4d models ...", i, len(counts), wc, n)
-        try:
-            r = subprocess.run(
-                [sys.executable, "-u", str(runner), "--workcell", str(wc), "--go"],
-                cwd=str(ROOT), capture_output=True, text=True, timeout=3600)
-        except subprocess.TimeoutExpired:
-            log.error("[%2d/%d] %-24s TIMED OUT after 60 min - skipped", i, len(counts), wc)
+        rc, out, hit_timeout = _run_one(runner, str(wc), timeout)
+        took = time.time() - t0
+        if hit_timeout:
+            timed += 1
+            log.error("[%2d/%d] %-24s TIMED OUT after %.0f min - tree killed, moving on",
+                      i, len(counts), wc, took / 60)
             continue
-        tail = [l for l in (r.stdout or "").splitlines() if l.strip()][-14:]
-        if r.returncode != 0:
-            log.error("[%2d/%d] %-24s FAILED rc=%s", i, len(counts), wc, r.returncode)
-            for l in (r.stderr or "").splitlines()[-6:]:
+        if rc != 0:
+            failed += 1
+            log.error("[%2d/%d] %-24s FAILED rc=%s", i, len(counts), wc, rc)
+            for l in (out or "").splitlines()[-6:]:
                 log.error("        %s", l)
             continue
-        after = [l for l in tail if "->" in l or "status AFTER" in l]
-        log.info("[%2d/%d] %-24s done in %.0fs   %s", i, len(counts), wc,
-                 time.time() - t0, after[0].strip() if after else "")
+        ok += 1
+        after = [l for l in (out or "").splitlines() if "->" in l and "mart:" in l]
+        log.info("[%2d/%d] %-24s done in %.0fs   %s", i, len(counts), wc, took,
+                 after[0].strip() if after else "")
+    log.info("STEP 2 done: %d ok, %d failed, %d timed out", ok, failed, timed)
 
 
 if __name__ == "__main__":
