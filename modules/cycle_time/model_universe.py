@@ -423,6 +423,19 @@ def summary(mart: Path | None = None) -> pd.DataFrame:
         g[c] = g.get(c, 0)
         g[c] = pd.to_numeric(g[c], errors="coerce").fillna(0).astype(int)
 
+    # HOME PLANT — the one where most of the workcell's demand sits. A few
+    # genuinely run in two (INFINERA is in JBK and Plant 1), so this is the
+    # dominant one, not the only one. Same rule eBuild uses for customer_plant.
+    cp = CT_MART["raw"].parent.parent / "ebuild" / "customer_plant.parquet"
+    if cp.exists():
+        d = pd.read_parquet(cp)
+        by = {}
+        for c, pl, un in zip(d["customer"], d["plant"], d.get("units", 0)):
+            k = canon(c)
+            if k not in by or (un or 0) > by[k][1]:
+                by[k] = (pl, un or 0)
+        g["plant"] = g["workcell"].map(lambda w: (by.get(canon(w)) or (None,))[0])
+
     g["ungraded"] = g["models"] - g["graded"]
     g["pct_graded"] = (g["graded"] / g["models"] * 100).round(1)
     # Denominator is what we have LOOKED at. Dividing by every model would read
