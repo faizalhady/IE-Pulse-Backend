@@ -379,13 +379,38 @@ def summary(mart: Path | None = None) -> pd.DataFrame:
     u = build(mart)
     if u.empty:
         return u
+    # THE THREE BUCKETS. Mutually exclusive, exhaustive, and known for 100% of
+    # models because they come from IEDB alone — no MES call, no completion run.
+    #
+    #   has_ct    IEDB has priced it
+    #   no_ct     IEDB lists it, nobody timed it   -> go time it
+    #   not_iedb  IEDB has never heard of it       -> create it first
+    #
+    # This is the breakdown to lead with. `complete`/`incomplete` need the MES
+    # comparison and only cover 10% of models, so a percentage built on them is
+    # a share of what we happened to check. These cover everything.
+    #
+    # The last two are deliberately NOT merged into "missing cycle time": one is
+    # an IE task and the other is a data-creation task, for different people.
+    u = u.copy()
+    u["has_ct"] = u["in_iedb_ct"]
+    u["no_ct"] = u["in_iedb_catalog"] & ~u["in_iedb_ct"]
+    u["not_iedb"] = ~u["in_iedb_catalog"] & ~u["in_iedb_ct"]
+
     g = u.groupby("workcell").agg(
         models=("a", "size"),
         in_iedb=("in_iedb", "sum"),
+        has_ct=("has_ct", "sum"),
+        no_ct=("no_ct", "sum"),
+        not_iedb=("not_iedb", "sum"),
         built_24mo=("in_mes_history", "sum"),
         in_demand=("in_demand", "sum"),
         graded=("graded", "sum"),
     ).reset_index()
+    # The partition must hold per workcell, not just plant-wide. If it ever does
+    # not, one of the three is silently wrong and the page would still render.
+    assert (g["has_ct"] + g["no_ct"] + g["not_iedb"] == g["models"]).all(),         "the three buckets do not sum to models - they are not a partition"
+    g["pct_has_ct"] = (g["has_ct"] / g["models"] * 100).round(1)
 
     # One column per answer. reindex(): a workcell with nobody in a bucket must
     # print 0, not go missing from the frame.
