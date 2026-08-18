@@ -29,6 +29,7 @@ from core.auth import require_level, verified_ntid
 from core.mart_cache import mart_key
 from modules.cycle_time.config import (
     CT_CUSTOMERS,
+    CT_MES_SCAN_DIR,
     CT_DUCKDB_MEMORY_LIMIT,
     CT_DUCKDB_TEMP_DIR,
     CT_DUCKDB_THREADS,
@@ -1149,23 +1150,115 @@ def _with_untimed(df: pd.DataFrame, customer: str) -> pd.DataFrame:
     """
     df = df.copy()
     df["has_cycle_time"] = True
-    df["verdict"] = None
+    for c in ("verdict", "checked", "gap", "unmapped", "units",
+              "next_build", "last_build", "last_scan", "in_iedb"):
+        df[c] = None
     try:
-        from modules.cycle_time.model_universe import build as _ubuild, canon as _canon
+        from modules.cycle_time.model_universe import build as _ubuild, canon as _canon, norm as _n
         u = _ubuild(CT_MART["raw"].parent.parent)
-        u = u[(u["wc"] == _canon(customer)) & (~u["in_iedb_ct"].fillna(False))]
-        extra = u[~u["assembly"].astype(str).isin(set(df["assembly"].astype(str)))]
-        if not len(extra):
-            return df
-        add = pd.DataFrame(index=range(len(extra)), columns=df.columns)
-        add["assembly"] = extra["assembly"].astype(str).values
-        add["has_cycle_time"] = False
-        add["verdict"] = extra["verdict"].values
-        out = pd.concat([df, add], ignore_index=True)
-        return out.sort_values(["has_cycle_time", "assembly"],
-                               ascending=[False, True], ignore_index=True)
+        u = u[u["wc"] == _canon(customer)]
+
+        # Append the models IEDB never priced. They have no row in any
+        # cycle-time mart, so without this they simply do not exist on the page.
+        untimed = u[~u["in_iedb_ct"].fillna(False)]
+        extra = untimed[~untimed["assembly"].astype(str).isin(set(df["assembly"].astype(str)))]
+        if len(extra):
+            add = pd.DataFrame(index=range(len(extra)), columns=df.columns)
+            add["assembly"] = extra["assembly"].astype(str).values
+            add["has_cycle_time"] = False
+            df = pd.concat([df, add], ignore_index=True)
+
+        # The row's STATE, joined on the same identity the universe uses. Keyed
+        # on normalised assembly so a spelling difference cannot drop a row.
+        k = df["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+        for col, src in (("verdict", "verdict"), ("checked", "graded"), ("in_iedb", "in_iedb")):
+            df[col] = k.map(u.drop_duplicates("a").set_index("a")[src])
+        df["checked"] = df["checked"].fillna(False).astype(bool)
+
+        # The gap, split: IEDB's (no cycle time / not on its route) and OURS
+        # (the naming bridge could not identify the step). Folding them into one
+        # number blames IEDB for our own mapping holes.
+        st = CT_MART["completion_status_v2"]
+        if st.exists():
+            sd = pd.read_parquet(st, columns=["customer", "assembly", "no_ct",
+                                              "not_in_iedb", "unmapped"])
+            sd = sd[sd["customer"].map(_canon) == _canon(customer)]
+            if len(sd):
+                sk = sd["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+                sd = sd.assign(_k=sk).drop_duplicates("_k").set_index("_k")
+                for c in ("no_ct", "not_in_iedb", "unmapped"):
+                    sd[c] = pd.to_numeric(sd[c], errors="coerce").fillna(0)
+                df["gap"] = k.map(sd["no_ct"] + sd["not_in_iedb"])
+                df["unmapped"] = k.map(sd["unmapped"])
+
+        # Demand: why the reader should care, and when it is next needed.
+        #
+        # `units` is FORWARD demand — planner 13wk + eDash ~4wk. It is NOT what
+        # was produced. The two get confused constantly, so the column is
+        # labelled "Demand" on screen and the history date is a separate column.
+        dem = _demand_frame()
+        if not dem.empty:
+            dem = dem[dem["customer"].map(_canon) == _canon(customer)]
+            if len(dem):
+                dk = dem["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+                dd = dem.assign(_k=dk).drop_duplicates("_k").set_index("_k")
+                df["units"] = k.map(dd["units"]) if "units" in dd else None
+                if "next_build" in dd:
+                    df["next_build"] = k.map(dd["next_build"])
+
+        # LAST SCAN — the day a board of this model was last seen on the floor.
+        #
+        # From the #21 scan cache: mes_scans/<customer>/<YYYY-MM-DD>.parquet, one
+        # file per customer-day, THE FILENAME IS THE DATE. So the answer is just
+        # max(filename) per assembly, and it is current to today.
+        #
+        # Deliberately NOT `runners.last_completed`, which is when a JOB closed.
+        # A job can close days after the last board walked the line, and a model
+        # being built right now has no completed job at all. The question people
+        # ask is "was this on the line today?" — that is a scan, not a job.
+        #
+        # Coverage: 32 of 50 workcells are cached, back to 2026-03-31. A model
+        # with no scan in that window returns null, which renders as a dash. It
+        # falls back to job history so an older build still shows something.
+        scan_dir = CT_MES_SCAN_DIR / str(customer)
+        if not scan_dir.exists():                     # cache is keyed on the raw spelling
+            cand = [d for d in CT_MES_SCAN_DIR.iterdir()
+                    if d.is_dir() and _canon(d.name) == _canon(customer)]
+            scan_dir = cand[0] if cand else None
+        if scan_dir and any(scan_dir.glob("*.parquet")):
+            con = _con()
+            try:
+                sc = con.execute(f"""
+                    SELECT assembly,
+                           MAX(regexp_extract(replace(filename, chr(92), '/'),
+                               '([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}})[.]parquet', 1)) AS d
+                    FROM read_parquet('{(scan_dir / "*.parquet").as_posix()}', filename=true)
+                    WHERE assembly IS NOT NULL
+                    GROUP BY assembly
+                """).df()
+            finally:
+                con.close()
+            if len(sc):
+                ck = sc["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+                df["last_scan"] = k.map(sc.assign(_k=ck).drop_duplicates("_k").set_index("_k")["d"])
+
+        # Fallback only: when a JOB last closed. Older and coarser, but it covers
+        # models whose last activity predates the scan cache.
+        hist = CT_MART["raw"].parent.parent / "ebuild" / "runners.parquet"
+        if hist.exists():
+            h = pd.read_parquet(hist, columns=["customer", "assembly", "last_completed"])
+            h = h[h["customer"].map(_canon) == _canon(customer)]
+            if len(h):
+                hk = h["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+                last = h.assign(_k=hk).groupby("_k")["last_completed"].max()
+                df["last_build"] = k.map(last)
+
+        # Untimed first is wrong now that the row carries demand: sort by what
+        # somebody would act on, which is volume.
+        return df.sort_values(["units", "assembly"], ascending=[False, True],
+                              na_position="last", ignore_index=True)
     except Exception as e:                       # never break the timed list
-        log.warning("assembly-list: could not append untimed models: %s", e)
+        log.warning("assembly-list: could not enrich: %s", e)
         return df
 
 
