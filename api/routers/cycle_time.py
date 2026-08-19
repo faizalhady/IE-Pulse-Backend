@@ -1636,7 +1636,17 @@ def _demand_frame() -> pd.DataFrame:
     A model can be planned in more than one plant (INFINERA runs in both JBK and
     Plant 1), so the plant shown is the one with the most units — same rule
     eBuild uses for customer_plant.
+
+    Cached on the demand marts' mtimes — it read both parquets and re-ran the
+    groupby on EVERY request that showed a model list, 197 ms a time. A COPY is
+    handed out so a caller that assigns a column cannot corrupt the shared one.
     """
+    eb = CT_MART["raw"].parent.parent / "ebuild"
+    return _demand_frame_cached(mart_key(*(eb / n for n in _DEMAND_MARTS))).copy()
+
+
+@lru_cache(maxsize=4)
+def _demand_frame_cached(_key) -> pd.DataFrame:
     eb = CT_MART["raw"].parent.parent / "ebuild"
     frames = []
     for name in _DEMAND_MARTS:
@@ -1743,9 +1753,67 @@ def _completion_demand(_key) -> dict:
     out["customer"] = [_canon.get(_cnorm_key(c), c) for c in out["customer"]]
     out["has_demand"] = out["_merge"] != "right_only"
     out["units"] = pd.to_numeric(out["units"], errors="coerce").fillna(0)
-    out["plant"] = out["plant"].fillna("Unassigned")
+    # NOT filled to "Unassigned" yet — the workcell-plant borrow below needs to
+    # see which rows genuinely have no plant, and the universe rows are not
+    # appended until after this point.
     out["sources"] = out["sources"].fillna("")
     out = out.drop(columns=["customer_st", "assembly_st", "_merge"])
+
+    # ── THIRD source: every model that exists ────────────────────────────────
+    # Demand and the status mart between them cover 43,020 models. The universe
+    # holds 57,059. The missing ~14,000 are models nobody has ordered AND nobody
+    # has graded — which is exactly what the Coverage page counts as `ungraded`.
+    # Leaving them out is why Coverage said 57,059 and this report said 43,020
+    # for the same "full scope", with no way to reconcile the two on screen.
+    #
+    # They are appended, never merged: `has_demand` stays False and `units` 0, so
+    # the ranking is untouched and the "Planned" toggle filters them out in one
+    # comparison. The canonical key is used for the anti-join — `_k` normalises
+    # punctuation only, so Cohu and LTX would miss each other and reappear as
+    # duplicates of models already in `out`.
+    from modules.cycle_time.model_universe import build as _universe_build, canon as _canon_wc, norm as _norm_a
+    out["_ck"] = out["customer"].map(_canon_wc) + "|" + out["assembly"].map(_norm_a)
+    uni = _universe_build(CT_MART["raw"].parent.parent)
+    if len(uni):
+        uni = uni.assign(_uk=uni["wc"].astype(str) + "|" + uni["a"].astype(str))
+        extra = uni[~uni["_uk"].isin(set(out["_ck"]))]
+        if len(extra):
+            # Plant belongs to the workcell, not the model, so borrow the one its
+            # demand rows already sit in. A workcell with no demand at all has no
+            # plant to borrow and stays "Unassigned" rather than being guessed.
+            #
+            # Both lookups key on canon(), never the raw name: the universe spells
+            # a workcell from CT_CUSTOMERS and demand spells it from the planner
+            # sheet, so a raw-string join silently missed and left every one of
+            # ARISTANETWORKS' models plant-less.
+            # Reuse demand's SPELLING for the same workcell, or the picker lists
+            # one workcell twice — once per source's idea of its name.
+            dm = out[out["has_demand"]].assign(_w=out.loc[out["has_demand"], "customer"].map(_canon_wc))
+            name_of = dm.drop_duplicates("_w").set_index("_w")["customer"].to_dict()
+            add = pd.DataFrame({
+                "customer": extra["workcell"].astype(str),
+                "assembly": extra["assembly"].astype(str),
+                "_k": extra["_uk"],
+                "_ck": extra["_uk"],
+                "units": 0.0,
+                "has_demand": False,
+                "sources": "",
+            })
+            _w = add["customer"].map(_canon_wc)
+            add["customer"] = _w.map(name_of).fillna(add["customer"])
+            out = pd.concat([out, add], ignore_index=True)
+
+    # Plant, for every row that still lacks one — status-mart rows included.
+    # Only demand carries a plant, so ~38,600 already-graded models arrived here
+    # as "Unassigned" and the plant filter could not reach any of them. A model
+    # is built where its workcell is built, so the workcell's own plant is the
+    # answer; a workcell with no demand anywhere has none to give and stays
+    # Unassigned rather than being guessed.
+    _wk = out["customer"].map(_canon_wc)
+    known = out["plant"].notna()
+    plant_of = (out[known].assign(_w=_wk[known])
+                .groupby("_w")["plant"].agg(lambda x: x.value_counts().index[0]).to_dict())
+    out["plant"] = out["plant"].fillna(_wk.map(plant_of)).fillna("Unassigned")
 
     # LBR% and IPK trolleys — the two line-design indicators. Only meaningful
     # once a model's route is complete, so they are frequently null; the table
@@ -1769,11 +1837,10 @@ def _completion_demand(_key) -> dict:
     if len(v):
         v["_k"] = v["wc"] + "|" + v["a"]
         v1 = v.drop_duplicates("_k").set_index("_k")
-        # Rebuild the key through canon(): `_k` above normalises punctuation only,
+        # `_ck` was built through canon() above: `_k` normalises punctuation only,
         # so Cohu and LTX would miss each other.
-        key = out["customer"].map(canon) + "|" + out["assembly"].map(norm)
-        out["status"] = key.map(v1["verdict"])
-        out["checked"] = key.map(v1["graded"])
+        out["status"] = out["_ck"].map(v1["verdict"])
+        out["checked"] = out["_ck"].map(v1["graded"])
     out["status"] = out["status"].fillna("not_checked")
     # `== True` rather than fillna(False).astype(bool): the mapped column is
     # object dtype with NaNs, and fillna downcasting on that is deprecated.
@@ -1811,7 +1878,7 @@ def _completion_demand(_key) -> dict:
         "counts": out["status"].value_counts().to_dict(),
         "unchecked": int((out["status"] == "not_checked").sum()),
         "freshness": freshness(CT_MART["raw"].parent.parent),
-        "models": _df_to_json(out.drop(columns=["_k"])),
+        "models": _df_to_json(out.drop(columns=["_k", "_ck"])),
     }
 
 
@@ -1885,8 +1952,14 @@ def ct_completion_demand(
     total = len(rows)
 
     if workcells:
-        want = {w.strip().casefold() for w in workcells.split(",") if w.strip()}
-        rows = [r for r in rows if str(r.get("customer", "")).casefold() in want]
+        # Normalised, not casefold-only. The caller has the workcell spelled the
+        # way /customers spells it and the demand rows carry whatever the planner
+        # sheet used — 'LAM RESEARCH' vs 'LAMRESEARCH'. A casefold-exact match
+        # silently returned zero rows for those, which renders as an empty page,
+        # not as an error. Two workcells that differ only in punctuation are the
+        # same workcell, so normalising can never merge two real ones.
+        want = {_cnorm_key(w) for w in workcells.split(",") if w.strip()}
+        rows = [r for r in rows if _cnorm_key(r.get("customer", "")) in want]
     elif plants:
         want = {p.strip().casefold() for p in plants.split(",") if p.strip()}
         rows = [r for r in rows if str(r.get("plant", "")).casefold() in want]
@@ -1997,6 +2070,36 @@ def ct_completion_history(
     }
 
 
+@lru_cache(maxsize=64)
+def _steps_slice(path: str, customer: str, assembly: str) -> pd.DataFrame:
+    """One model's rows out of a completion-steps mart, filtered at the scan.
+
+    The SQL deliberately matches a SUPERSET — customer, plus any row whose
+    assembly merely CONTAINS the stripped name — and the exact test is then the
+    original pandas one, unchanged. Stripping in SQL is not equivalent: Python's
+    str.strip() removes U+00A0, DuckDB's backslash-s and trim() do not, and
+    `853-111462-068A` + U+00A0 at LAM RESEARCH silently returned 0 rows, not 15.
+    A superset plus the original predicate cannot drift from the old behaviour;
+    a re-implemented predicate can.
+
+    Cached as well as pushed down: the drawer and the model page both ask for
+    the same (customer, assembly), and the model page asks once per tab."""
+    con = duckdb.connect()
+    try:
+        d = con.execute(
+            f"""SELECT * FROM read_parquet('{path}')
+                WHERE lower(customer) = lower(?)
+                  AND contains(CAST(assembly AS VARCHAR), ?)""",
+            [customer, assembly],
+        ).df()
+    finally:
+        con.close()
+    if d.empty:
+        return d
+    return d[(d["customer"].astype(str).str.casefold() == customer.casefold())
+             & (d["assembly"].astype(str).str.strip() == assembly)]
+
+
 @router.get("/completion/steps")
 def ct_completion_steps(
     customer: str = Query(..., description="Workcell (case-insensitive)."),
@@ -2017,11 +2120,17 @@ def ct_completion_steps(
     for p in marts:
         if not p.exists():
             continue
-        d = pd.read_parquet(p)
+        # The filter goes INTO the read. This used to be `pd.read_parquet(p)` and
+        # then a pandas mask: 2,288,551 rows of completion_steps_v2 loaded into
+        # memory on every request, to keep 34 and bin the rest. 835 ms of the
+        # endpoint's 2.6 s was that one line. DuckDB pushes the predicate down to
+        # the parquet scan and returns the same rows in ~30 ms.
+        #
         # Demand plans carry stray whitespace and tabs in model names — match on
         # the stripped value or the drawer 404s on a model the report just listed.
-        d = d[(d["customer"].astype(str).str.casefold() == customer.casefold())
-              & (d["assembly"].astype(str).str.strip() == assembly.strip())]
+        # regexp_replace, not trim(): DuckDB's trim strips spaces only, and the
+        # names that need this carry TABS.
+        d = _steps_slice(p.as_posix(), customer, assembly.strip())
         if not d.empty:
             # The mart carries some workcells under two spellings (MASIMO and
             # Masimo). Matching case-insensitively pulled BOTH copies in, so the
@@ -2098,6 +2207,24 @@ def ct_completion_line_metrics(
     if not m:
         raise HTTPException(status_code=404, detail=f"No line metrics for {customer} / {assembly} (no priority-1 cycle-time data).")
     return {"customer": customer, "assembly": assembly, **m}
+
+
+@router.get("/bom")
+def ct_bom(
+    customer: str = Query(..., description="Workcell (config name, e.g. 'Nokia Optics')."),
+    assembly: str = Query(..., description="Model / assembly name."),
+    revision: str | None = Query(None, description="Assembly revision. Default: the newest revision that has a BOM."),
+):
+    """The MES BOM materials for one model.
+      -> {customer, assembly, revision, bom_id, has_bom, in_mes,
+          materials:[{bom_material_id, material, description, qty, bom_level, bom_sort_order}],
+          revisions:[{revision, assembly_id, bom_id}]}
+
+    Never 404s on a model with no BOM: `has_bom:false` with `in_mes:true` means
+    MES holds the assembly and no BOM was ever loaded (all of LAMGB, ~26% of MES),
+    which is an answer. `in_mes:false` means we could not find the assembly at all."""
+    from modules.cycle_time.bom import for_model
+    return for_model(customer, assembly, revision)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2351,6 +2478,46 @@ def registry_decide(body: dict, ntid: str = Depends(verified_ntid)):
             evidence=body.get("evidence"),
             ntid=ntid,
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/registry/process-list")
+def registry_process_list(
+    scope: str = Query("scanned", description="scanned = MES recorded a scan · configured = on a MES route"),
+    workcell: str = Query("", description="Workcell name, any spelling. Blank = every workcell."),
+    q: str = Query("", description="Match MES step, IEDB alias or workcell."),
+    status: str = Query("", description="Comma-separated: mapped,non_iedb,unmapped"),
+    sort: str = Query("rows", description="step|workcell|status|source|maps_to|models|rows|scans"),
+    direction: str = Query("desc", pattern="^(asc|desc)$"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(200, ge=1, le=5000),
+):
+    """One row per (workcell, MES step) — the process list, both views.
+      -> {rows[], total, page, page_size, counts{mapped,non_iedb,unmapped}}
+
+    scope=scanned     5,344 couples MES actually scanned. This is the work list.
+    scope=configured  72,692 couples on a MES route; 67,394 never scanned. It is
+                      paged for a reason — do not ask for it in one response.
+
+    `counts` is over the filtered set BEFORE paging, so the filter chips can
+    show how much work each holds without a second round-trip."""
+    from modules.cycle_time import registry
+    return registry.process_list(scope=scope, workcell=workcell, q=q, status=status,
+                                 sort=sort, direction=direction,
+                                 page=page, page_size=page_size)
+
+
+@router.post("/registry/decisions")
+def registry_decide_bulk(body: dict, ntid: str = Depends(verified_ntid)):
+    """Answer many steps at once. All-or-nothing.
+    Body: {items: [{workcell, mes_step, answer, iedb_alias?, evidence?}]}
+
+    Four spellings of one step name are four rows and one answer. One at a time
+    that is four round-trips and four chances to typo the alias."""
+    from modules.cycle_time import registry
+    try:
+        return registry.decide_bulk(body.get("items") or [], ntid=ntid)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

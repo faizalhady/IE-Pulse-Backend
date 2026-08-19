@@ -90,8 +90,17 @@ def aliases() -> dict:
     return out
 
 
+@lru_cache(maxsize=8192)
 def canon(workcell) -> str:
     """Workcell -> the one key it is counted under.
+
+    Cached: this is called through `.map(canon)` over whole columns — 73,529
+    times to serve ONE workcell page — and every call was a regex sub. There are
+    ~40 distinct workcell strings in the plant, so the cache hits essentially
+    always. It is keyed on the raw string, so two spellings still resolve to the
+    same canonical key, they just each cost one regex instead of thousands.
+    Staleness matches `aliases()`, which is already cached for the process life:
+    workcell_alias.csv is config, not data.
 
     Case and punctuation always (RESMED / ResMed), a different NAME only when the
     alias table says so (Cohu -> LTX). Anything unknown keeps its own key: an
@@ -203,6 +212,23 @@ def _rescue_blank(blank: pd.DataFrame, cat: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+@lru_cache(maxsize=2)
+def _read_mart_cached(path: str, _mtime: float) -> pd.DataFrame:
+    """The stored universe, read once per file version.
+
+    57,059 rows / 17 MB. It was re-read from disk on EVERY request that touched
+    a model list — `_with_untimed` alone paid ~500 ms of a workcell page's 1.3 s
+    to load the whole plant and then keep one workcell. Keyed on mtime, so the
+    nightly rebuild invalidates it without anyone remembering to."""
+    return pd.read_parquet(path)
+
+
+def _read_mart(path: Path) -> pd.DataFrame:
+    """A COPY of the cached frame. 2 ms, and it means a caller that assigns a
+    column cannot corrupt the copy every other caller is holding."""
+    return _read_mart_cached(path.as_posix(), path.stat().st_mtime).copy()
+
+
 def build(mart: Path | None = None, _use_mart: bool = True) -> pd.DataFrame:
     """One row per model, with a flag per source. Nothing is aggregated yet.
 
@@ -212,7 +238,7 @@ def build(mart: Path | None = None, _use_mart: bool = True) -> pd.DataFrame:
     """
     root = mart or CT_MART["raw"].parent.parent
     if _use_mart and _mart_is_fresh(root):
-        return pd.read_parquet(root / MART)
+        return _read_mart(root / MART)
     ct = (mart / "cycle_time") if mart else CT_MART["raw"].parent
     eb = (mart / "ebuild") if mart else CT_MART["raw"].parent.parent / "ebuild"
 

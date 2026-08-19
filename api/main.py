@@ -107,6 +107,25 @@ def _warm_universe(ct, CT_MART):
         eb / "projection_runners.parquet", eb / "planner_runners.parquet"))
 
 
+def _warm_model_universe() -> None:
+    """Read the stored universe once so the first model list does not."""
+    from modules.cycle_time.model_universe import build
+    build()
+
+
+def _warm_registry() -> None:
+    """Both process lists, plus the 11.9 MB raw CSV they share.
+
+    `scanned` and `configured` read the same file but build different frames, so
+    warming one does not warm the other. Warmed with the same default sort and
+    page size the pages request, or the first visitor still pays for the sort.
+    """
+    from modules.cycle_time import registry
+    registry.workcells()
+    registry.process_list(scope="scanned", page_size=300)
+    registry.process_list(scope="configured", page_size=300)
+
+
 def _warm_caches() -> None:
     """Populate the mart caches in the background so the first real visitor
     doesn't pay for them.
@@ -137,6 +156,16 @@ def _warm_caches() -> None:
              lambda: ct_router_mod._completion_demand_json(
                  ct_router_mod._completion_demand_key())),
             ("cycle-time/universe-summary", lambda: _warm_universe(ct_router_mod, CT_MART)),
+            # The model universe parquet, 57k rows. Every model list joins it,
+            # and it was re-read from disk per request until it was cached.
+            ("cycle-time/model-universe", _warm_model_universe),
+            # The demand frame behind every model list — two parquets and a
+            # groupby, 197ms, previously recomputed on every single request.
+            ("cycle-time/demand-frame", lambda: ct_router_mod._demand_frame()),
+            # The process registry: the workcell Processes tab and the global
+            # Processes page. The raw CSV is 11.9 MB and the configured list is
+            # 72,692 couples — 1.1s and 0.7s respectively on a cold process.
+            ("cycle-time/registry", _warm_registry),
         ]
         for name, fn in jobs:
             t0 = time.time()

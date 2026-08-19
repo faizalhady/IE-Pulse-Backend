@@ -65,37 +65,60 @@ HELP_NAME  = os.getenv("SMH_HELP_NAME",  "Syuhada Binti Sooid")
 HELP_EMAIL = os.getenv("SMH_HELP_EMAIL", "Syuhada_Sooid@jabil.com")
 
 
-def smh_link(workcell: str) -> str:
-    """Deep link to the SMH page, pre-filtered to this workcell's gaps."""
+def smh_link(workcell: str, tier: str = "ACTIVE") -> str:
+    """Deep link to the SMH page, pre-filtered to this workcell's gaps.
+
+    `tier` reaches the page even while its tier tabs are hidden — the filter is
+    read from the URL, not from the control.
+    """
     return (f"{BASE_URL}/ietools/ole/smh"
-            f"?workcell={quote(workcell)}&status=NOT_IN_SMH_DB")
+            f"?workcell={quote(workcell)}&status=NOT_IN_SMH_DB&tier={tier}")
 
 
 def coverage() -> list[dict]:
-    """Per-workcell coverage: total models, how many lack SMH, and the percent.
+    """Per-workcell coverage, counted on ACTIVE only, plus an UPCOMING column.
 
-    The mart is a snapshot from the last pipeline run, so it is overlaid with
-    the live `smh` table before counting — exactly what the SMH page does. Skip
-    the overlay and you email someone about a model they filled in this morning,
-    which is the fastest way to get the whole report ignored.
+    ACTIVE (built in the last 90 days, or on the planner's 13-week horizon) is
+    what the totals mean. DORMANT is excluded on purpose — chasing someone about
+    a model last built in March is how a report gets ignored.
+
+    UPCOMING is counted separately rather than folded in: those models have not
+    been built, so they are losing nothing yet. Adding them to `missing` would
+    mix "you are bleeding hours right now" with "get ready", and inflate every
+    workcell's percentage.
+
+    The mart is a snapshot from the last pipeline run, so it is overlaid with the
+    live `smh` table before counting — skip that and you email someone about a
+    model they filled in this morning.
     """
     df = pd.read_parquet(MART["smh_status"])
     live = {(r["workcell"], r["assembly"])
             for r in smh_store.list_smh(limit=200_000) if r["smh_value"] > 0}
 
     df["has_smh"] = [(w, a) in live for w, a in zip(df["workcell"], df["assembly"])]
+    # A mart written before the scoping change has no tier column. Treat it as
+    # all-ACTIVE rather than reporting zeros, so an un-refreshed server still
+    # sends a truthful (if narrower) digest.
+    if "tier" not in df.columns:
+        log.warning("Mart has no `tier` column -- counting every row as ACTIVE, "
+                    "UPCOMING will read 0. Run the OLE pipeline to populate it.")
+        df["tier"] = "ACTIVE"
 
     out = []
     for wc, g in df.groupby("workcell"):
-        missing = g[~g["has_smh"]]
-        total = len(g)
+        active = g[g["tier"] == "ACTIVE"]
+        missing = active[~active["has_smh"]]
+        upcoming_missing = g[(g["tier"] == "UPCOMING") & ~g["has_smh"]]
+        total = len(active)
         out.append({
             "workcell": wc,
             "total_models": total,
             "missing_models": len(missing),
             "missing_pct": round(len(missing) / total * 100, 1) if total else 0.0,
             "qty_unearned": int(missing["total_qty_produced"].sum()),
+            "upcoming_missing": len(upcoming_missing),
             "link": smh_link(wc),
+            "upcoming_link": smh_link(wc, tier="UPCOMING"),
         })
     return sorted(out, key=lambda r: r["missing_pct"], reverse=True)
 
@@ -125,6 +148,21 @@ def build() -> list[dict]:
     return rows
 
 
+def horizon_end() -> str:
+    """Last date the 13-week planner window covers, as `dd Mon yyyy`.
+
+    Read from the mart's own next-build dates rather than computed from today,
+    so the header can never claim a window the data doesn't actually cover — a
+    stale planner file shows its real end date instead of a reassuring one.
+    """
+    try:
+        d = pd.read_parquet(MART["smh_status"])["next_build_date"]
+        latest = pd.to_datetime(d, errors="coerce").max()
+        return latest.strftime("%d %b %Y") if pd.notna(latest) else "the planner horizon"
+    except Exception:
+        return "the planner horizon"
+
+
 def render(rows: list[dict]) -> str:
     """The digest. Inline styles — mail clients drop <style> blocks.
 
@@ -143,6 +181,7 @@ def render(rows: list[dict]) -> str:
     for r in rows:
         gap = r["missing_models"] > 0
         colour = "#b91c1c" if r["missing_pct"] >= 25 else "#a16207" if gap else "#059669"
+        up = r["upcoming_missing"]
         body.append(f"""\
     <tr>
       <td style="{td}"><a href="{r['link']}" style="color:#0369a1;font-weight:600;
@@ -150,6 +189,7 @@ def render(rows: list[dict]) -> str:
       <td style="{tdr}">{r['total_models']:,}</td>
       <td style="{tdr};color:{colour};font-weight:700">{r['missing_models']:,}</td>
       <td style="{tdr};color:{colour};font-weight:700">{r['missing_pct']}%</td>
+      <td style="{tdr}">{f'<a href="{r["upcoming_link"]}" style="color:#7c3aed;font-weight:700;text-decoration:none">{up:,}</a>' if up else '<span style="color:#9ca3af">0</span>'}</td>
       <td style="{td};color:#374151">{r['pic']}</td>
     </tr>""")
 
@@ -157,6 +197,8 @@ def render(rows: list[dict]) -> str:
     tot_missing = sum(r["missing_models"] for r in rows)
     tot_pct = round(tot_missing / tot_models * 100, 1) if tot_models else 0.0
     tot_qty = sum(r["qty_unearned"] for r in rows)
+    tot_up = sum(r["upcoming_missing"] for r in rows)
+    horizon = horizon_end()
 
     return f"""\
 <div style="font-family:Segoe UI,Arial,sans-serif;color:#111827;max-width:720px">
@@ -165,10 +207,16 @@ def render(rows: list[dict]) -> str:
     Models built in MES with no Standard Man Hours.</p>
 
   <p style="font-size:14px">
-    <b>{tot_missing:,}</b> of <b>{tot_models:,}</b> models ({tot_pct}%) have no SMH.
+    <b>{tot_missing:,}</b> of <b>{tot_models:,}</b> active models ({tot_pct}%) have no SMH.
     They earned <b>zero</b> standard hours across <b>{tot_qty:,}</b> units built,
     while the labour to build them still counts against OLE — so the reported
     OLE % is lower than the real one.</p>
+
+  <p style="font-size:14px">
+    A further <b style="color:#7c3aed">{tot_up:,}</b> models have <b>no SMH yet</b>
+    and are <b>scheduled to build between now and {horizon}</b> — the planner's
+    next 13 weeks. They are not costing anything today. They will, on their first
+    build, unless the value is in before then.</p>
 
   <table style="border-collapse:collapse;width:100%;margin:18px 0">
     <tr>
@@ -176,6 +224,8 @@ def render(rows: list[dict]) -> str:
       <th style="{thr}">Total models</th>
       <th style="{thr}">Missing SMH</th>
       <th style="{thr}">Missing %</th>
+      <th style="{thr}">Missing SMH<br><span style="font-weight:400;text-transform:none">
+          planner, to {horizon}</span></th>
       <th style="{th}">PIC</th>
     </tr>
 {chr(10).join(body)}
@@ -183,9 +233,12 @@ def render(rows: list[dict]) -> str:
 
   <p style="font-size:12px;color:#6b7280;line-height:1.6">
     <b>Click any workcell name</b> to open the SMH page already filtered to that
-    workcell's missing models. If you have edit access you can fill them in
-    there. A value applies at the next pipeline refresh — and then to past weeks
-    too, since OLE is recomputed from the full history.</p>
+    workcell's missing models, or the <b style="color:#7c3aed">purple number</b>
+    for its upcoming ones. If you have edit access you can fill them in there. A
+    value applies at the next pipeline refresh — and then to past weeks too,
+    since OLE is recomputed from the full history.<br><br>
+    Counts cover models built in the last 90 days or planned within 13 weeks.
+    Models last built over 90 days ago with nothing planned are left out.</p>
 
   <div style="margin-top:22px;padding-top:14px;border-top:1px solid #e5e7eb;
               font-size:11.5px;color:#9ca3af;line-height:1.7">
@@ -222,17 +275,21 @@ def send(rows: list[dict], to: list[str]) -> int:
 
     missing = sum(r["missing_models"] for r in rows)
     total = sum(r["total_models"] for r in rows)
+    upcoming = sum(r["upcoming_missing"] for r in rows)
 
     m = EmailMessage()
-    m["Subject"] = f"[IE Pulse] SMH coverage - {missing:,} of {total:,} models missing SMH"
+    m["Subject"] = (f"[IE Pulse] SMH coverage - {missing:,} of {total:,} active models "
+                    f"missing SMH, {upcoming:,} upcoming")
     m["From"] = SMTP_FROM
     m["To"] = ", ".join(to)
     # Plain-text alternative, not decoration: some clients and most mail
     # archivers only keep this part.
     m.set_content(
-        f"{missing:,} of {total:,} models have no SMH.\n\n"
+        f"{missing:,} of {total:,} active models have no SMH.\n"
+        f"{upcoming:,} more are planned within 13 weeks and have no SMH yet.\n\n"
         + "\n".join(f"  {r['workcell']:<22} {r['missing_models']:>5} / "
-                    f"{r['total_models']:<6} {r['missing_pct']:>5}%   {r['pic']}\n"
+                    f"{r['total_models']:<6} {r['missing_pct']:>5}%   "
+                    f"upcoming {r['upcoming_missing']:>4}   {r['pic']}\n"
                     f"      {r['link']}" for r in rows)
         + f"\n\n--\nThis is an automated email from IE Pulse. Please do not reply"
           f" -- {SMTP_FROM} is not monitored.\nFor assistance, or to be added to"
@@ -273,9 +330,10 @@ def main() -> int:
     to = ([t.strip() for t in args.to.split(",") if t.strip()]
           if args.to else default_recipients())
 
+    print(f"{'workcell':<22} {'missing':>7} / {'active':<7} {'pct':>6}  {'upcoming':>8}   pic")
     for r in rows:
-        print(f"{r['workcell']:<22} {r['missing_models']:>5} / {r['total_models']:<6} "
-              f"{r['missing_pct']:>5}%   {r['pic']}")
+        print(f"{r['workcell']:<22} {r['missing_models']:>7} / {r['total_models']:<7} "
+              f"{r['missing_pct']:>5}%  {r['upcoming_missing']:>8}   {r['pic']}")
     print(f"\nTo: {', '.join(to)}")
 
     if not args.send:

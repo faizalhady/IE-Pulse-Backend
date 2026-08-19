@@ -9,7 +9,7 @@ All MES Web API, cached once (no per-model live calls at query time):
   1. Customer/ListCustomer   → every MES customer + Customer_ID
   2. match IEDB config workcells → MES Customer_ID by normalised name (+ overrides)
   3. Assembly/ListAssembly(custId) → all assemblies (Number, Revision, Assembly_ID)
-  4. write (customer, number, revision, assembly_id, customer_id)
+  4. write (customer, number, revision, assembly_id, bom_id, customer_id)
 
 Run:  python -m modules.cycle_time.pipeline.mes_assembly_map          # live build
       python -m modules.cycle_time.pipeline.mes_assembly_map --selftest  # offline logic check
@@ -107,6 +107,10 @@ def run() -> bool:
                 "number": a.get("Number"),
                 "revision": a.get("Revision"),
                 "assembly_id": a.get("Assembly_ID"),
+                # ListAssembly already returns BOM_ID — free here, and it is the
+                # only key Bom/GetBOMMaterialsByBOM accepts. 0/None = MES has the
+                # assembly but no BOM was ever loaded (all of LAMGB, 14% of KEYSIGHT).
+                "bom_id": a.get("BOM_ID"),
                 "customer_id": cid,
             })
         log.info("  %s: %d assemblies", name, len(asms))

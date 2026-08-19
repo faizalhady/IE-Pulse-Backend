@@ -161,67 +161,173 @@ def questions(workcell: str, include_answered: bool = False) -> list[dict]:
     return out
 
 
-def steps(workcell: str, q: str = "") -> list[dict]:
-    """EVERY MES step this workcell scans, with its current mapping and where
-    that mapping came from.
+# ── the process list ──────────────────────────────────────────────────────
+#
+# ONE function behind both process views, because they differ only in which
+# `system` rows they read:
+#
+#   scanned     5,344 (workcell, step) couples MES actually recorded a scan on.
+#               This is the work list — answering these 100% is the objective.
+#   configured  72,692 couples MES has on a route. 67,394 of them have never
+#               been scanned. Listing them is fine; treating them as the queue
+#               is not, which is why `scanned` is the default.
+#
+# The mapping grain is (workcell, step) and nothing finer. Within a workcell no
+# step name resolves to two different IEDB aliases — 0 of 9,734 — so a model
+# column would multiply the queue by every assembly and buy nothing.
 
-    `questions()` only serves the unmapped. That left a wrong mapping permanent:
-    if the workbook says `POST SOLDER INSP 2 -> MSOLDER 2` and it is wrong,
-    nothing could correct it. This is the editable view — a mapping is a
-    decision someone made, and decisions get revised.
 
-    `source` says who is answering:
-        decision  an engineer said so here      (overrides the workbook)
-        workbook  the hand-typed Excel sheet
-        auto      the plant-wide process_type id, used when nothing else knows
-        none      nothing maps it - this is what `questions()` serves
-    """
-    raw_path = REG_DIR / "workcell_process_raw.csv"
-    if not raw_path.exists():
-        return []
-    df = pd.read_csv(raw_path).fillna("")
-    g = df[(df["system"] == "mes_step")
-           & (df["workcell"].map(_wcnorm) == _wcnorm(workcell))].copy()
+def _stepnorm(s) -> str:
+    """Whitespace-collapsed upper — the workbook's key, not a match key for
+    IEDB names. Trailing and double spaces in the raw name are EVIDENCE and are
+    never destroyed; this is only used to look the raw name up."""
+    return re.sub(r"\s+", " ", str(s or "").strip().upper())
 
-    with get_conn() as c:
-        decided = {r["mes_step"]: dict(r) for r in c.execute(
-            "SELECT * FROM process_decision WHERE workcell = ?", (workcell,))}
-    # the workbook, so a mapping can say where it came from
-    from modules.cycle_time.config import CT_MART
-    book = set()
+
+RAW = REG_DIR / "workcell_process_raw.csv"
+
+
+@lru_cache(maxsize=2)
+def _load_raw(_key: float) -> pd.DataFrame:
+    """11.9 MB of CSV. `steps()` used to re-read it on every keystroke of the
+    filter box; the global list is 72k rows and could not afford that at all."""
+    df = pd.read_csv(RAW).fillna("")
+    df["_wc"] = df["workcell"].map(_wcnorm)
+    df["_step"] = df["name_raw"].map(_stepnorm)
+    for c in ("rows", "models", "scans"):
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+    return df
+
+
+def _raw_frame() -> pd.DataFrame:
+    if not RAW.exists():
+        return pd.DataFrame()
+    return _load_raw(RAW.stat().st_mtime)
+
+
+@lru_cache(maxsize=2)
+def _book(_key: float) -> dict:
+    """The hand-typed workbook: (workcell, step) -> IEDB alias.
+
+    A key present with an EMPTY alias is not missing data — it is the workbook
+    saying 'this step is not an IEDB process'. Exactly the 1,961 `non_iedb`
+    steps in the raw file, so the two agree row for row."""
     try:
         pm = pd.read_parquet(CT_MART["mes_process_map"])
-        book = {(_wcnorm(c), re.sub(r"\s+", " ", str(s).strip().upper()))
-                for c, s in zip(pm["customer"], pm["step_instance"])}
+        return {(_wcnorm(c), _stepnorm(s)): str(a or "")
+                for c, s, a in zip(pm["customer"], pm["step_instance"], pm["iedb_alias"])}
     except Exception:                                   # never block the view
-        pass
+        return {}
+
+
+def _book_map() -> dict:
+    p = CT_MART["mes_process_map"]
+    return _book(p.stat().st_mtime if p.exists() else 0.0)
+
+
+def _decisions_all() -> dict:
+    """Every engineer answer, keyed (workcell, step) with the step BYTE-EXACT.
+    The step name is what was stored; normalising it here would silently match
+    a decision to the wrong one of two names that differ only in spacing."""
+    with get_conn() as c:
+        return {(_wcnorm(r["workcell"]), str(r["mes_step"])): dict(r)
+                for r in c.execute("SELECT * FROM process_decision")}
+
+
+# `scans` is 0 on all 82,010 rows of workcell_process_raw.csv — the column was
+# never populated. `rows` (MES scan records) is the only real volume signal in
+# this file, so it is the default sort. Sorting by scans was sorting by nothing.
+#: sort key -> column in the annotated frame
+_SORTS = {"step": "name_raw", "workcell": "workcell", "status": "status",
+          "source": "source", "maps_to": "iedb_alias", "models": "models",
+          "rows": "rows", "scans": "scans"}
+
+
+def process_list(scope: str = "scanned", workcell: str = "", q: str = "",
+                 status: str = "", sort: str = "rows", direction: str = "desc",
+                 page: int = 1, page_size: int = 200) -> dict:
+    """The process list, one row per (workcell, MES step).
+
+      -> {rows: [...], total, page, page_size, counts: {mapped, non_iedb, unmapped}}
+
+    `status` is the answer, `source` is who gave it. They are separate columns
+    because "mapped" and "mapped BY A PLANT-WIDE GUESS" are not the same fact,
+    and folding them into one badge is what let bad auto-mappings look settled.
+
+        decision  an engineer answered it here   (overrides everything)
+        workbook  the hand-typed Excel sheet
+        auto      the raw file's own bridge answer
+        none      nothing maps it
+
+    `counts` is over the FILTERED set before paging, so the chips can show how
+    much work each one holds without a second round-trip.
+    """
+    df = _raw_frame()
+    if not len(df):
+        return {"rows": [], "total": 0, "page": 1, "page_size": page_size,
+                "counts": {"mapped": 0, "non_iedb": 0, "unmapped": 0}}
+
+    system = "mes_configured" if scope == "configured" else "mes_step"
+    g = df[df["system"] == system]
+    if workcell:
+        g = g[g["_wc"] == _wcnorm(workcell)]
+    g = g.copy()
+
+    dec, book = _decisions_all(), _book_map()
+
+    # Resolution order, highest authority first. Listed once here rather than
+    # per row, because the order IS the policy.
+    st, al, src, by, on = [], [], [], [], []
+    for wc, raw_name, step, ans in zip(g["_wc"], g["name_raw"], g["_step"], g["answer"]):
+        d = dec.get((wc, str(raw_name)))
+        if d:
+            st.append(d["answer"]); al.append(d["iedb_alias"] or "")
+            src.append("decision"); by.append(d["decided_by"] or ""); on.append(d["decided_on"] or "")
+            continue
+        by.append(""); on.append("")
+        if (wc, step) in book:
+            a = book[(wc, step)]
+            st.append("mapped" if a else "non_iedb"); al.append(a); src.append("workbook")
+        elif ans in ("mapped", "non_iedb", "unmapped"):
+            st.append(ans); al.append(""); src.append("auto")
+        else:
+            st.append("unmapped"); al.append(""); src.append("none")
+    g["status"], g["iedb_alias"] = st, al
+    g["source"], g["decided_by"], g["decided_on"] = src, by, on
 
     if q:
-        needle = q.strip().lower()
-        g = g[g.apply(lambda r: needle in str(r["name_raw"]).lower()
-                      or needle in str(r["process_key"]).lower(), axis=1)]
+        n = q.strip().lower()
+        g = g[g["name_raw"].str.lower().str.contains(n, regex=False)
+              | g["iedb_alias"].str.lower().str.contains(n, regex=False)
+              | g["workcell"].str.lower().str.contains(n, regex=False)]
+    counts = {k: int((g["status"] == k).sum()) for k in ("mapped", "non_iedb", "unmapped")}
+    if status:
+        g = g[g["status"].isin([s for s in status.split(",") if s])]
 
-    g["scans"] = pd.to_numeric(g["scans"], errors="coerce").fillna(0)
-    g = g.sort_values("scans", ascending=False)
+    total = len(g)
+    col = _SORTS.get(sort, "rows")
+    g = g.sort_values(col, ascending=(direction == "asc"), kind="stable")
 
-    out = []
-    for _, r in g.iterrows():
-        d = decided.get(r["name_raw"])
-        key = (_wcnorm(workcell), re.sub(r"\s+", " ", str(r["name_raw"]).strip().upper()))
-        src = ("decision" if d else
-               "workbook" if key in book else
-               "auto" if r["process_key"] else "none")
-        out.append({
-            "workcell": r["workcell"], "mes_step": r["name_raw"],
-            "process_key": r["process_key"], "answer": r["answer"],
-            "models": int(pd.to_numeric(r.get("models"), errors="coerce") or 0),
-            "scans": int(r["scans"]),
-            "source": src,
-            "iedb_alias": (d or {}).get("iedb_alias") or "",
-            "decided_by": (d or {}).get("decided_by") or "",
-            "decided_on": (d or {}).get("decided_on") or "",
-        })
-    return out
+    page = max(1, page)
+    lo = (page - 1) * page_size
+    out = g.iloc[lo:lo + page_size]
+    return {
+        "rows": [{"workcell": r.workcell, "mes_step": r.name_raw,
+                  "process_key": r.process_key, "status": r.status,
+                  "iedb_alias": r.iedb_alias, "source": r.source,
+                  "decided_by": r.decided_by, "decided_on": r.decided_on,
+                  "models": int(r.models), "rows": int(r.rows), "scans": int(r.scans)}
+                 for r in out.itertuples()],
+        "total": total, "page": page, "page_size": page_size, "counts": counts,
+    }
+
+
+def steps(workcell: str, q: str = "") -> list[dict]:
+    """Back-compat shim for /registry/steps. `process_list` is the one
+    implementation — two copies of the resolution order is how the same step
+    ends up with two different verdicts on two pages."""
+    return process_list(scope="scanned", workcell=workcell, q=q,
+                        page_size=1_000_000)["rows"]
 
 
 def decide(workcell: str, mes_step: str, answer: str, iedb_alias: str | None,
@@ -249,6 +355,51 @@ def decide(workcell: str, mes_step: str, answer: str, iedb_alias: str | None,
              workcell, mes_step, answer, iedb_alias or "", ntid)
     return {"workcell": workcell, "mes_step": mes_step, "answer": answer,
             "iedb_alias": iedb_alias, "decided_by": ntid}
+
+
+def decide_bulk(items: list[dict], ntid: str) -> dict:
+    """Answer many steps at once.
+
+    `MI TOP`, `MI TOP 1`, `MI_TOP` and `MI_TOP 1` are four rows and one answer.
+    Made one at a time that is four round-trips and four chances to typo the
+    alias; the whole page exists because 3s per step and 30s per step are the
+    difference between finishing and not.
+
+    All-or-nothing on purpose: a half-applied bulk edit leaves the operator
+    guessing which rows took, and re-running it is not safe if some did.
+    """
+    if not items:
+        return {"saved": 0}
+    clean = []
+    for it in items:
+        answer = str(it.get("answer", "")).strip()
+        alias = (it.get("iedb_alias") or "").strip() or None
+        if answer not in ("mapped", "non_iedb", "unknown"):
+            raise ValueError(f"answer must be mapped|non_iedb|unknown, got {answer!r}")
+        if answer == "mapped" and not alias:
+            raise ValueError("answer='mapped' needs an iedb_alias")
+        if answer != "mapped":
+            alias = None
+        wc = str(it.get("workcell", "")).strip()
+        step = str(it.get("mes_step", ""))          # byte-exact: spaces matter
+        if not wc or not step:
+            raise ValueError("each item needs workcell and mes_step")
+        clean.append((wc, step, answer, alias, it.get("evidence"), ntid))
+
+    with get_conn() as c:
+        c.executemany("""
+            INSERT INTO process_decision
+                (workcell, mes_step, answer, iedb_alias, evidence, decided_by)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (workcell, mes_step) DO UPDATE SET
+                answer     = excluded.answer,
+                iedb_alias = excluded.iedb_alias,
+                evidence   = excluded.evidence,
+                decided_by = excluded.decided_by,
+                decided_on = datetime('now')
+        """, clean)
+    log.info("process_decision bulk: %d step(s) by %s", len(clean), ntid)
+    return {"saved": len(clean)}
 
 
 def aliases(workcell: str) -> list[dict]:

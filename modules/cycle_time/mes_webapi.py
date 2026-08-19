@@ -50,6 +50,19 @@ except Exception as e:                      # never block a call over this
 _MAX_RETRIES = 3          # the MES SP intermittently 404s the same URL — retry helps
 _BACKOFF_S = 2.0          # 2s, 4s, 6s
 
+# ─── One connection, reused ──────────────────────────────────────────────────
+# `requests.post` opens a NEW TCP + TLS connection per call and drops it. That is
+# invisible at 20 calls and murderous at 2,000: the 2026-08-19 BOM pull measured
+# 0.21s/call in a short burst and 5.5s/call over a 1,861-call run — 25x slower,
+# turning a 7-minute job into 2.6 hours. Sequential connect/teardown piles up
+# Windows TIME_WAIT sockets and pays a fresh TLS handshake (plus a Windows
+# cert-chain validation, via truststore) every single time.
+#
+# A Session keeps the connection alive, so the handshake happens once per run
+# instead of once per call. Every pipeline that talks to MES goes through post(),
+# so fixing it here fixes all of them rather than just the caller that noticed.
+_session = requests.Session()
+
 
 class MESWebApiError(RuntimeError):
     """Any failure talking to the MES Web API (missing key, HTTP error, bad body)."""
@@ -70,7 +83,7 @@ def post(controller: str, method: str, body: dict) -> list[dict]:
     last_err = None
     for attempt in range(1, _MAX_RETRIES + 1):
         try:
-            r = requests.post(url, json=body,
+            r = _session.post(url, json=body,
                               headers={"APIKey": MES_WEBAPI_KEY, "Accept": "application/json"},
                               timeout=MES_WEBAPI_TIMEOUT)
             r.raise_for_status()

@@ -2826,37 +2826,72 @@ Auto-generated from `MESWebApi.pdf`. **157 endpoints** across 21 controllers.
 
 **Returns:** CustomerName, DivisionName, AssemblyNumber, Route, AssemblyRevision, RouteStatus, UpdatedDate
 
+> ⚠️ Verified 2026-08-18. `customerId` really is an **array of strings** — a bare
+> `"51"` returns `400 customerId(s) cannot be null.` `updatedAfter` must be
+> **`yyyy-mm-dd`** (no time part) — `"2020-01-01 00:00:00"` returns
+> `400 updatedAfter date format does not match yyyy-mm-dd.` A wide window
+> (2020→today) read-timed-out at 30 s; keep it narrow or raise the timeout.
+> For a single customer prefer **97 `ListRouteAssemblyByCustomerId`**.
+
 **Sample body:**
 
 ```json
 {
-  "customerId": "0",
-  "routeStatus": "",
-  "updatedAfter": "2025-01-01 00:00:00",
+  "customerId": ["51"],
+  "routeStatus": "Active",
+  "updatedAfter": "2025-01-01",
   "langId": "0"
 }
 ```
 
-### 97. ListRouteAssemblyByCustomer
+### 97. ListRouteAssemblyByCustomerId
 
-`POST https://mypenm0soap03.corp.jabil.org/meswebapi/Route/ListRouteAssemblyByCustomer`
+`POST https://mypenm0soap03.corp.jabil.org/meswebapi/Route/ListRouteAssemblyByCustomerId`
+
+> ⚠️ **The source PDF is wrong here.** Its “Api/Method” line for §97 says
+> `Route/ListRouteAssemblyByCustomer` — a copy-paste of §96. The real method is
+> `ListRouteAssemblyByCustomer`**`Id`** (the PDF's own heading and table of
+> contents both say so). Confirmed working against prod 2026-08-18.
+> These are **two different methods**: 96 takes a `customerId` **array**,
+> 97 takes a single `custId`. Sending 97's body to 96's URL returns
+> `400 customerId(s) cannot be null.`
 
 **Body params:**
 
 - `custId` — valid customer_ID
 - `activeRouteOnly` — 0 or 1; default to 1
-- `updatedAfter` — if null, return data changed in past 30 days
+- `updatedAfter` — optional; if omitted, returns data changed in past 30 days
 - `langId` — “0” is not localized or English
 
 **Returns:** Customer_ID, CustomerName, DivisionName, AssemblyNumber, AssemblyRevision, Route, RouteStatus, UpdatedDate
 
-**Sample body:**
+**⚠️ The documented response is INCOMPLETE and partly WRONG.** Verified against
+prod 2026-08-18 with `custId=51` (ADVANTEST):
+
+| Field | PDF says | Actually returns |
+|---|---|---|
+| `Customer_ID` | the customer id | **always `null`** — unusable |
+| `AssemblyNumber` | the assembly number | **the REVISION** (`"001"`, `"014"`) — the real number (`0380-1061`) is **not returned at all**. Cross-check with `Assembly/ListAssembly`. |
+| `AssemblyRevision` | the revision | same value as `AssemblyNumber` — duplicate |
+| `Route` | a route name | a **composite id path** `Factory_ID/MA_ID/Route_ID/RouteStep_ID`, e.g. `2/231/2160/45213`. The 4th part joins **1:1** to `RouteStep_ID` from `Route/ListRouteStep` (1809/1809 hit). |
+| — | not documented | **`Factory`** (`P1`) — undocumented |
+| — | not documented | **`ManufacturingArea`** (`Cell 4`, `Bay 05B`) — undocumented |
+| — | not documented | **`RouteText`** (`SuperCellR05B`) — undocumented, and this is the **real route name** that joins to `ListRouteStep.RouteName` |
+
+**Grain:** one row per (assembly × route-step), *not* per assembly. ADVANTEST returned
+**84,678 rows** for **19 assemblies** / 8 routes — and only **8,726** are unique on
+`(AssemblyNumber, AssemblyRevision, Route)`, so **≈10× duplication**. Always dedupe.
+
+**Practical use:** this is the cheapest **workcell → configured route-steps** call —
+one request, no per-assembly loop. Take `RouteText` (or the 4th part of `Route`) and
+join to `Route/ListRouteStep`.
+
+**Sample body:** (verified — ADVANTEST, `custId` 51)
 
 ```json
 {
-  "custId": "0",
-  "activeRouteOnly": "1",
-  "updatedAfter": "2025-01-01 00:00:00",
+  "custId": "51",
+  "activeRouteOnly": 0,
   "langId": "0"
 }
 ```
@@ -2871,6 +2906,17 @@ Auto-generated from `MESWebApi.pdf`. **157 endpoints** across 21 controllers.
 - `langId` — “0” is not localized or English – optional
 
 **Returns:** RouteStep_ID, FactoryMARoute_ID, FactoryName, ManufacturingAreaName, RouteName, Step_ID, StepName, Descr, Description, Occurrence, StepOrder, XCoordinate, YCoordinate, StepType, StepTypeName, NextStep_ID, RouteValidation, BirthingStation, BackFlush, UseJUID, WorkCenter_ID, WorkCenterText, UserID_ID, LastUpdated, CheckDate
+
+> ⚠️ **No customer/workcell parameter exists.** `factory:""` returns the **whole site**:
+> **91,010 rows** — P1 55,414 · BK 11,455 · P2 10,528 · P3 6,163 · P4 3,341 · P8 1,363 ·
+> P6 1,279 · GP 1,013 · P5 260 · (+ a few strays: `Ghost`, `P1B`, `ELFAC01/02`, `JABIL`).
+> To scope it to a workcell, first call **97 `ListRouteAssemblyByCustomerId`** and filter
+> on `RouteName == RouteText`. Verified 2026-08-18.
+>
+> Unlike **99 `ListRouteStepByFactoryMARoute`**, `StepType`/`StepTypeName`/`WorkCenter_ID`
+> ARE populated here. `Description` = the **step instance** (the join key to scan data);
+> `StepName` is the generic type. ADVANTEST: 1,857 configured steps → 1,190 distinct
+> `Description`, only 72 distinct `StepName`.
 
 **Sample body:**
 

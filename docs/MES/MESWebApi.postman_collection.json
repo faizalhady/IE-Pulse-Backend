@@ -3366,19 +3366,19 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"customerId\": \"0\",\n  \"routeStatus\": \"\",\n  \"updatedAfter\": \"2025-01-01 00:00:00\",\n  \"langId\": \"0\"\n}",
+              "raw": "{\n  \"customerId\": [\"51\"],\n  \"routeStatus\": \"Active\",\n  \"updatedAfter\": \"2025-01-01\",\n  \"langId\": \"0\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
             },
-            "description": "POST /meswebapi/Route/ListRouteAssemblyByCustomer\n\n**Body params:**\n- `customerId` — string[], e.g., [2,3]\n- `routeStatus` — e.g., “Active”\n- `updatedAfter` — e.g., “2019-07-01”\n- `langId` — “0” is not localized or English\n\n**Returns:** CustomerName, DivisionName, AssemblyNumber, Route, AssemblyRevision, RouteStatus, UpdatedDate"
+            "description": "POST /meswebapi/Route/ListRouteAssemblyByCustomer\n\n**Body params:**\n- `customerId` — string[], e.g., [2,3]\n- `routeStatus` — e.g., “Active”\n- `updatedAfter` — e.g., “2019-07-01”\n- `langId` — “0” is not localized or English\n\n**Returns:** CustomerName, DivisionName, AssemblyNumber, Route, AssemblyRevision, RouteStatus, UpdatedDate\n\n⚠️ Verified 2026-08-18: `customerId` must be an ARRAY of strings (a bare \"51\" → 400 “customerId(s) cannot be null.”) and `updatedAfter` must be `yyyy-mm-dd` with NO time part (“2020-01-01 00:00:00” → 400 “updatedAfter date format does not match yyyy-mm-dd.”). A wide window read-times-out at 30 s. For one customer, use 97 ListRouteAssemblyByCustomerId."
           },
           "response": []
         },
         {
-          "name": "97. ListRouteAssemblyByCustomer",
+          "name": "97. ListRouteAssemblyByCustomerId",
           "request": {
             "method": "POST",
             "header": [
@@ -3388,26 +3388,26 @@
               }
             ],
             "url": {
-              "raw": "{{root}}/{{prefix}}/Route/ListRouteAssemblyByCustomer",
+              "raw": "{{root}}/{{prefix}}/Route/ListRouteAssemblyByCustomerId",
               "host": [
                 "{{root}}"
               ],
               "path": [
                 "{{prefix}}",
                 "Route",
-                "ListRouteAssemblyByCustomer"
+                "ListRouteAssemblyByCustomerId"
               ]
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"custId\": \"0\",\n  \"activeRouteOnly\": \"1\",\n  \"updatedAfter\": \"2025-01-01 00:00:00\",\n  \"langId\": \"0\"\n}",
+              "raw": "{\n  \"custId\": \"51\",\n  \"activeRouteOnly\": 0,\n  \"langId\": \"0\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
                 }
               }
             },
-            "description": "POST /meswebapi/Route/ListRouteAssemblyByCustomer\n\n**Body params:**\n- `custId` — valid customer_ID\n- `activeRouteOnly` — 0 or 1; default to 1\n- `updatedAfter` — if null, return data changed in past 30 days\n- `langId` — “0” is not localized or English\n\n**Returns:** Customer_ID, CustomerName, DivisionName, AssemblyNumber, AssemblyRevision, Route, RouteStatus, UpdatedDate"
+            "description": "POST /meswebapi/Route/ListRouteAssemblyByCustomerId\n\n⚠️ The source PDF's “Api/Method” line for §97 wrongly repeats `Route/ListRouteAssemblyByCustomer` (a copy-paste of §96). The real method has the `Id` suffix — confirmed against prod 2026-08-18. 96 and 97 are DIFFERENT methods: 96 takes a `customerId` array, 97 takes a single `custId`.\n\n**Body params:**\n- `custId` — valid customer_ID\n- `activeRouteOnly` — 0 or 1; default to 1\n- `updatedAfter` — optional; if omitted, returns data changed in past 30 days\n- `langId` — “0” is not localized or English\n\n**Returns:** Customer_ID, CustomerName, DivisionName, AssemblyNumber, AssemblyRevision, Route, RouteStatus, UpdatedDate\n\n⚠️ REAL RESPONSE (verified custId=51, 2026-08-18) differs from the PDF:\n- `Customer_ID` is always null.\n- `AssemblyNumber` actually contains the REVISION; the real number is NOT returned.\n- `Route` is a composite `Factory_ID/MA_ID/Route_ID/RouteStep_ID` (e.g. 2/231/2160/45213), not a name. Its 4th part joins 1:1 to RouteStep_ID from Route/ListRouteStep.\n- UNDOCUMENTED extra fields: `Factory`, `ManufacturingArea`, `RouteText` (RouteText is the real route name -> joins to ListRouteStep.RouteName).\n- Grain is one row per (assembly x route-step): ADVANTEST = 84,678 rows for 19 assemblies, ~10x duplicated. Dedupe before use."
           },
           "response": []
         },
@@ -3441,7 +3441,7 @@
                 }
               }
             },
-            "description": "POST /meswebapi/Route/ListRouteStep\n\n**Body params:**\n- `factory` — “” if don’t want to specify factoryname\n- `langId` — “0” is not localized or English – optional\n\n**Returns:** RouteStep_ID, FactoryMARoute_ID, FactoryName, ManufacturingAreaName, RouteName, Step_ID, StepName, Descr, Description, Occurrence, StepOrder, XCoordinate, YCoordinate, StepType, StepTypeName, NextStep_ID, RouteValidation, BirthingStation, BackFlush, UseJUID, WorkCenter_ID, WorkCenterText, UserID_ID, LastUpdated, CheckDate"
+            "description": "POST /meswebapi/Route/ListRouteStep\n\n**Body params:**\n- `factory` — “” if don’t want to specify factoryname\n- `langId` — “0” is not localized or English – optional\n\n**Returns:** RouteStep_ID, FactoryMARoute_ID, FactoryName, ManufacturingAreaName, RouteName, Step_ID, StepName, Descr, Description, Occurrence, StepOrder, XCoordinate, YCoordinate, StepType, StepTypeName, NextStep_ID, RouteValidation, BirthingStation, BackFlush, UseJUID, WorkCenter_ID, WorkCenterText, UserID_ID, LastUpdated, CheckDate\n\n⚠️ No customer param exists. factory:\"\" returns the WHOLE SITE = 91,010 rows (P1 55,414 / BK 11,455 / P2 10,528 / P3 6,163 / P4 3,341 / ...). To scope to a workcell, get its routes from 97 ListRouteAssemblyByCustomerId and filter on RouteName == RouteText. Unlike 99, StepType/StepTypeName/WorkCenter_ID are populated here. Verified 2026-08-18."
           },
           "response": []
         },

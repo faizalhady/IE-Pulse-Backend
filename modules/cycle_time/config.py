@@ -39,7 +39,12 @@ CT_MART = {
     "assembly_summary": CT_MART_DIR / "assembly_summary.parquet",  # one row per (customer, assembly): list-page fields + precomputed SMH (+ eff)
     "eff_by_line":      CT_MART_DIR / "eff_by_line.parquet",       # (customer, sub_workcenter) → efficiency goal, from GetSummaryGroupProcessData
     "assembly_catalog": CT_MART_DIR / "assembly_catalog.parquet",  # one row per (customer, assembly) FULL IEDB catalogue + has_data flag (incl. no-data)
-    "mes_assembly_map": CT_MART_DIR / "mes_assembly_map.parquet",  # (customer, number, revision, assembly_id, customer_id) — MES name→id translator for completion status
+    "mes_assembly_map": CT_MART_DIR / "mes_assembly_map.parquet",  # (customer, number, revision, assembly_id, bom_id, customer_id) — MES name→id translator for completion status
+    # One row per (bom_id, material). Keyed on BOM_ID, NOT on the model: MES
+    # shares one BOM across an assembly's revisions (E5052-66516 revs 003/004/106
+    # are all BOM 7433), so keying on the model would store the same 194 rows 3x.
+    # Join through mes_assembly_map.bom_id to get from a model to its materials.
+    "bom_material": CT_MART_DIR / "bom_material.parquet",
     "mes_process_map": CT_MART_DIR / "mes_process_map.parquet",    # (customer, step_instance, iedb_alias) — MES step ↔ IEDB alias dict, from MNS workbook
     "completion_status": CT_MART_DIR / "completion_status.parquet",# per top-100 model: status + missing steps + coverage
     "completion_steps":  CT_MART_DIR / "completion_steps.parquet", # per model, tidy MES-route + IEDB-route rows (FE side-by-side)
