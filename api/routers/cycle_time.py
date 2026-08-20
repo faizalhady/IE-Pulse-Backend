@@ -2239,9 +2239,9 @@ def ct_chat_health():
         return {"ok": False, "enabled": False,
                 "detail": "chat is disabled on this server (CT_CHAT_ENABLED=0)",
                 "model": "", "tools": []}
-    from modules.cycle_time.chat import ollama, tools as chat_tools
-    ok, detail = ollama.available()
-    return {"ok": ok, "enabled": True, "detail": detail, "model": ollama.OLLAMA_MODEL,
+    from modules.cycle_time.chat import llm, tools as chat_tools
+    ok, detail = llm.available()
+    return {"ok": ok, "enabled": True, "detail": detail, "model": llm.MODEL,
             "tools": sorted(chat_tools.FUNCS)}
 
 
