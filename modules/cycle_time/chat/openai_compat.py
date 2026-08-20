@@ -108,7 +108,7 @@ def chat(messages: list[dict], tools=None, temperature: float = 0.0,
     """One round trip. Returns the `message` object, same shape ollama.chat
     gives back ({"content": ...}). `tools` accepted for signature parity and
     used natively by the rich agent loop (OpenAI tool-calling format)."""
-    retried_429 = False
+    waits_429 = 0
     for attempt, fmt in enumerate((format, "json" if isinstance(format, dict) else None)):
         if attempt and fmt is None:
             break
@@ -126,8 +126,8 @@ def chat(messages: list[dict], tools=None, temperature: float = 0.0,
                 # Free-tier TPM refills by the second and the 429 body says
                 # when ("try again in 1.4s"). ONE polite wait keeps a multi-
                 # round agent turn alive instead of failing it over a bump.
-                if e.code == 429 and not retried_429:
-                    retried_429 = True
+                if e.code == 429 and waits_429 < 2:
+                    waits_429 += 1
                     m = re.search(r"in (\d+(?:\.\d+)?)s", detail)
                     time.sleep(min(float(m.group(1)) if m else 2.0, 15.0) + 0.2)
                     continue

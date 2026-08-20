@@ -144,11 +144,11 @@ def _compose(question: str, results: list[dict], routed_text: str,
         ("The rows are ALREADY shown to the user as a table below your text — "
          "do not list or repeat them. Summarise what they show, point out "
          "anything notable, and answer every part of the question the table "
-         "itself does not. 1-4 sentences. "
+         "itself does not. 1-4 sentences, GitHub-flavored Markdown. "
          if tabled else
          "Answer the question fully from this data — if it asks more than one "
-         "thing, answer each part. 2-6 sentences; a short comparison or list "
-         "when it helps. ")
+         "thing, answer each part. GitHub-flavored Markdown: sentences for "
+         "simple answers; bullets or a compact table when comparing. ")
         + "Use ONLY numbers present in the data, never invent or recompute "
           "one. No preamble, no notes about what you did."
         if rich else
@@ -245,9 +245,14 @@ def _rich_system() -> str:
           "name is ambiguous the tool says so - ask the user which one.\n"
           "MATCH DEPTH TO THE QUESTION: a narrow question gets a sentence; a "
           "broad one (compare X and Y, tell me about X, analyse X) deserves a "
-          "structured answer - gather completion, the status split, the trend "
-          "and notable models via several tools, then write short labelled "
-          "sections or bullet lines with a one-line verdict at the end.\n"
+          "structured answer - for EACH side gather completion, the trend "
+          "(completion_trend) and notable models (models_by_status or "
+          "run_sql), then write the analysis.\n"
+          "FORMAT IN GITHUB-FLAVORED MARKDOWN - it renders. Narrow answer: "
+          "plain sentences. Broad answer: **bold** labels or ### headings per "
+          "section, bullet lines for findings, a compact md table for a "
+          "side-by-side, and end with a one-line **Verdict:**. Never a wall "
+          "of prose.\n"
           "For open questions the run_sql tool queries these tables:\n"
         + facts.ddl()
     )
