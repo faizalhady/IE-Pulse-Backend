@@ -42,7 +42,7 @@ import re
 
 import duckdb
 
-from modules.cycle_time.chat import facts, ollama
+from modules.cycle_time.chat import facts, llm
 from modules.cycle_time.model_universe import canon
 
 log = logging.getLogger(__name__)
@@ -188,9 +188,9 @@ def run(question: str) -> dict:
     last_err, sql = "", ""
     for attempt in range(2):                     # one shot + one repair
         try:
-            msg = ollama.chat(messages, format=_SQL_FORM)
+            msg = llm.chat(messages, format=_SQL_FORM)
             sql = str(json.loads(msg.get("content") or "{}").get("sql") or "").strip()
-        except (ollama.OllamaError, ValueError) as e:
+        except (llm.LLMError, ValueError) as e:
             return {"error": "sql_failed", "detail": f"model: {e}"}
         bad = validate(sql)
         if not bad and _SUPERLATIVE_RE.search(question) \

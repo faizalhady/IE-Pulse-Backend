@@ -19,7 +19,7 @@ from __future__ import annotations
 import sys
 import time
 
-from modules.cycle_time.chat import ollama
+from modules.cycle_time.chat import llm
 from modules.cycle_time.chat.agent import ask
 
 # (question, expected lane, expected intent or None for "don't care")
@@ -64,7 +64,7 @@ CASES: list[tuple[str, str, str | None]] = [
 
 
 def main() -> int:
-    ok_avail, detail = ollama.available()
+    ok_avail, detail = llm.available()
     if not ok_avail:
         print(f"SKIP: Ollama unavailable — {detail}")
         return 2

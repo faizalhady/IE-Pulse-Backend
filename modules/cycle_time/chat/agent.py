@@ -47,7 +47,7 @@ import json
 import logging
 import time
 
-from modules.cycle_time.chat import glossary, ollama, router, tools
+from modules.cycle_time.chat import glossary, llm, router, tools
 
 log = logging.getLogger(__name__)
 
@@ -137,7 +137,7 @@ def _compose(question: str, results: list[dict], routed_text: str,
     ]
     try:
         text = _generate(messages, on_delta)
-    except ollama.OllamaError as e:
+    except llm.LLMError as e:
         log.warning("chat: compose failed (%s) - falling back to raw data", e)
         return _fallback(results)
     # A reply that leaked a tool call or gave up is worse than the plain data.
@@ -151,9 +151,9 @@ def _generate(messages: list[dict], on_delta=None) -> str:
     text is still returned and still post-processed — the stream is a preview,
     the final payload is the answer."""
     if on_delta is None:
-        return (ollama.chat(messages).get("content") or "").strip()
+        return (llm.chat(messages).get("content") or "").strip()
     parts = []
-    for piece in ollama.chat_stream(messages):
+    for piece in llm.chat_stream(messages):
         parts.append(piece)
         on_delta(piece)
     return "".join(parts).strip()
@@ -204,6 +204,7 @@ def ask(question: str, history: list[dict] | None = None,
     the stream is a preview, the final payload is the answer.
     """
     t0 = time.time()
+    llm.reset_answered()          # threadpool threads are reused; no stale label
     emit = on_event or (lambda kind, text: None)
     delta = (lambda t: emit("delta", t)) if on_event else None
 
@@ -213,7 +214,7 @@ def ask(question: str, history: list[dict] | None = None,
         out = {"answer": answer[:_MAX_ANSWER_CHARS].strip(), "lane": lane,
                "intent": intent, "grounded": grounded,
                "calls": calls or [], "sources": sources or [],
-               "model": ollama.OLLAMA_MODEL, "elapsed_s": round(time.time() - t0, 1)}
+               "model": llm.answered_by() or llm.MODEL, "elapsed_s": round(time.time() - t0, 1)}
         if error:
             out["error"] = error
         _log_turn(question, out)
@@ -225,7 +226,7 @@ def ask(question: str, history: list[dict] | None = None,
     if canned:
         return done(canned, "instant")
 
-    ok, detail = ollama.available()
+    ok, detail = llm.available()
     if not ok:
         return done(f"The local model is not available. {detail}", "error",
                     error="ollama_unavailable")
@@ -238,7 +239,7 @@ def ask(question: str, history: list[dict] | None = None,
         try:
             emit("stage", "writing…")
             return done(_general(question, history, _GENERAL_PROMPT, delta), "general")
-        except ollama.OllamaError as e:
+        except llm.LLMError as e:
             return done(f"The local model failed: {e}", "error", error="ollama_failed")
 
     if r["intent"] == "none":
@@ -246,14 +247,17 @@ def ask(question: str, history: list[dict] | None = None,
         # does cannot_check mean"). The glossary IS that answer's source, and
         # when exactly one known term is named the definition is served
         # verbatim: instant, exact, and immune to paraphrase.
-        exact = glossary.define(question)
+        # Only when the question READS like a definition — intent=none can
+        # also be the router's degraded fallback, and "how many % complete for
+        # keysight" contains the word "complete", which define() would match.
+        exact = glossary.define(question) if router.concept_question(question) else None
         if exact:
             return done(exact, "cycletime", grounded=True, sources=["glossary"])
         try:
             emit("stage", "writing…")
             return done(_general(question, history, glossary.system_prompt(), delta),
                         "cycletime", sources=["glossary"])
-        except ollama.OllamaError as e:
+        except llm.LLMError as e:
             return done(f"The local model failed: {e}", "error", error="ollama_failed")
 
     if r["intent"] == "open_query":

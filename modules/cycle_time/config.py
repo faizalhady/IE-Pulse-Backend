@@ -120,6 +120,28 @@ OLLAMA_TIMEOUT  = int(os.getenv("OLLAMA_TIMEOUT", "180"))
 # only one.
 CHAT_ENABLED = os.getenv("CT_CHAT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
 
+# ─── Chat provider (local Ollama vs OpenAI-compatible cloud) ─────────────────
+# Company policy is currently OPEN for AI experimentation, so the model behind
+# the chat is an env decision, not an architecture one. "openai" here means the
+# PROTOCOL — Groq, Gemini (OpenAI-compat endpoint), OpenRouter, Cerebras and
+# NVIDIA NIM all speak it, so one client covers every alternative under test.
+#
+#   CHAT_PROVIDER=ollama                                   (default — local 8B)
+#   CHAT_PROVIDER=openai
+#   CHAT_API_BASE=https://api.groq.com/openai/v1           (Groq example)
+#   CHAT_API_KEY=gsk_...
+#   CHAT_MODEL=llama-3.3-70b-versatile
+#
+# Other bases: Gemini https://generativelanguage.googleapis.com/v1beta/openai
+#              OpenRouter https://openrouter.ai/api/v1
+# Defaults are Groq + llama-3.3-70b (the decided primary), so going cloud is
+# TWO env values: CHAT_PROVIDER=openai and CHAT_API_KEY=gsk_... The local 8B
+# stays as automatic fallback either way (see chat/llm.py).
+CHAT_PROVIDER  = os.getenv("CHAT_PROVIDER", "ollama").strip().lower()
+CHAT_API_BASE  = os.getenv("CHAT_API_BASE", "https://api.groq.com/openai/v1").rstrip("/")
+CHAT_API_KEY   = os.getenv("CHAT_API_KEY", "")
+CHAT_MODEL     = os.getenv("CHAT_MODEL", "llama-3.3-70b-versatile")
+
 CT_STATE_FILE = CT_MART_DIR / ".ingest_state.json"
 
 # ─── DuckDB query guardrails ─────────────────────────────────────────────────

@@ -33,7 +33,7 @@ import logging
 import re
 from functools import lru_cache
 
-from modules.cycle_time.chat import ollama, tools
+from modules.cycle_time.chat import llm, tools
 
 log = logging.getLogger(__name__)
 
@@ -257,7 +257,7 @@ def route(question: str, history: list[dict] | None = None) -> dict:
                 "intent": "none", "workcell": "", "assembly": "",
                 "status": "", "scope": "", "query": ""}
     try:
-        msg = ollama.chat(messages, format=_SCHEMA)
+        msg = llm.chat(messages, format=_SCHEMA)
         import json
         r = json.loads(msg.get("content") or "{}")
     except Exception as e:                      # noqa: BLE001 — degrade, never die
