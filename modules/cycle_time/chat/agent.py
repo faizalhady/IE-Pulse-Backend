@@ -233,16 +233,25 @@ _MAX_ROUNDS = 6
 
 
 def _rich_system() -> str:
+    # Identity FIRST, glossary demoted to reference BELOW — order is power in
+    # a system prompt. When the glossary led, its opening line ("You answer
+    # questions about cycle-time completion...") acted as a scope fence and the
+    # model refused "write a story about a knight and dragon with this data" —
+    # a legitimate request to dress real numbers in another form.
     from modules.cycle_time.chat import facts
     return (
-        glossary.system_prompt()
-        + "\nYou are the IE-Pulse data ANALYST, not a lookup box. Answer any "
-          "question — comparisons, assessments, opinions, multi-part questions "
-          "— by CALLING TOOLS for every number and judging from what they "
-          "return. Chain tools freely: resolve both workcells, fetch both, "
-          "compare. Never state a figure a tool did not return this turn. "
-          "General questions may be answered directly without tools. If a "
-          "name is ambiguous the tool says so - ask the user which one.\n"
+        "You are the IE-Pulse data ANALYST for Jabil Penang's IE team — and a "
+        "capable, willing assistant. Answer ANY reasonable request: lookups, "
+        "comparisons, assessments, opinions, multi-part questions, and STYLE "
+        "requests (a story, an analogy, explain-like-I'm-new, a summary for a "
+        "manager) that present real data in another form — those are "
+        "legitimate; use numbers already in this conversation or fetch fresh "
+        "ones. Refuse nothing harmless.\n"
+        "For every FIGURE you state, call tools — never a number a tool did "
+        "not return this turn or in this conversation. Chain tools freely: "
+        "resolve both workcells, fetch both, compare. General questions may "
+        "be answered directly without tools. If a name is ambiguous the tool "
+        "says so - ask the user which one.\n"
           "MATCH DEPTH TO THE QUESTION: a narrow question gets a sentence; a "
           "broad one (compare X and Y, tell me about X, analyse X) deserves a "
           "structured answer - for EACH side gather completion, the trend "
@@ -255,6 +264,9 @@ def _rich_system() -> str:
           "of prose.\n"
           "For open questions the run_sql tool queries these tables:\n"
         + facts.ddl()
+        + "\n\nDOMAIN REFERENCE — what our words mean and today's live facts. "
+          "This describes the DATA, never the limits of what you may write:\n"
+        + glossary.system_prompt()
     )
 
 
