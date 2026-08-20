@@ -104,7 +104,8 @@ def _strip_meta(text: str) -> str:
     return "\n".join(keep).strip() or text.strip()
 
 
-def _compose(question: str, results: list[dict], routed_text: str) -> str:
+def _compose(question: str, results: list[dict], routed_text: str,
+             on_delta=None) -> str:
     """Turn the tool output into a sentence, under the glossary and with NO tools
     attached.
 
@@ -127,15 +128,15 @@ def _compose(question: str, results: list[dict], routed_text: str) -> str:
     slim = {k: (f"[{len(v)} items, omitted]" if isinstance(v, list) and len(v) > 8 else v)
             for k, v in last.items()}
     payload = json.dumps(slim, default=str)[:2500]
+    messages = [
+        {"role": "system", "content": glossary.system_prompt()},
+        {"role": "user", "content":
+            f"Question: {question}\n\nData:\n{payload}\n\n"
+            "Reply with one short sentence answering the question from this data. "
+            "No preamble, no notes, no explanation of what you did."},
+    ]
     try:
-        msg = ollama.chat([
-            {"role": "system", "content": glossary.system_prompt()},
-            {"role": "user", "content":
-                f"Question: {question}\n\nData:\n{payload}\n\n"
-                "Reply with one short sentence answering the question from this data. "
-                "No preamble, no notes, no explanation of what you did."},
-        ])
-        text = (msg.get("content") or "").strip()
+        text = _generate(messages, on_delta)
     except ollama.OllamaError as e:
         log.warning("chat: compose failed (%s) - falling back to raw data", e)
         return _fallback(results)
@@ -145,7 +146,21 @@ def _compose(question: str, results: list[dict], routed_text: str) -> str:
     return _strip_meta(text)
 
 
-def _general(question: str, history: list[dict] | None, system: str) -> str:
+def _generate(messages: list[dict], on_delta=None) -> str:
+    """One generation, streamed to `on_delta` when a listener exists. The full
+    text is still returned and still post-processed — the stream is a preview,
+    the final payload is the answer."""
+    if on_delta is None:
+        return (ollama.chat(messages).get("content") or "").strip()
+    parts = []
+    for piece in ollama.chat_stream(messages):
+        parts.append(piece)
+        on_delta(piece)
+    return "".join(parts).strip()
+
+
+def _general(question: str, history: list[dict] | None, system: str,
+             on_delta=None) -> str:
     """One plain chat call — the general lane, and the concept lane when the
     system prompt is the glossary."""
     messages = [{"role": "system", "content": system}]
@@ -154,8 +169,7 @@ def _general(question: str, history: list[dict] | None, system: str) -> str:
         if h.get("content"):
             messages.append({"role": role, "content": str(h["content"])[:1500]})
     messages.append({"role": "user", "content": question})
-    msg = ollama.chat(messages)
-    return _strip_meta((msg.get("content") or "").strip()) or \
+    return _strip_meta(_generate(messages, on_delta)) or \
         "I did not catch that — ask me about a workcell or a model."
 
 
@@ -177,13 +191,21 @@ def _log_turn(question: str, out: dict) -> None:
         log.debug("chat: turn log write failed", exc_info=True)
 
 
-def ask(question: str, history: list[dict] | None = None) -> dict:
+def ask(question: str, history: list[dict] | None = None,
+        on_event=None) -> dict:
     """Answer one question.
 
     -> {answer, lane, intent, grounded, calls:[{tool, args, ok}], sources:[str],
         model, elapsed_s, error?}
+
+    `on_event(kind, text)` — optional live listener for the SSE endpoint:
+    kind "stage" is a progress label ("routing…"), kind "delta" is the next
+    piece of a streamed sentence. The return value is identical either way;
+    the stream is a preview, the final payload is the answer.
     """
     t0 = time.time()
+    emit = on_event or (lambda kind, text: None)
+    delta = (lambda t: emit("delta", t)) if on_event else None
 
     def done(answer: str, lane: str, *, intent: str = "none", grounded: bool = False,
              calls: list | None = None, sources: list | None = None,
@@ -209,11 +231,13 @@ def ask(question: str, history: list[dict] | None = None) -> dict:
                     error="ollama_unavailable")
 
     # L1 — one structured call. Degrades to a lexicon guess, never raises.
-    r = router.repair(router.route(question, history))
+    emit("stage", "routing…")
+    r = router.repair(router.route(question, history), question)
 
     if r["domain"] == "general":
         try:
-            return done(_general(question, history, _GENERAL_PROMPT), "general")
+            emit("stage", "writing…")
+            return done(_general(question, history, _GENERAL_PROMPT, delta), "general")
         except ollama.OllamaError as e:
             return done(f"The local model failed: {e}", "error", error="ollama_failed")
 
@@ -226,13 +250,15 @@ def ask(question: str, history: list[dict] | None = None) -> dict:
         if exact:
             return done(exact, "cycletime", grounded=True, sources=["glossary"])
         try:
-            return done(_general(question, history, glossary.system_prompt()),
+            emit("stage", "writing…")
+            return done(_general(question, history, glossary.system_prompt(), delta),
                         "cycletime", sources=["glossary"])
         except ollama.OllamaError as e:
             return done(f"The local model failed: {e}", "error", error="ollama_failed")
 
     if r["intent"] == "open_query":
         from modules.cycle_time.chat import sqllane
+        emit("stage", "writing a query…")
         result = sqllane.run(question)
         calls = [{"tool": "open_query", "args": {}, "ok": "error" not in result}]
         if result.get("error"):
@@ -253,6 +279,7 @@ def ask(question: str, history: list[dict] | None = None) -> dict:
         return out
 
     args = router.tool_args(r)
+    emit("stage", "reading the mart…")
     result = tools.call(r["intent"], args)
     calls = [{"tool": r["intent"], "args": args, "ok": "error" not in result}]
     log.info("chat: %s(%s) -> %s", r["intent"], args,
@@ -262,7 +289,8 @@ def ask(question: str, history: list[dict] | None = None) -> dict:
         # Deterministic text (which-one / not-found / suggestions) IS the reply.
         return done(_fallback([result]), "cycletime", intent=r["intent"], calls=calls)
 
-    answer = _compose(question, [result], "")
+    emit("stage", "writing…")
+    answer = _compose(question, [result], "", delta)
     sources = [result["_src"]] if result.get("_src") else []
     return done(answer, "cycletime", intent=r["intent"], grounded=True,
                 calls=calls, sources=sources)

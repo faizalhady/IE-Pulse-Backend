@@ -319,11 +319,18 @@ def tool_args(r: dict) -> dict:
     return {}                                    # list_workcells / none
 
 
-def repair(r: dict) -> dict:
+def repair(r: dict, question: str = "") -> dict:
     """Slot sanity BEFORE dispatch — each rule is a measured 8B habit, fixed in
     code where fixing the prompt only moved the failure around."""
     intent, wc = r["intent"], r["workcell"]
     asm = r["assembly"] or r["query"]
+    # scope=all is honoured only when the USER widened the scope. The model
+    # fills the slot on its own ("% complete for keysight" came back scope=all)
+    # and the answer silently changes from the Planned number to the universe.
+    if r["scope"] == "all" and question \
+            and not re.search(r"\b(all|every|everything|exists?|universe)\b",
+                              question.lower()):
+        r["scope"] = ""
     if intent in ("model_status", "model_bom", "model_cycle_time") and not asm:
         r["intent"] = "workcell_completion" if wc else "none"
     if intent == "models_by_status" and not r["status"]:

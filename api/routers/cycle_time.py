@@ -2256,6 +2256,59 @@ def ct_chat(body: dict = Body(...)):
     return ask(q, hist if isinstance(hist, list) else None)
 
 
+@router.post("/chat/stream")
+def ct_chat_stream(body: dict = Body(...)):
+    """The same question, answered as Server-Sent Events.
+
+    data: {type: stage, text}   what the server is doing right now
+    data: {type: delta, text}   the next piece of a streamed sentence
+    data: {type: final, payload}  the SAME payload /chat returns — the stream
+                                  is a preview, this is the answer.
+
+    Built on a plain thread + queue: ask() is synchronous on purpose (one GPU,
+    one semaphore), so the generator drains events while a worker runs it.
+    """
+    import json as _json
+    import queue as _queue
+    import threading as _threading
+    from fastapi.responses import StreamingResponse
+    from modules.cycle_time.chat.agent import ask
+
+    q = str(body.get("question") or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="question is required")
+    if len(q) > 500:
+        raise HTTPException(status_code=400, detail="question too long (max 500 chars)")
+    hist = body.get("history")
+
+    events: _queue.Queue = _queue.Queue()
+
+    def work():
+        try:
+            out = ask(q, hist if isinstance(hist, list) else None,
+                      on_event=lambda kind, text: events.put({"type": kind, "text": text}))
+            events.put({"type": "final", "payload": out})
+        except Exception as e:                    # noqa: BLE001 — surface, never hang
+            events.put({"type": "final", "payload": {
+                "answer": f"The request failed: {e}", "lane": "error",
+                "intent": "none", "grounded": False, "calls": [],
+                "sources": [], "elapsed_s": 0, "error": "chat_failed"}})
+        events.put(None)                          # sentinel: stream over
+
+    _threading.Thread(target=work, daemon=True).start()
+
+    def gen():
+        while True:
+            e = events.get()
+            if e is None:
+                return
+            yield f"data: {_json.dumps(e, default=str)}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
 @router.get("/bom")
 def ct_bom(
     customer: str = Query(..., description="Workcell (config name, e.g. 'Nokia Optics')."),

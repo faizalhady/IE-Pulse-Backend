@@ -111,6 +111,47 @@ def chat(messages: list[dict], tools: list[dict] | None = None,
     return msg
 
 
+def chat_stream(messages: list[dict], temperature: float = 0.0):
+    """Yield content deltas from one /api/chat round trip (stream=true).
+
+    The GPU semaphore is held for the WHOLE stream — a second question arriving
+    mid-generation queues here, visibly, instead of inside Ollama where both
+    slow down with no feedback. NDJSON: one {"message": {...}, "done": bool}
+    per line."""
+    body = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": True,
+        "keep_alive": -1,
+        "options": {"temperature": temperature, "num_ctx": OLLAMA_NUM_CTX,
+                    "num_predict": 300},
+    }
+    req = urllib.request.Request(
+        f"{OLLAMA_BASE_URL}/api/chat",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    with _gpu:
+        try:
+            with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as r:
+                for line in r:
+                    if not line.strip():
+                        continue
+                    chunk = json.loads(line)
+                    piece = (chunk.get("message") or {}).get("content") or ""
+                    if piece:
+                        yield piece
+                    if chunk.get("done"):
+                        return
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:300]
+            raise OllamaError(f"Ollama HTTP {e.code}: {detail}") from e
+        except OllamaError:
+            raise
+        except Exception as e:
+            raise OllamaError(f"Ollama stream failed: {e}") from e
+
+
 def tool_calls(msg: dict) -> list[tuple[str, dict]]:
     """[(name, args)] from a message. Ollama returns arguments as an object, but
     some builds hand back a JSON STRING — both are normalised here so the agent
