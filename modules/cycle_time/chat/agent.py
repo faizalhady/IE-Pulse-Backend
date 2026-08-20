@@ -231,6 +231,27 @@ def ask(question: str, history: list[dict] | None = None) -> dict:
         except ollama.OllamaError as e:
             return done(f"The local model failed: {e}", "error", error="ollama_failed")
 
+    if r["intent"] == "open_query":
+        from modules.cycle_time.chat import sqllane
+        result = sqllane.run(question)
+        calls = [{"tool": "open_query", "args": {}, "ok": "error" not in result}]
+        if result.get("error"):
+            out = done("I could not build a safe query for that — try naming a "
+                       "workcell, a status, or a measure from the data.",
+                       "cycletime", intent="open_query", calls=calls)
+        else:
+            # One number gets a sentence; a table is rendered deterministically —
+            # an 8B model paraphrasing 10 rows WILL misquote one eventually.
+            if result["row_count"] == 1 and len(result["columns"]) == 1:
+                text = _compose(question, [result], "")
+            else:
+                text = sqllane.render(result)
+            out = done(text, "cycletime", intent="open_query", grounded=True,
+                       calls=calls, sources=[result["_src"]])
+        if result.get("sql"):
+            out["sql"] = result["sql"]
+        return out
+
     args = router.tool_args(r)
     result = tools.call(r["intent"], args)
     calls = [{"tool": r["intent"], "args": args, "ok": "error" not in result}]

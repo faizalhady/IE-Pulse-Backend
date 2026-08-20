@@ -53,6 +53,12 @@ CASES: list[tuple[str, str, str | None]] = [
     ("what is a workcell",                      "cycletime", "none"),
     ("what does not_built mean",                "cycletime", "none"),
     ("define no_cycle_time",                    "cycletime", "none"),
+    # open lane — the tail no tool covers, answered by one caged SELECT
+    ("top 5 workcells by unmapped steps",       "cycletime", "open_query"),
+    ("average coverage of keysight models",     "cycletime", "open_query"),
+    ("how many models does each plant have",    "cycletime", "open_query"),
+    ("which workcell has the most no_cycle_time models", "cycletime", "open_query"),
+    ("count models with more than 1000 units that are not complete", "cycletime", "open_query"),
 ]
 
 

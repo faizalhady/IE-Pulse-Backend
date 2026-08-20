@@ -127,6 +127,31 @@ def looks_domain(question: str) -> bool:
     return False
 
 
+#: An ANALYTICAL question has a grammar too: ranking, averaging, per-group
+#: counting. The 8B reliably routes concrete questions to concrete tools but
+#: will not choose "open_query" as an abstraction — asked for "top 3 workcells
+#: by unmapped steps" it grabbed model_cycle_time because "steps" appears in
+#: that tool's description. The signal words below never appear in the nine
+#: head questions (checked against the eval set), so code decides.
+_AGG_RE = re.compile(
+    r"\b(top\s*\d*|most|least|highest|lowest|biggest|smallest|average|avg|"
+    r"median|rank(?:ed|ing)?|more\s+than|fewer\s+than|less\s+than|at\s+least|"
+    r"per|each)\b", re.I)
+
+#: Weaker domain evidence than looks_domain(): words that are ordinary English
+#: alone but domain vocabulary in an analytical sentence ("models per region").
+_WEAK_WORDS = {"model", "models", "plant", "plants", "region", "regions",
+               "units", "coverage", "status", "statuses", "step", "steps",
+               "workcell", "workcells"}
+
+
+def _weak_domain(question: str) -> bool:
+    if looks_domain(question):
+        return True
+    toks = set(re.split(r"[^a-z0-9]+", question.lower()))
+    return bool(toks & _WEAK_WORDS)
+
+
 #: A definition question: "what does X mean", "what is a X", "define X".
 #: Deliberately narrow — "what is THE % complete for keysight" has no article
 #: and must keep going to a tool.
@@ -145,7 +170,9 @@ def concept_question(question: str) -> bool:
 
 # ─── L1: the structured routing call ─────────────────────────────────────────
 
-INTENTS = tuple(tools.FUNCS)                       # the 9 tool names
+#: The 9 tool names, plus the open lane — any data question the tools cannot
+#: answer becomes ONE caged SELECT over the facts views (sqllane.py).
+INTENTS = tuple(tools.FUNCS) + ("open_query",)
 
 _SCHEMA = {
     "type": "object",
@@ -172,6 +199,8 @@ _SCHEMA = {
 #: one-liners so the router and the tools cannot describe a tool differently.
 def _route_prompt() -> str:
     menu = "\n".join(f"- {fn.__name__}: {desc}" for fn, desc, _ in tools._REGISTRY)
+    menu += ("\n- open_query: rankings, averages, filters or counts ACROSS "
+             "models or workcells that no tool above covers.")
     return (
         "Classify the user's message about manufacturing cycle-time data.\n"
         "domain: 'cycletime' if it asks about our data — workcells (customers), "
@@ -193,6 +222,26 @@ def route(question: str, history: list[dict] | None = None) -> dict:
     if concept_question(question):
         return {"domain": "cycletime", "intent": "none", "workcell": "",
                 "assembly": "", "status": "", "scope": "", "query": ""}
+
+    # An analytical sentence over domain vocabulary is the open lane — decided
+    # HERE, before any model call: the 8B routes concrete questions to concrete
+    # tools well but never chooses "open_query" as an abstraction ("top 3
+    # workcells by unmapped steps" grabbed model_cycle_time because "steps"
+    # appears in that tool's one-liner). sqllane reads the raw question, so no
+    # slots are needed and the routing call is skipped entirely.
+    if _AGG_RE.search(question) and _weak_domain(question):
+        return {"domain": "cycletime", "intent": "open_query", "workcell": "",
+                "assembly": "", "status": "", "scope": "", "query": ""}
+
+    # Plant-status idioms carry no domain word at all — "how are we doing" has
+    # nothing for the lexicon and nothing for the model, and routed to general.
+    # In THIS chat those phrases have exactly one meaning each.
+    ql = question.lower()
+    empty = {"workcell": "", "assembly": "", "status": "", "scope": "", "query": ""}
+    if any(p in ql for p in ("how are we doing", "how did we do", "how are things")):
+        return {"domain": "cycletime", "intent": "plant_completion", **empty}
+    if any(p in ql for p in ("are we improving", "week on week", "getting better")):
+        return {"domain": "cycletime", "intent": "completion_trend", **empty}
 
     messages = [{"role": "system", "content": _route_prompt()}]
     for h in (history or [])[-4:]:
@@ -216,6 +265,12 @@ def route(question: str, history: list[dict] | None = None) -> dict:
 
     out = {k: str(r.get(k) or "").strip() for k in
            ("domain", "intent", "workcell", "assembly", "status", "scope", "query")}
+    # An optional slot the model had nothing for comes back as the WORD for
+    # nothing — "none", "null", "N/A" — and a literal "none" then resolves to
+    # a model that does not exist.
+    for k in ("workcell", "assembly", "status", "scope", "query"):
+        if out[k].lower() in {"none", "null", "n/a", "na", "-", "undefined"}:
+            out[k] = ""
     if out["domain"] not in ("cycletime", "general"):
         out["domain"] = fallback["domain"]
     if out["intent"] not in INTENTS:
@@ -230,7 +285,8 @@ def route(question: str, history: list[dict] | None = None) -> dict:
     # any domain word/name in the message is the model guessing — "translate
     # good morning to malay" landed here. General is the safe lane; its prompt
     # still redirects anyone who actually wanted data.
-    if out["domain"] == "cycletime" and out["intent"] == "none"             and not looks_domain(question):
+    if out["domain"] == "cycletime" and out["intent"] == "none" \
+            and not _weak_domain(question):
         log.info("chat route: downgrade cycletime/none -> general for %r", question[:60])
         out["domain"] = "general"
     if out["domain"] == "general":
@@ -301,4 +357,17 @@ if __name__ == "__main__":
     assert repair({"intent": "workcell_completion", "workcell": "", "assembly": "",
                    "query": "", "status": "", "scope": "", "domain": "cycletime"}
                   )["intent"] == "plant_completion"
+    assert "open_query" in INTENTS and "open_query" in _SCHEMA["properties"]["intent"]["enum"]
+    # The analytical grammar routes without a model — and must NOT swallow the
+    # nine head questions.
+    agg = lambda q: bool(_AGG_RE.search(q) and _weak_domain(q))
+    assert agg("top 3 workcells by unmapped steps")
+    assert agg("average coverage of keysight models")
+    assert agg("how many models does each plant have")
+    assert agg("count models with more than 1000 units that are not complete")
+    assert not agg("how many % complete for keysight")
+    assert not agg("which keysight models have no cycle time")
+    assert not agg("overall completion for the plant")
+    assert not agg("completion trend for keysight")
+    assert not agg("what is the best restaurant in penang")   # agg word, no domain
     print("router self-check OK —", len(INTENTS), "intents")
