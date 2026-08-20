@@ -112,6 +112,14 @@ OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 OLLAMA_NUM_CTX  = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 OLLAMA_TIMEOUT  = int(os.getenv("OLLAMA_TIMEOUT", "180"))
 
+# The chat's kill-switch. Testing-phase: set CT_CHAT_ENABLED=0 in the service
+# env on 02 and every /chat* endpoint answers instantly WITHOUT importing the
+# chat module or touching Ollama — no probes, no retries, nothing to time out.
+# Default ON so local dev needs no setup. The 02 frontend build hides the chat
+# UI independently (VITE_CHAT_ENABLED=0), so this is the second lock, not the
+# only one.
+CHAT_ENABLED = os.getenv("CT_CHAT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+
 CT_STATE_FILE = CT_MART_DIR / ".ingest_state.json"
 
 # ─── DuckDB query guardrails ─────────────────────────────────────────────────

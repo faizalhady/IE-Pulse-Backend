@@ -2228,11 +2228,20 @@ def ct_completion_line_metrics(
 
 @router.get("/chat/health")
 def ct_chat_health():
-    """Is the local model reachable, and which one.
-      -> {ok, detail, model, tools:[name]}"""
+    """Is the chat on, is the local model reachable, and which one.
+      -> {ok, enabled, detail, model, tools:[name]}
+
+    enabled:false (CT_CHAT_ENABLED=0) answers WITHOUT importing the chat module
+    or probing Ollama — the FE hides every chat surface on it and fetches
+    nothing further."""
+    from modules.cycle_time.config import CHAT_ENABLED
+    if not CHAT_ENABLED:
+        return {"ok": False, "enabled": False,
+                "detail": "chat is disabled on this server (CT_CHAT_ENABLED=0)",
+                "model": "", "tools": []}
     from modules.cycle_time.chat import ollama, tools as chat_tools
     ok, detail = ollama.available()
-    return {"ok": ok, "detail": detail, "model": ollama.OLLAMA_MODEL,
+    return {"ok": ok, "enabled": True, "detail": detail, "model": ollama.OLLAMA_MODEL,
             "tools": sorted(chat_tools.FUNCS)}
 
 
@@ -2246,6 +2255,9 @@ def ct_chat(body: dict = Body(...)):
     Deliberately SYNC: FastAPI runs it in its threadpool, and the module holds a
     semaphore so one 8 GB card is not asked to run two generations at once.
     """
+    from modules.cycle_time.config import CHAT_ENABLED
+    if not CHAT_ENABLED:
+        raise HTTPException(status_code=503, detail="chat is disabled on this server (CT_CHAT_ENABLED=0)")
     q = str(body.get("question") or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="question is required")
@@ -2268,6 +2280,9 @@ def ct_chat_stream(body: dict = Body(...)):
     Built on a plain thread + queue: ask() is synchronous on purpose (one GPU,
     one semaphore), so the generator drains events while a worker runs it.
     """
+    from modules.cycle_time.config import CHAT_ENABLED
+    if not CHAT_ENABLED:
+        raise HTTPException(status_code=503, detail="chat is disabled on this server (CT_CHAT_ENABLED=0)")
     import json as _json
     import queue as _queue
     import threading as _threading
