@@ -67,6 +67,15 @@ MODEL_COLS: dict[str, tuple[str | None, str, str]] = {
     "last_build":    ("last_build", "TEXT", "when MES last saw it built (ISO date), may be NULL"),
 }
 
+PROC_COLS: dict[str, tuple[None, str, str]] = {
+    "workcell":     (None, "TEXT", "display name of the workcell"),
+    "workcell_key": (None, "TEXT", "UPPERCASE alphanumerics — ALWAYS filter on this"),
+    "assembly":     (None, "TEXT", "the model / part number"),
+    "process":      (None, "TEXT", "one IEDB process step of this model's route"),
+    "ct_seconds":   (None, "DOUBLE", "the LONGEST recorded cycle time for this process, seconds (max across lines and revisions)"),
+    "records":      (None, "BIGINT", "how many CT records back this number"),
+}
+
 WC_COLS: dict[str, tuple[None, str, str]] = {
     "workcell":       (None, "TEXT", "display name of the workcell"),
     "workcell_key":   (None, "TEXT", "UPPERCASE alphanumerics — ALWAYS filter on this"),
@@ -179,15 +188,54 @@ def _build_wc_facts(m: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _build_process_facts(m: pd.DataFrame) -> pd.DataFrame:
+    """Process grain, DEMAND models only — "which process has the longest CT"
+    is unanswerable at model grain (the views only had bottleneck_ct_s, no
+    process NAME, and the model hallucinated an iedb_process_facts table).
+
+    The IEDB raw mart is 4.4M rows; grouped to (customer, assembly, process)
+    in DuckDB, then cut to the demand set — the plant asks about what it
+    builds. Joined on canon(customer) + normalised assembly, NOT raw workcell
+    strings — the documented trap: planner and IEDB spell the same workcell
+    differently (TMO vs THERMO FISHER)."""
+    import duckdb
+    from modules.cycle_time.config import CT_MART
+    con = duckdb.connect()
+    try:
+        g = con.execute(
+            f"""SELECT customer, assembly, process,
+                       max(cycle_time_per_process) AS ct_seconds,
+                       count(*) AS records
+                FROM read_parquet('{CT_MART["raw"].as_posix()}')
+                WHERE cycle_time_per_process IS NOT NULL
+                  AND cycle_time_per_process > 0 AND process IS NOT NULL
+                GROUP BY 1, 2, 3"""
+        ).df()
+    finally:
+        con.close()
+    g["workcell_key"] = g["customer"].astype(str).map(canon)
+    g["_a"] = g["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+
+    dem = m[m["has_demand"]][["workcell", "workcell_key", "assembly"]].copy()
+    dem["_a"] = dem["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+
+    out = dem.merge(g[["workcell_key", "_a", "process", "ct_seconds", "records"]],
+                    on=["workcell_key", "_a"], how="inner")
+    out["ct_seconds"] = _num(out["ct_seconds"]).round(2)
+    out["records"] = out["records"].astype("int64")
+    return out[list(PROC_COLS)]
+
+
 @lru_cache(maxsize=2)
-def _frames_cached(_key) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _frames_cached(_key) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     m = _build_model_facts()
-    return m, _build_wc_facts(m)
+    return m, _build_wc_facts(m), _build_process_facts(m)
 
 
-def frames() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """(llm_model_facts, llm_workcell_facts), cached on the demand payload's
-    key so a mart rebuild invalidates them without anyone remembering to."""
+def frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """(llm_model_facts, llm_workcell_facts, llm_process_facts), cached on the
+    demand payload's key so a mart rebuild invalidates them without anyone
+    remembering to."""
     from api.routers.cycle_time import _completion_demand_key
     return _frames_cached(_completion_demand_key())
 
@@ -208,16 +256,22 @@ def ddl() -> str:
         + "\n\n"
         + table("llm_workcell_facts", WC_COLS,
                 "one row per workcell, demand scope, both completion percentages precomputed.")
+        + "\n\n"
+        + table("llm_process_facts", PROC_COLS,
+                "one row per (workcell, model, process) — IN-DEMAND models only. For per-process cycle-time questions.")
     )
 
 
 if __name__ == "__main__":
-    m, w = frames()
+    m, w, pr = frames()
     assert list(m.columns) == list(MODEL_COLS), "frame/spec drift"
     assert list(w.columns) == list(WC_COLS), "frame/spec drift"
+    assert list(pr.columns) == list(PROC_COLS), "frame/spec drift"
     assert (m["workcell_key"].str.fullmatch(r"[A-Z0-9]+")).all()
     assert len(w) < len(m)
+    assert len(pr) and (pr["ct_seconds"] > 0).all()
     d = ddl()
     assert "llm_model_facts" in d and "workcell_key" in d and "-- verdict" in d
-    print(f"facts self-check OK — {len(m):,} models, {len(w)} workcells")
+    assert "llm_process_facts" in d
+    print(f"facts self-check OK — {len(m):,} models, {len(w)} workcells, {len(pr):,} process rows")
     print(d)

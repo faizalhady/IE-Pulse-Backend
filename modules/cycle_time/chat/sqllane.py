@@ -55,7 +55,16 @@ _FORBIDDEN = re.compile(
     r"install|load|export|import|call|set|reset|vacuum|checkpoint|begin|"
     r"commit|rollback|grant|truncate|merge)\b", re.I)
 
-_TABLES = {"llm_model_facts", "llm_workcell_facts"}
+_TABLES = {"llm_model_facts", "llm_workcell_facts", "llm_process_facts"}
+
+#: A superlative question answered by an UNORDERED query is the worst failure
+#: this lane can produce: 50 arbitrary rows, and the lead-in sentence then
+#: "answers" the superlative from whichever 8 it was shown. Measured, not
+#: hypothetical — "longest cycle time" came back as a bare GROUP BY and the
+#: sentence invented a winner. Shape-checked here, deterministically.
+_SUPERLATIVE_RE = re.compile(
+    r"\b(longest|shortest|slowest|fastest|highest|lowest|most|least|"
+    r"max(?:imum)?|min(?:imum)?|biggest|smallest|top\s*\d*|worst|best)\b", re.I)
 
 #: Few-shots as real message pairs — they teach the two habits the DDL alone
 #: does not: filter on workcell_key with the name normalised, and aggregate
@@ -70,6 +79,9 @@ _SHOTS = [
     ("how many models per plant",
      "SELECT plant, COUNT(*) AS models FROM llm_model_facts "
      "GROUP BY plant ORDER BY models DESC"),
+    ("which process from which model has the longest cycle time",
+     "SELECT workcell, assembly, process, ct_seconds FROM llm_process_facts "
+     "ORDER BY ct_seconds DESC LIMIT 1"),
 ]
 
 
@@ -121,7 +133,7 @@ def _ensure_workcell(sql: str) -> str:
     added to the SELECT (and to a GROUP BY that groups on assembly). Anything
     this cannot rewrite safely — CTEs, grouping not on assembly — is left
     exactly as written."""
-    if not re.search(r"\bllm_model_facts\b", sql, re.I):
+    if not re.search(r"\bllm_(model|process)_facts\b", sql, re.I):
         return sql
     if re.search(r"\bworkcell\b", sql, re.I):
         return sql
@@ -150,12 +162,13 @@ def _fix_workcells(sql: str) -> str:
 
 
 def _execute(sql: str) -> dict:
-    m, w = facts.frames()
+    m, w, pr = facts.frames()
     con = duckdb.connect()                       # in-memory: holds ONLY the views
     try:
         con.execute("SET enable_external_access=false")
         con.register("llm_model_facts", m)
         con.register("llm_workcell_facts", w)
+        con.register("llm_process_facts", pr)
         df = con.execute(f"SELECT * FROM ({sql.rstrip().rstrip(';')}) AS q LIMIT 50").df()
     finally:
         con.close()
@@ -180,6 +193,11 @@ def run(question: str) -> dict:
         except (ollama.OllamaError, ValueError) as e:
             return {"error": "sql_failed", "detail": f"model: {e}"}
         bad = validate(sql)
+        if not bad and _SUPERLATIVE_RE.search(question) \
+                and not re.search(r"\border\s+by\b", sql, re.I):
+            bad = ("the question asks for a superlative (longest/most/top) but "
+                   "the query has no ORDER BY — add ORDER BY <the measure> "
+                   "DESC or ASC with a small LIMIT")
         if bad:
             last_err = bad
         else:

@@ -59,6 +59,7 @@ CASES: list[tuple[str, str, str | None]] = [
     ("how many models does each plant have",    "cycletime", "open_query"),
     ("which workcell has the most no_cycle_time models", "cycletime", "open_query"),
     ("count models with more than 1000 units that are not complete", "cycletime", "open_query"),
+    ("which process from which model has the longest cycle time", "cycletime", "open_query"),
 ]
 
 

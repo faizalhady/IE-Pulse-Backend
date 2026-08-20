@@ -136,6 +136,9 @@ def looks_domain(question: str) -> bool:
 _AGG_RE = re.compile(
     r"\b(top\s*\d*|most|least|highest|lowest|biggest|smallest|average|avg|"
     r"median|rank(?:ed|ing)?|more\s+than|fewer\s+than|less\s+than|at\s+least|"
+    # Superlatives were missing: "which model has the LONGEST cycle time" fell
+    # through to the 8B, which stuffed the whole sentence into the model slot.
+    r"longest|shortest|slowest|fastest|max(?:imum)?|min(?:imum)?|worst|best|"
     r"per|each)\b", re.I)
 
 #: Weaker domain evidence than looks_domain(): words that are ordinary English
@@ -377,4 +380,6 @@ if __name__ == "__main__":
     assert not agg("overall completion for the plant")
     assert not agg("completion trend for keysight")
     assert not agg("what is the best restaurant in penang")   # agg word, no domain
+    assert agg("which process from which model has the longest cycle time")
+    assert agg("slowest workcell by coverage")
     print("router self-check OK —", len(INTENTS), "intents")
