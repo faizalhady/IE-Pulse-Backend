@@ -54,13 +54,17 @@ log = logging.getLogger(__name__)
 #: Guard against a model that answers with a wall of text on a 1-line question.
 _MAX_ANSWER_CHARS = 1200
 
-#: The general lane's whole personality. Short on purpose.
-_GENERAL_PROMPT = (
-    "You are the IE-Pulse assistant for Jabil Penang's IE team. The user's "
-    "message is not about cycle-time data. Reply helpfully in one or two short "
-    "sentences. If they might actually want data, tell them to name a workcell "
-    "or a model part number."
-)
+#: The general lane's personality. The brevity clause is swapped per brain —
+#: two short sentences muzzles the 8B; the cloud model answers naturally.
+def _general_prompt() -> str:
+    brevity = ("Reply helpfully and naturally — brief for simple questions, "
+               "fuller when the question deserves it."
+               if llm.rich() else
+               "Reply helpfully in one or two short sentences.")
+    return ("You are the IE-Pulse assistant for Jabil Penang's IE team. The "
+            f"user's message is not about cycle-time data. {brevity} If they "
+            "might actually want data, tell them to name a workcell or a model "
+            "part number.")
 
 
 def _fallback(results: list[dict]) -> str:
@@ -123,17 +127,37 @@ def _compose(question: str, results: list[dict], routed_text: str,
     if last.get("error"):
         return _fallback(results)
 
-    # Big arrays are for the UI, not the sentence. A 202-material BOM took the
-    # compose call from ~3s to 27s and taught it nothing the count did not.
-    slim = {k: (f"[{len(v)} items, omitted]" if isinstance(v, list) and len(v) > 8 else v)
+    # The muzzle is SIZED TO THE BRAIN. The local 8B gets one short sentence
+    # and 8 rows — anything more and it rambles or misquotes (a 202-material
+    # BOM took its compose from ~3s to 27s). A cloud-class model gets the
+    # fuller payload and permission to actually answer: depth, comparisons,
+    # and EVERY question in the message, not just the first.
+    rich = llm.rich()
+    cap_items, cap_chars = (40, 12000) if rich else (8, 2500)
+    slim = {k: (f"[{len(v)} items, omitted]" if isinstance(v, list) and len(v) > cap_items else v)
             for k, v in last.items()}
-    payload = json.dumps(slim, default=str)[:2500]
+    payload = json.dumps(slim, default=str)[:cap_chars]
+    # question_result marks a SQL answer whose rows the UI renders as a real
+    # table under the prose — restating them is duplication, not depth.
+    tabled = bool(last.get("question_result"))
+    instruction = (
+        ("The rows are ALREADY shown to the user as a table below your text — "
+         "do not list or repeat them. Summarise what they show, point out "
+         "anything notable, and answer every part of the question the table "
+         "itself does not. 1-4 sentences. "
+         if tabled else
+         "Answer the question fully from this data — if it asks more than one "
+         "thing, answer each part. 2-6 sentences; a short comparison or list "
+         "when it helps. ")
+        + "Use ONLY numbers present in the data, never invent or recompute "
+          "one. No preamble, no notes about what you did."
+        if rich else
+        "Reply with one short sentence answering the question from this data. "
+        "No preamble, no notes, no explanation of what you did.")
     messages = [
         {"role": "system", "content": glossary.system_prompt()},
         {"role": "user", "content":
-            f"Question: {question}\n\nData:\n{payload}\n\n"
-            "Reply with one short sentence answering the question from this data. "
-            "No preamble, no notes, no explanation of what you did."},
+            f"Question: {question}\n\nData:\n{payload}\n\n{instruction}"},
     ]
     try:
         text = _generate(messages, on_delta)
@@ -191,6 +215,136 @@ def _log_turn(question: str, out: dict) -> None:
         log.debug("chat: turn log write failed", exc_info=True)
 
 
+
+# ─── the rich agent loop ─────────────────────────────────────────────────────
+
+_RUN_SQL_TOOL = {"type": "function", "function": {
+    "name": "run_sql",
+    "description": "Run ONE read-only SELECT over the llm facts views "
+                   "(llm_model_facts, llm_workcell_facts, llm_process_facts). "
+                   "Filter workcells on workcell_key (UPPERCASE alphanumerics).",
+    "parameters": {"type": "object",
+                   "properties": {"sql": {"type": "string"}},
+                   "required": ["sql"]}}}
+
+#: Rounds, not retries: enough to resolve two names, pull three datasets and
+#: write — a runaway loop stops here, with whatever it gathered.
+_MAX_ROUNDS = 6
+
+
+def _rich_system() -> str:
+    from modules.cycle_time.chat import facts
+    return (
+        glossary.system_prompt()
+        + "\nYou are the IE-Pulse data ANALYST, not a lookup box. Answer any "
+          "question — comparisons, assessments, opinions, multi-part questions "
+          "— by CALLING TOOLS for every number and judging from what they "
+          "return. Chain tools freely: resolve both workcells, fetch both, "
+          "compare. Never state a figure a tool did not return this turn. "
+          "General questions may be answered directly without tools. If a "
+          "name is ambiguous the tool says so - ask the user which one.\n"
+          "MATCH DEPTH TO THE QUESTION: a narrow question gets a sentence; a "
+          "broad one (compare X and Y, tell me about X, analyse X) deserves a "
+          "structured answer - gather completion, the status split, the trend "
+          "and notable models via several tools, then write short labelled "
+          "sections or bullet lines with a one-line verdict at the end.\n"
+          "For open questions the run_sql tool queries these tables:\n"
+        + facts.ddl()
+    )
+
+
+def _ask_rich(question, history, done, emit, delta):
+    """Native tool-calling for a cloud-class model. The rails stay — resolve,
+    the cage, receipts — but the model decides which tools, how many, and what
+    the answer looks like. This exists because the one-tool pipeline muzzled a
+    120B into 'I can only provide cycle-time completion' on a comparison
+    question the tools could trivially feed."""
+    from modules.cycle_time.chat import openai_compat, sqllane
+    schemas = tools.schema() + [_RUN_SQL_TOOL]
+    messages = [{"role": "system", "content": _rich_system()}]
+    for h in (history or [])[-8:]:
+        role = "assistant" if h.get("role") == "assistant" else "user"
+        if h.get("content"):
+            messages.append({"role": role, "content": str(h["content"])[:2000]})
+    messages.append({"role": "user", "content": question})
+
+    calls, sources, sqls, last_rows = [], [], [], None
+    for _ in range(_MAX_ROUNDS):
+        try:
+            # The CLOUD directly, never llm.chat: its per-call fallback would
+            # hand these tool schemas to the local 8B, which cannot drive the
+            # loop (and Ollama 400s on the schema format).
+            msg = openai_compat.chat(messages, tools=schemas)
+            llm.note_answered(llm.MODEL)
+        except llm.LLMError as e:
+            log.warning("chat agent loop lost the cloud (%s)", e)
+            if not calls:
+                return None                      # classic local pipeline instead
+            break                                # compose from what was gathered
+        tcs = msg.get("tool_calls") or []
+        if not tcs:
+            text = _strip_meta((msg.get("content") or "").strip())
+            if not text:
+                break
+            emit("delta", text)
+            lane = "cycletime" if calls else "general"
+            out = done(text, lane, intent="agent",
+                       grounded=any(c["ok"] for c in calls),
+                       calls=calls, sources=sources)
+            if sqls:
+                out["sql"] = "\n".join(sqls)
+            if last_rows and (last_rows["row_count"] > 1 or len(last_rows["columns"]) > 1):
+                out["table"] = {"columns": last_rows["columns"],
+                                "rows": last_rows["rows"]}
+            return out
+
+        messages.append({"role": "assistant", "content": msg.get("content") or "",
+                         "tool_calls": tcs})
+        for tc in tcs[:4]:
+            name = (tc.get("function") or {}).get("name") or ""
+            try:
+                args = json.loads((tc.get("function") or {}).get("arguments") or "{}")
+            except ValueError:
+                args = {}
+            emit("stage", f"{name}...")
+            if name == "run_sql":
+                result = sqllane.execute_checked(str(args.get("sql") or ""), question)
+                if result.get("sql"):
+                    sqls.append(result["sql"])
+                if not result.get("error"):
+                    last_rows = {k: result[k] for k in ("columns", "rows", "row_count")}
+            else:
+                result = tools.call(name, args)
+            ok = "error" not in result
+            calls.append({"tool": name, "args": args, "ok": ok})
+            src = result.get("_src")
+            if src and src not in sources:
+                sources.append(src)
+            log.info("chat agent: %s(%s) -> %s", name, str(args)[:120],
+                     "ok" if ok else "error:" + str(result.get("error")))
+            slim = {k: (f"[{len(v)} items, first 25: " + json.dumps(v[:25], default=str) + "]"
+                        if isinstance(v, list) and len(v) > 25 else v)
+                    for k, v in result.items()}
+            messages.append({"role": "tool", "tool_call_id": tc.get("id") or name,
+                             "content": json.dumps(slim, default=str)[:5000]})
+
+    # Rounds exhausted or empty reply - answer from EVERYTHING gathered, not
+    # the last fetch: a comparison that lost the cloud after two workcell
+    # pulls still has both workcells in hand.
+    emit("stage", "writing...")
+    gathered = [m for m in messages if m.get("role") == "tool"]
+    if gathered:
+        combined = {"results": [json.loads(g["content"]) for g in gathered[-6:]]}
+        text = _compose(question, [combined], "", delta)
+    else:
+        text = "I could not work that one out - try naming a workcell or model."
+    out = done(text, "cycletime", intent="agent",
+               grounded=any(c["ok"] for c in calls), calls=calls, sources=sources)
+    if sqls:
+        out["sql"] = "\n".join(sqls)
+    return out
+
+
 def ask(question: str, history: list[dict] | None = None,
         on_event=None) -> dict:
     """Answer one question.
@@ -231,6 +385,19 @@ def ask(question: str, history: list[dict] | None = None,
         return done(f"The local model is not available. {detail}", "error",
                     error="ollama_unavailable")
 
+    # A cloud-class brain gets the agent loop: its own tool choices, its own
+    # rounds. The deterministic fast paths above (instant, exact definitions)
+    # still run first because free beats smart.
+    if llm.rich():
+        exact = glossary.define(question) if router.concept_question(question) else None
+        if exact:
+            return done(exact, "cycletime", grounded=True, sources=["glossary"])
+        out = _ask_rich(question, history, done, emit, delta)
+        if out is not None:
+            return out
+        # Cloud died before gathering anything — the classic local pipeline
+        # below answers instead. Slower and terser, never an error bubble.
+
     # L1 — one structured call. Degrades to a lexicon guess, never raises.
     emit("stage", "routing…")
     r = router.repair(router.route(question, history), question)
@@ -238,7 +405,7 @@ def ask(question: str, history: list[dict] | None = None,
     if r["domain"] == "general":
         try:
             emit("stage", "writing…")
-            return done(_general(question, history, _GENERAL_PROMPT, delta), "general")
+            return done(_general(question, history, _general_prompt(), delta), "general")
         except llm.LLMError as e:
             return done(f"The local model failed: {e}", "error", error="ollama_failed")
 
@@ -274,13 +441,16 @@ def ask(question: str, history: list[dict] | None = None,
                        intent="open_query", grounded=True, calls=calls,
                        sources=[result["_src"]])
         else:
-            # The model writes a short LEAD-IN sentence; the numbers themselves
-            # ship as structured rows the UI renders as a real table. The
-            # sentence cannot replace the table — only introduce it — so a
-            # paraphrase slip is visible against the rows printed under it.
+            # The model writes the PROSE; the numbers themselves ship as
+            # structured rows the UI renders as a real table. The prose cannot
+            # replace the table — only accompany it — so a paraphrase slip is
+            # visible against the rows printed under it. A rich model sees the
+            # full result and answers every part of the question; the local 8B
+            # sees 8 rows and writes one lead-in sentence.
             emit("stage", "writing…")
+            n_rows = 40 if llm.rich() else 8
             slim = {"question_result": True, "columns": result["columns"],
-                    "rows": result["rows"][:8], "row_count": result["row_count"],
+                    "rows": result["rows"][:n_rows], "row_count": result["row_count"],
                     "_src": result["_src"]}
             text = _compose(question, [slim], "", delta)
             if text.startswith("Here is what I found"):   # compose gave up

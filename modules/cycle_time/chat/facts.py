@@ -61,7 +61,7 @@ MODEL_COLS: dict[str, tuple[str | None, str, str]] = {
     "unmapped_steps": ("unmapped", "BIGINT", "MES steps nobody has mapped to an IEDB process yet"),
     "coverage_pct":  ("coverage", "DOUBLE", "present_steps / expected_steps * 100, NULL when nothing expected"),
     "lbr":           ("lbr", "DOUBLE", "labour ratio, may be NULL"),
-    "bottleneck_ct_s": ("bottleneck_ct", "DOUBLE", "slowest station cycle time in seconds, may be NULL"),
+    "bottleneck_ct_s": ("bottleneck_ct", "DOUBLE", "slowest station CT in seconds over ALL models incl. never-built ones — for 'longest cycle time / process' questions use llm_process_facts instead"),
     "station_count": ("station_count", "BIGINT", "stations on the IEDB route"),
     "bom_materials": (None, "BIGINT", "materials on the MES BOM; 0 = no BOM loaded for it"),
     "last_build":    ("last_build", "TEXT", "when MES last saw it built (ISO date), may be NULL"),

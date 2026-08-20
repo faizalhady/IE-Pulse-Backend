@@ -177,6 +177,25 @@ def _execute(sql: str) -> dict:
     return {"columns": list(df.columns), "rows": rows, "row_count": len(rows)}
 
 
+def execute_checked(sql: str, question: str = "") -> dict:
+    """The cage without the model: validate, rewrite, execute one SELECT the
+    caller already has. The agentic loop uses this — the big model writes its
+    own SQL as a tool argument, and every layer of the cage still applies."""
+    bad = validate(sql)
+    if not bad and question and _SUPERLATIVE_RE.search(question)             and not re.search(r"order\s+by", sql, re.I):
+        bad = ("the question asks for a superlative but the query has no "
+               "ORDER BY - add ORDER BY <measure> DESC/ASC with a small LIMIT")
+    if bad:
+        return {"error": "sql_rejected", "detail": bad, "sql": sql}
+    fixed = _ensure_workcell(_fix_workcells(sql))
+    try:
+        out = _execute(fixed)
+    except Exception as e:                       # noqa: BLE001
+        return {"error": "sql_failed", "detail": str(e)[:300], "sql": fixed}
+    return {"_src": "read-only SQL over the demand mart (llm facts views)",
+            "sql": fixed, **out}
+
+
 def run(question: str) -> dict:
     """-> {_src, sql, columns, rows, row_count} or {error, detail, sql?}."""
     messages = [{"role": "system", "content": _prompt()}]

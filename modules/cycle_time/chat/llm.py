@@ -48,9 +48,22 @@ _answered: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "chat_answered_by", default=None)
 
 
+def rich() -> bool:
+    """True when the configured primary is a cloud-class model — the compose
+    muzzle (one short sentence, tiny payloads) exists for the local 8B and
+    comes OFF for a big brain. Checked at question time, config-only."""
+    return _cloud_ready()
+
+
 def answered_by() -> str | None:
     """The model that served the most recent call on THIS request thread."""
     return _answered.get()
+
+
+def note_answered(name: str) -> None:
+    """For callers that talk to a backend directly (the rich agent loop) so
+    the payload's model label stays truthful."""
+    _answered.set(name)
 
 
 def reset_answered() -> None:
@@ -119,7 +132,7 @@ def chat_stream(messages: list[dict], temperature: float = 0.0):
         yield piece
 
 
-__all__ = ["available", "chat", "chat_stream", "answered_by", "reset_answered",
+__all__ = ["available", "chat", "chat_stream", "answered_by", "reset_answered", "rich",
            "MODEL", "LLMError"]
 
 
