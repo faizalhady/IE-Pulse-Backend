@@ -172,23 +172,6 @@ def run(question: str) -> dict:
     return {"error": "sql_failed", "detail": last_err, "sql": sql}
 
 
-def render(out: dict) -> str:
-    """Deterministic text for a result table. The model never phrases more than
-    one number — a sentence that misquotes a table reads exactly like one that
-    did not."""
-    rows, cols = out["rows"], out["columns"]
-    if not rows:
-        return "The query ran but matched nothing."
-    if len(rows) == 1 and len(cols) == 1:
-        return f"{cols[0].replace('_', ' ')}: {rows[0][cols[0]]}"
-    show = rows[:10]
-    head = " | ".join(cols)
-    line = " | ".join("---" for _ in cols)
-    body = "\n".join(" | ".join(str(r.get(c, "")) for c in cols) for r in show)
-    extra = f"\n… {len(rows) - len(show)} more rows" if len(rows) > len(show) else ""
-    return f"{head}\n{line}\n{body}{extra}"
-
-
 if __name__ == "__main__":
     # The cage is the part that must hold without a model.
     assert validate("SELECT * FROM llm_model_facts") is None

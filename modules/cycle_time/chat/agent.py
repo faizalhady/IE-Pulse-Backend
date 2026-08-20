@@ -265,15 +265,27 @@ def ask(question: str, history: list[dict] | None = None,
             out = done("I could not build a safe query for that — try naming a "
                        "workcell, a status, or a measure from the data.",
                        "cycletime", intent="open_query", calls=calls)
+        elif not result["rows"]:
+            out = done("The query ran but matched nothing.", "cycletime",
+                       intent="open_query", grounded=True, calls=calls,
+                       sources=[result["_src"]])
         else:
-            # One number gets a sentence; a table is rendered deterministically —
-            # an 8B model paraphrasing 10 rows WILL misquote one eventually.
-            if result["row_count"] == 1 and len(result["columns"]) == 1:
-                text = _compose(question, [result], "")
-            else:
-                text = sqllane.render(result)
+            # The model writes a short LEAD-IN sentence; the numbers themselves
+            # ship as structured rows the UI renders as a real table. The
+            # sentence cannot replace the table — only introduce it — so a
+            # paraphrase slip is visible against the rows printed under it.
+            emit("stage", "writing…")
+            slim = {"question_result": True, "columns": result["columns"],
+                    "rows": result["rows"][:8], "row_count": result["row_count"],
+                    "_src": result["_src"]}
+            text = _compose(question, [slim], "", delta)
+            if text.startswith("Here is what I found"):   # compose gave up
+                text = f"{result['row_count']} result rows below."
             out = done(text, "cycletime", intent="open_query", grounded=True,
                        calls=calls, sources=[result["_src"]])
+            if result["row_count"] > 1 or len(result["columns"]) > 1:
+                out["table"] = {"columns": result["columns"],
+                                "rows": result["rows"]}
         if result.get("sql"):
             out["sql"] = result["sql"]
         return out
