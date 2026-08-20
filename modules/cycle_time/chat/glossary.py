@@ -77,6 +77,43 @@ RULES:
 """
 
 
+#: Term -> its definition, VERBATIM the concepts above. Served deterministically
+#: for "what does X mean" — exact, instant, and immune to an 8B paraphrase that
+#: rounds "cannot_check" into "not checked yet" (they are opposite advices: one
+#: says wait, the other says waiting is pointless).
+DEFINITIONS: dict[str, str] = {
+    "workcell": "A workcell is a CUSTOMER — the customer-dedicated production organisation. It is never a workstation, a station, or a cell on a line.",
+    "model": "A model (= assembly) is a part number, identified by (workcell, assembly) together — two workcells can build the same part number as two different models with different routes.",
+    "assembly": "An assembly (= model) is a part number, identified by (workcell, assembly) together.",
+    "complete": "Complete: every step MES actually ran for the model is named in IEDB and has a cycle time.",
+    "incomplete": "Incomplete (\"Missing CT\"): the model is in IEDB and timed, but there are gaps versus what the floor actually runs.",
+    "no_cycle_time": "No cycle time: the model is in IEDB but nobody has timed it yet.",
+    "not_in_iedb": "Not in IEDB: the model is not in IEDB at all.",
+    "not_built": "Not built yet: MES has no build record for it yet — wait for one.",
+    "cannot_check": "Cannot be checked: the WORKCELL is not on MES, so no scan will ever arrive. Waiting is pointless — this is different from not_built, where waiting works.",
+    "demand": "Demand (\"Planned\") scope: what we are building or about to build — the 13-week planner sheet plus the MES ~4-week projection. The default scope for \"how are we doing\".",
+    "scope": "Two scopes: DEMAND (planned — what we are building) and ALL MODELS (every model that exists, including ones nobody ordered). Always say which one a number used.",
+    "coverage": "Coverage: the share of a model's MES steps that are named in IEDB with a cycle time — present steps over expected steps.",
+    "unmapped": "Unmapped: a MES step nobody has mapped to an IEDB process yet, so it cannot be checked for a cycle time.",
+    "iedb": "IEDB is the IE database holding routes and cycle times — the system this module measures MES reality against.",
+    "mes": "MES is the shop-floor execution system — what the floor actually runs and scans. It is the ground truth for which steps a model really has.",
+}
+
+
+def define(question: str) -> str | None:
+    """The deterministic answer to a definition question, or None.
+
+    Longest term wins ("no cycle time" before "cycle"); exactly-one-match wins
+    ("what is a workcell" -> workcell). More than one distinct hit means the
+    question is really a comparison, and the model + full glossary handles it.
+    """
+    import re
+    q = " " + re.sub(r"[^a-z0-9]+", " ", question.lower()) + " "
+    hits = [t for t in DEFINITIONS if f" {t.replace('_', ' ')} " in q]
+    hits = [t for t in hits if not any(t != o and t.replace("_", " ") in o.replace("_", " ") for o in hits)]
+    return DEFINITIONS[hits[0]] if len(hits) == 1 else None
+
+
 def _live_facts() -> str:
     """The quantities, read fresh. Never hardcoded — see the module docstring.
 
@@ -105,6 +142,11 @@ def system_prompt() -> str:
 
 
 if __name__ == "__main__":
+    assert "CUSTOMER" in define("what is a workcell")
+    assert "Waiting is pointless" in define("what does cannot_check mean")
+    assert define("what does no cycle time mean") == DEFINITIONS["no_cycle_time"]
+    assert define("difference between not_built and cannot_check") is None  # two hits
+    assert define("what is the meaning of life") is None
     p = system_prompt()
     assert "WORKCELL = CUSTOMER" in p
     assert "cannot_check" in p and "not_built" in p

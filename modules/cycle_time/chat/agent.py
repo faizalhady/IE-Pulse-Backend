@@ -219,7 +219,12 @@ def ask(question: str, history: list[dict] | None = None) -> dict:
 
     if r["intent"] == "none":
         # In-domain but no tool answers it — usually a concept question ("what
-        # does cannot_check mean"). The glossary IS that answer's source.
+        # does cannot_check mean"). The glossary IS that answer's source, and
+        # when exactly one known term is named the definition is served
+        # verbatim: instant, exact, and immune to paraphrase.
+        exact = glossary.define(question)
+        if exact:
+            return done(exact, "cycletime", grounded=True, sources=["glossary"])
         try:
             return done(_general(question, history, glossary.system_prompt()),
                         "cycletime", sources=["glossary"])
