@@ -61,20 +61,34 @@ def available() -> tuple[bool, str]:
 
 
 def chat(messages: list[dict], tools: list[dict] | None = None,
-         temperature: float = 0.0) -> dict:
+         temperature: float = 0.0, format: dict | str | None = None) -> dict:
     """One /api/chat round trip. Returns the `message` object.
 
     temperature 0 by default: this is routing and argument extraction, where a
     sampled answer is just a less reliable one.
+
+    `format` is a JSON schema (Ollama structured outputs): the decoder masks
+    every token that would break the schema, so the reply IS the schema — the
+    model cannot pick a nonexistent enum value or wander into prose. This is a
+    grammar constraint, not a request, which is why the router trusts it.
+
+    keep_alive -1 pins the model in VRAM. Loading 5 GB is seconds; a chatbot
+    that pays that on the first question after every idle period feels broken.
     """
     body = {
         "model": OLLAMA_MODEL,
         "messages": messages,
         "stream": False,
-        "options": {"temperature": temperature, "num_ctx": OLLAMA_NUM_CTX},
+        "keep_alive": -1,
+        # num_predict caps a runaway generation; every legitimate reply here
+        # is a routing form or one short sentence, far under 300 tokens.
+        "options": {"temperature": temperature, "num_ctx": OLLAMA_NUM_CTX,
+                    "num_predict": 300},
     }
     if tools:
         body["tools"] = tools
+    if format:
+        body["format"] = format
 
     req = urllib.request.Request(
         f"{OLLAMA_BASE_URL}/api/chat",

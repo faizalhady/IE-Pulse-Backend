@@ -1,42 +1,44 @@
 """
 agent.py  (cycle_time.chat)
 ───────────────────────────
-The loop: question -> pick a tool -> run it -> answer from what it returned.
+The loop: question -> lane -> (maybe a tool) -> answer from what came back.
+
+THREE LANES, DECIDED BY router.py
+  instant    greetings/thanks/help. Code, zero model calls. Was 9.5s, is ~0.
+  general    not about our data. One plain chat call, and the payload says
+             grounded:false — the UI must not dress a memory answer up as a
+             sourced one.
+  cycletime  routed to ONE tool by a structured call (a fixed form the model
+             fills under a grammar — it cannot invent an intent or emit prose),
+             then the tool runs, then a second call writes the sentence.
 
 TWO PROMPTS, ONE MODEL — AND THAT ORDER MATTERS
-  Routing and writing want opposite prompts, and doing both in one call makes both
-  worse. Measured on llama3.1:8b:
-    - a ONE-LINE system prompt + terse tools ......... 6/7 questions routed right
-    - the same tools under the full glossary ......... routing degraded; it began
-      answering "which keysight models have no cycle time" with model_status, and
-      echoed raw tool-call JSON into its own reply
-  A small model treats the system prompt as a pattern to imitate, so a long one
-  crowds out the schema. But the glossary is exactly what the ANSWER needs, or the
-  reply says "31.7% complete" without saying by models, by units, or in what scope.
+  Routing and writing want opposite prompts, and doing both in one call makes
+  both worse (measured on llama3.1:8b: the full glossary attached to routing
+  degraded it to answering the wrong question and echoing tool JSON). So: route
+  under router._route_prompt() with a forced schema, then write the sentence
+  under the glossary with NO tools attached. One model, loaded once and pinned
+  (keep_alive), two short calls.
 
-  So: route under `_ROUTE_PROMPT` with tools attached, then write the sentence
-  under the glossary with NO tools attached. One model, loaded once, two calls.
-  A chain of two MODELS would swap 5 GB in and out of an 8 GB card per question.
+THE MODEL ROUTES AND WRITES. IT DOES NOT COMPUTE, AND IT DOES NOT LOOK UP.
+  Every number in a grounded answer came from a mart the frontend also reads.
+  resolve.py decides what names mean; tools.py computes; the model fills a form
+  and phrases a sentence. That split is what makes an 8B model on a laptop GPU
+  trustworthy here.
 
-THE MODEL ROUTES. IT DOES NOT COMPUTE, AND IT DOES NOT LOOK ANYTHING UP.
-  Two jobs only: choose a tool, and extract its arguments. Every number in the
-  answer came from a mart the frontend also reads. That split is what makes an 8B
-  model on a laptop GPU trustworthy for this — it is reliable at routing (measured
-  6/7) and would be hopeless at deriving a completion percentage.
-
-WHY THERE IS A SECOND ROUND
-  A tool can answer with a QUESTION rather than data: "arista" matches two real
-  workcells, so `resolve` refuses to pick and returns the candidates. Feeding that
-  back lets the model ask the user which one. Without the second round the only
-  possible replies are a wrong guess or a dead end, and the wrong guess is worse
-  because it reads exactly like a right one.
-
-  `_MAX_ROUNDS` is 3: route, repair once, answer. A small model given an unbounded
-  loop will happily call `list_workcells` forever.
+ERRORS ARE ANSWERS, NOT ROUNDS
+  A tool that answers with a question ("arista" is two workcells — which?) or a
+  miss (not found, here are the closest) already produced exactly the right
+  text deterministically. The old design fed errors back to the model for
+  another round; the model then guessed, and a wrong guess reads exactly like a
+  right answer. No more rounds: deterministic repair happens in tools.call()
+  (workcell-in-model-slot is auto-redirected) and router.repair(); whatever
+  still comes back as an error IS the reply.
 
 EVERY ANSWER SHOWS ITS SOURCE
-  `sources` and `calls` ride back with the text. This is meant to replace IEDB;
-  people do not move onto a system whose numbers they cannot check.
+  `sources`, `calls`, `lane`, `intent`, `grounded` ride back with the text, and
+  every turn is appended to logs/chat_turns.jsonl — real questions are the eval
+  set we do not have to invent.
 """
 
 from __future__ import annotations
@@ -45,31 +47,20 @@ import json
 import logging
 import time
 
-from modules.cycle_time.chat import glossary, ollama, tools
+from modules.cycle_time.chat import glossary, ollama, router, tools
 
 log = logging.getLogger(__name__)
 
-#: Deliberately tiny. Every sentence added here cost routing accuracy — see the
-#: module docstring. The vocabulary lives in the ANSWER prompt, where it helps.
-_ROUTE_PROMPT = (
-    "You answer questions about manufacturing cycle-time data by calling exactly "
-    "one tool. A workcell is a customer name. An assembly is a part number. "
-    "Pass names exactly as the user typed them; never complete or correct a name. "
-    # ponytail: the ONE sentence that buys an escape hatch. "hello" had no path
-    # that did not end in a tool, so it routed to the cheapest tool taking no
-    # arguments - list_workcells - and composed "There are 34 workcells with
-    # demand." Ceiling: permission to skip a tool is permission the model can
-    # misuse on a real question. If routing accuracy drops, the upgrade is a
-    # deterministic gate BEFORE the model, not more prompt.
-    "If the message is not a question about this data - a greeting, small talk, "
-    "or a question about you - call NO tool and reply in one short sentence."
-)
-
-#: route -> repair once. See the module docstring.
-_MAX_ROUNDS = 3
-
 #: Guard against a model that answers with a wall of text on a 1-line question.
 _MAX_ANSWER_CHARS = 1200
+
+#: The general lane's whole personality. Short on purpose.
+_GENERAL_PROMPT = (
+    "You are the IE-Pulse assistant for Jabil Penang's IE team. The user's "
+    "message is not about cycle-time data. Reply helpfully in one or two short "
+    "sentences. If they might actually want data, tell them to name a workcell "
+    "or a model part number."
+)
 
 
 def _fallback(results: list[dict]) -> str:
@@ -154,96 +145,121 @@ def _compose(question: str, results: list[dict], routed_text: str) -> str:
     return _strip_meta(text)
 
 
-def ask(question: str, history: list[dict] | None = None) -> dict:
-    """Answer one question.
-
-    -> {answer, calls:[{tool, args, ok}], sources:[str], model, elapsed_s, error?}
-    """
-    t0 = time.time()
-    ok, detail = ollama.available()
-    if not ok:
-        return {"answer": f"The local model is not available. {detail}",
-                "calls": [], "sources": [], "error": "ollama_unavailable",
-                "elapsed_s": round(time.time() - t0, 1)}
-
-    messages: list[dict] = [{"role": "system", "content": _ROUTE_PROMPT}]
-    # Prior turns carry context ("and its BOM?"), but only the text — replaying
-    # old tool payloads would blow an 8k window in three questions.
+def _general(question: str, history: list[dict] | None, system: str) -> str:
+    """One plain chat call — the general lane, and the concept lane when the
+    system prompt is the glossary."""
+    messages = [{"role": "system", "content": system}]
     for h in (history or [])[-6:]:
         role = "assistant" if h.get("role") == "assistant" else "user"
         if h.get("content"):
             messages.append({"role": role, "content": str(h["content"])[:1500]})
     messages.append({"role": "user", "content": question})
+    msg = ollama.chat(messages)
+    return _strip_meta((msg.get("content") or "").strip()) or \
+        "I did not catch that — ask me about a workcell or a model."
 
-    calls: list[dict] = []
-    results: list[dict] = []
-    schema = tools.schema()
 
-    for rnd in range(_MAX_ROUNDS):
+def _log_turn(question: str, out: dict) -> None:
+    """One jsonl line per turn. Real usage is the eval set nobody has to invent.
+    Never fatal — a full disk must not take the chat down."""
+    try:
+        from modules.cycle_time.config import BASE_DIR
+        p = BASE_DIR / "logs" / "chat_turns.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "q": question[:300], "lane": out.get("lane"),
+                "intent": out.get("intent"), "grounded": out.get("grounded"),
+                "ok": not out.get("error"), "elapsed_s": out.get("elapsed_s"),
+            }, ensure_ascii=False) + "\n")
+    except Exception:                            # noqa: BLE001
+        log.debug("chat: turn log write failed", exc_info=True)
+
+
+def ask(question: str, history: list[dict] | None = None) -> dict:
+    """Answer one question.
+
+    -> {answer, lane, intent, grounded, calls:[{tool, args, ok}], sources:[str],
+        model, elapsed_s, error?}
+    """
+    t0 = time.time()
+
+    def done(answer: str, lane: str, *, intent: str = "none", grounded: bool = False,
+             calls: list | None = None, sources: list | None = None,
+             error: str | None = None) -> dict:
+        out = {"answer": answer[:_MAX_ANSWER_CHARS].strip(), "lane": lane,
+               "intent": intent, "grounded": grounded,
+               "calls": calls or [], "sources": sources or [],
+               "model": ollama.OLLAMA_MODEL, "elapsed_s": round(time.time() - t0, 1)}
+        if error:
+            out["error"] = error
+        _log_turn(question, out)
+        return out
+
+    # L0 — before the availability check on purpose: a greeting deserves a
+    # greeting even while Ollama is down.
+    canned = router.instant(question)
+    if canned:
+        return done(canned, "instant")
+
+    ok, detail = ollama.available()
+    if not ok:
+        return done(f"The local model is not available. {detail}", "error",
+                    error="ollama_unavailable")
+
+    # L1 — one structured call. Degrades to a lexicon guess, never raises.
+    r = router.repair(router.route(question, history))
+
+    if r["domain"] == "general":
         try:
-            msg = ollama.chat(messages, tools=schema)
+            return done(_general(question, history, _GENERAL_PROMPT), "general")
         except ollama.OllamaError as e:
-            return {"answer": f"The local model failed: {e}", "calls": calls,
-                    "sources": [], "error": "ollama_failed",
-                    "elapsed_s": round(time.time() - t0, 1)}
+            return done(f"The local model failed: {e}", "error", error="ollama_failed")
 
-        wanted = ollama.tool_calls(msg)
-        if not wanted:
-            answer = _compose(question, results, msg.get("content") or "")
-            break
+    if r["intent"] == "none":
+        # In-domain but no tool answers it — usually a concept question ("what
+        # does cannot_check mean"). The glossary IS that answer's source.
+        try:
+            return done(_general(question, history, glossary.system_prompt()),
+                        "cycletime", sources=["glossary"])
+        except ollama.OllamaError as e:
+            return done(f"The local model failed: {e}", "error", error="ollama_failed")
 
-        messages.append({"role": "assistant", "content": msg.get("content") or "",
-                         "tool_calls": msg.get("tool_calls")})
-        for name, args in wanted[:3]:            # one question, not a batch job
-            out = tools.call(name, args)
-            results.append(out)
-            calls.append({"tool": name, "args": args, "ok": "error" not in out})
-            log.info("chat: %s(%s) -> %s", name, args,
-                     "error:" + str(out.get("error")) if "error" in out else "ok")
-            messages.append({"role": "tool", "name": name,
-                             "content": json.dumps(out, default=str)[:2000]})
+    args = router.tool_args(r)
+    result = tools.call(r["intent"], args)
+    calls = [{"tool": r["intent"], "args": args, "ok": "error" not in result}]
+    log.info("chat: %s(%s) -> %s", r["intent"], args,
+             "error:" + str(result.get("error")) if "error" in result else "ok")
 
-        # A tool that ANSWERED ends the loop. Another round with the schema
-        # attached only invites the model to write its own summary — on the BOM
-        # question it produced 1,185 wasted characters in 22.4s, which _compose
-        # then discarded. Rounds exist to repair an ERROR (ambiguous name, wrong
-        # slot), so only an error earns one.
-        if results and not results[-1].get("error"):
-            answer = _compose(question, results, "")
-            break
-    else:
-        # Ran out of rounds still wanting tools — answer from what we have.
-        answer = _compose(question, results, "")
+    if result.get("error"):
+        # Deterministic text (which-one / not-found / suggestions) IS the reply.
+        return done(_fallback([result]), "cycletime", intent=r["intent"], calls=calls)
 
-    sources = []
-    for r in results:
-        s = r.get("_src")
-        if s and s not in sources:
-            sources.append(s)
-
-    return {"answer": answer[:_MAX_ANSWER_CHARS].strip(),
-            "calls": calls, "sources": sources,
-            "model": ollama.OLLAMA_MODEL if hasattr(ollama, "OLLAMA_MODEL") else None,
-            "elapsed_s": round(time.time() - t0, 1)}
+    answer = _compose(question, [result], "")
+    sources = [result["_src"]] if result.get("_src") else []
+    return done(answer, "cycletime", intent=r["intent"], grounded=True,
+                calls=calls, sources=sources)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     import sys
     qs = [" ".join(sys.argv[1:])] if len(sys.argv) > 1 else [
-        "hello",                                       # must call NO tool
+        "hello",                                       # instant, 0 model calls
         "how many % complete for keysight",
         "how complete is arista",                      # ambiguous on purpose
-        "which keysight models have no cycle time",
+        "what is the capital of france",               # general lane
         "show me the bom for PCA-01156-15",
     ]
     for q in qs:
         r = ask(q)
         print(f"\nQ: {q}\nA: {r['answer']}")
-        print(f"   calls={[c['tool'] for c in r['calls']]}  {r['elapsed_s']}s")
-        # The greeting is the regression this list exists to catch: any tool at
-        # all here means the escape hatch in _ROUTE_PROMPT stopped working.
-        if q == "hello":
-            assert not r["calls"], f"'hello' called {[c['tool'] for c in r['calls']]}"
+        print(f"   lane={r['lane']} intent={r['intent']} grounded={r['grounded']} "
+              f"calls={[c['tool'] for c in r['calls']]}  {r['elapsed_s']}s")
         if r["sources"]:
             print(f"   sources: {'; '.join(r['sources'])}")
+        # The greeting is the regression this list exists to catch.
+        if q == "hello":
+            assert r["lane"] == "instant" and not r["calls"] and r["elapsed_s"] < 1, r
+    print("\nagent smoke OK — run modules.cycle_time.chat.eval for the full set")
