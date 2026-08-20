@@ -84,6 +84,8 @@ def _prompt() -> str:
         "- status values are exactly the six listed; 'planned' or 'in demand' "
         "means WHERE has_demand.\n"
         "- Name result columns clearly. ROUND percentages to 1 decimal.\n"
+        "- When selecting from llm_model_facts, ALWAYS select workcell next to "
+        "assembly — a model is (workcell, assembly) together.\n"
         "- At most LIMIT 50."
     )
 
@@ -110,6 +112,30 @@ def validate(sql: str) -> str | None:
         if t.lower() not in _TABLES and t.lower() not in ctes:
             return f"table not allowed: {t}"
     return None
+
+
+def _ensure_workcell(sql: str) -> str:
+    """A model is (workcell, assembly) TOGETHER — an assembly column alone is
+    half an identity, unclickable in the UI and ambiguous across workcells.
+    When a model-facts query projects assembly without workcell, workcell is
+    added to the SELECT (and to a GROUP BY that groups on assembly). Anything
+    this cannot rewrite safely — CTEs, grouping not on assembly — is left
+    exactly as written."""
+    if not re.search(r"\bllm_model_facts\b", sql, re.I):
+        return sql
+    if re.search(r"\bworkcell\b", sql, re.I):
+        return sql
+    m = re.match(r"^\s*select\s+(distinct\s+)?(.+?)\s+from\b", sql, re.I | re.S)
+    if not m or not re.search(r"\bassembly\b", m.group(2), re.I):
+        return sql
+    gb = re.search(r"\bgroup\s+by\s+(.+?)(?=\border\s+by\b|\blimit\b|$)", sql, re.I | re.S)
+    if gb and not re.search(r"\bassembly\b", gb.group(1), re.I):
+        return sql                               # grouped on something else — do not touch
+    out = sql[:m.start(2)] + "workcell, " + sql[m.start(2):]
+    if gb:
+        g2 = re.search(r"\bgroup\s+by\s+", out, re.I)
+        out = out[:g2.end()] + "workcell, " + out[g2.end():]
+    return out
 
 
 def _fix_workcells(sql: str) -> str:
@@ -157,7 +183,7 @@ def run(question: str) -> dict:
         if bad:
             last_err = bad
         else:
-            sql = _fix_workcells(sql)
+            sql = _ensure_workcell(_fix_workcells(sql))
             try:
                 out = _execute(sql)
                 log.info("chat sql ok (%d rows): %s", out["row_count"], sql[:200])
@@ -183,6 +209,17 @@ if __name__ == "__main__":
     assert validate("INSTALL httpfs")
     assert _fix_workcells("workcell = 'lam research'") == "workcell_key = 'LAMRESEARCH'"
     assert _fix_workcells("workcell_key = 'key sight'") == "workcell_key = 'KEYSIGHT'"
+    # assembly never travels without its workcell
+    assert _ensure_workcell("SELECT assembly, units FROM llm_model_facts ORDER BY units DESC LIMIT 3") \
+        == "SELECT workcell, assembly, units FROM llm_model_facts ORDER BY units DESC LIMIT 3"
+    assert _ensure_workcell("SELECT assembly, COUNT(*) c FROM llm_model_facts GROUP BY assembly") \
+        == "SELECT workcell, assembly, COUNT(*) c FROM llm_model_facts GROUP BY workcell, assembly"
+    s = "SELECT workcell, assembly FROM llm_model_facts"
+    assert _ensure_workcell(s) == s                       # already there — untouched
+    s = "SELECT plant, COUNT(*) FROM llm_model_facts GROUP BY plant"
+    assert _ensure_workcell(s) == s                       # no assembly — untouched
+    s = "SELECT assembly FROM llm_workcell_facts"
+    assert _ensure_workcell(s) == s                       # wrong table — untouched
     r = _execute("SELECT workcell_key, models FROM llm_workcell_facts ORDER BY models DESC")
     assert r["row_count"] <= 50 and "models" in r["columns"]
     try:

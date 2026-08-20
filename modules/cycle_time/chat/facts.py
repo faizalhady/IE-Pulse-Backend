@@ -63,6 +63,7 @@ MODEL_COLS: dict[str, tuple[str | None, str, str]] = {
     "lbr":           ("lbr", "DOUBLE", "labour ratio, may be NULL"),
     "bottleneck_ct_s": ("bottleneck_ct", "DOUBLE", "slowest station cycle time in seconds, may be NULL"),
     "station_count": ("station_count", "BIGINT", "stations on the IEDB route"),
+    "bom_materials": (None, "BIGINT", "materials on the MES BOM; 0 = no BOM loaded for it"),
     "last_build":    ("last_build", "TEXT", "when MES last saw it built (ISO date), may be NULL"),
 }
 
@@ -88,6 +89,30 @@ def _num(s) -> pd.Series:
     return pd.to_numeric(s, errors="coerce")
 
 
+def _bom_counts() -> pd.DataFrame:
+    """(join key -> material count) for every model with a fetched BOM.
+
+    "top 3 most materials model" was answered with UNITS because the views had
+    no material column — the model grabbed the nearest number and the answer
+    read perfectly. Counts ride bom.py's cached bridge; a model with several
+    revisions takes the largest BOM. Degrades to empty (column = 0 everywhere)
+    when the marts predate bom_id — same stance as the BOM tab."""
+    try:
+        from modules.cycle_time.bom import _bridge
+        from modules.cycle_time.config import CT_MART
+        bm = pd.read_parquet(CT_MART["bom_material"], columns=["bom_id"])
+        per_bom = bm.groupby("bom_id").size().rename("bom_materials")
+        b = _bridge()[["_c", "_a", "bom_id"]]
+        b = b.join(per_bom, on="bom_id")
+        out = (b.dropna(subset=["bom_materials"])
+                .groupby(["_c", "_a"])["bom_materials"].max().reset_index())
+        out["bom_materials"] = out["bom_materials"].astype("int64")
+        return out
+    except Exception as e:                       # noqa: BLE001
+        log.warning("facts: bom counts unavailable (%s)", e)
+        return pd.DataFrame(columns=["_c", "_a", "bom_materials"])
+
+
 def _build_model_facts() -> pd.DataFrame:
     from modules.cycle_time.chat.tools import _demand
     d = _demand("all")
@@ -102,6 +127,11 @@ def _build_model_facts() -> pd.DataFrame:
             # "1.0" and the compose model dressed it up as 100%.
             out[col] = (_num(d["coverage"]) * 100).round(1)
             continue
+        if col == "bom_materials":
+            # Joined below on the SAME normalisation the BOM bridge uses —
+            # raw upper-alnum, NOT canon(): canon folds aliases (COHU -> LTX)
+            # and the bridge does not.
+            continue
         v = d[src] if src in d.columns else None
         if v is None:
             out[col] = None
@@ -113,7 +143,15 @@ def _build_model_facts() -> pd.DataFrame:
             out[col] = v.fillna(False).astype(bool)
         else:
             out[col] = v.astype(str).where(v.notna(), None)
-    # Blank/placeholder workcells carry no answerable question.
+    # BOM material counts, joined on the bridge's own normalisation.
+    key_c = d["customer"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+    key_a = d["assembly"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
+    bc = _bom_counts()
+    joined = pd.DataFrame({"_c": key_c, "_a": key_a}).merge(bc, on=["_c", "_a"], how="left")
+    out["bom_materials"] = joined["bom_materials"].fillna(0).astype("int64").to_numpy()
+    # Blank/placeholder workcells carry no answerable question. Column order
+    # re-asserted to the spec — the DDL and the frame must agree.
+    out = out[list(MODEL_COLS)]
     return out[out["workcell"].astype(str).str.strip("- ").ne("")]
 
 
