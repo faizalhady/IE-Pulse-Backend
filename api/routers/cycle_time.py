@@ -23,7 +23,7 @@ from typing import Optional
 import duckdb
 import pandas as pd
 import pyarrow.parquet as pq
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, Body
 
 from core.auth import require_level, verified_ntid
 from core.mart_cache import mart_key
@@ -1606,7 +1606,9 @@ def ct_completion(
 # demand (planners' Excel, ~13wk). Neither alone is enough — the Excel covers 18
 # workcells, MES covers 39 — so the union is the real scope. Ranked by units,
 # because volume is heavily concentrated: the top 500 models are 88% of it.
-_DEMAND_MARTS = ("projection_runners.parquet", "planner_runners.parquet")
+# One definition, in modules/cycle_time/config.py — see the note there. Aliased
+# rather than re-declared so this file and the BOM pipeline cannot drift apart.
+from modules.cycle_time.config import DEMAND_MARTS as _DEMAND_MARTS
 
 # MES plant codes -> the grouping the floor actually uses.
 _PLANT_REGION = {"JBK": "Batu Kawan", "Plant 1": "Penang Island", "JPE": "Penang Island",
@@ -1998,8 +2000,13 @@ def ct_completion_history(
            latest: {...}, losses:[{status, reason, units, models, pct}],
            by_plant:[...], by_workcell:[...] }
 
-    Units, not models. Volume is concentrated - the top 500 of ~4,100 models are
-    88% of it - so a rate counted by model flatters the number badly.
+    Units, not models. Volume is concentrated - the top 500 of the 4,401 demand
+    models carry 88.1% of it and the top 100 carry 64.9% - so a rate counted by
+    model flatters the number badly. Both are returned; `pct` is units and
+    `pct_models` is the model count, so the two can be compared not confused.
+
+    Scope is DEMAND (4,401), never the universe (57,074) - enforced in
+    completion_history.rollup, which filters on has_demand.
 
     `losses` is the Q3/Q4 half: every non-complete bucket, ranked by the units at
     stake, and complete + losses sums back to 100%.
@@ -2207,6 +2214,46 @@ def ct_completion_line_metrics(
     if not m:
         raise HTTPException(status_code=404, detail=f"No line metrics for {customer} / {assembly} (no priority-1 cycle-time data).")
     return {"customer": customer, "assembly": assembly, **m}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CHAT  —  /api/cycle-time/chat
+# ═══════════════════════════════════════════════════════════════════════════
+# A local LLM answers questions by CALLING the endpoints above, never by writing
+# SQL. The model routes and extracts arguments; every number comes from the same
+# marts these endpoints serve, so the chat cannot disagree with the screen.
+# Names are resolved by deterministic code (modules/cycle_time/chat/resolve.py),
+# never by the model — "arista" is two real workcells and guessing is how one
+# workcell's numbers get reported as another's.
+
+@router.get("/chat/health")
+def ct_chat_health():
+    """Is the local model reachable, and which one.
+      -> {ok, detail, model, tools:[name]}"""
+    from modules.cycle_time.chat import ollama, tools as chat_tools
+    ok, detail = ollama.available()
+    return {"ok": ok, "detail": detail, "model": ollama.OLLAMA_MODEL,
+            "tools": sorted(chat_tools.FUNCS)}
+
+
+@router.post("/chat")
+def ct_chat(body: dict = Body(...)):
+    """Ask a question about cycle-time data.
+
+    Body: {question: str, history?: [{role, content}]}
+      -> {answer, calls:[{tool, args, ok}], sources:[str], elapsed_s, error?}
+
+    Deliberately SYNC: FastAPI runs it in its threadpool, and the module holds a
+    semaphore so one 8 GB card is not asked to run two generations at once.
+    """
+    q = str(body.get("question") or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="question is required")
+    if len(q) > 500:
+        raise HTTPException(status_code=400, detail="question too long (max 500 chars)")
+    from modules.cycle_time.chat.agent import ask
+    hist = body.get("history")
+    return ask(q, hist if isinstance(hist, list) else None)
 
 
 @router.get("/bom")

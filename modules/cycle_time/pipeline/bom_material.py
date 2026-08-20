@@ -15,15 +15,25 @@ WHY IT IS KEYED ON BOM_ID AND NOT ON THE MODEL
   materials; 57k models x 63 materials is 3.6M rows and would break every
   consumer that assumes one row per model.
 
-SCOPE
-  Default is the planner: 2,454 models -> 1,861 distinct BOMs -> ~6 min. That is
-  small enough that `--scope all` (every BOM in mes_assembly_map, 118,973 of
-  them) is a few hours rather than impossible — but nothing needs it yet.
+SCOPE — "demand" MEANS THE SAME THING HERE AS ON THE SCREEN
+  Default is `demand`: every model in config.DEMAND_MARTS, which is the planner
+  sheet UNION the MES projection — the exact set the report's "Planned" chip
+  counts. 4,401 models.
+
+  It used to be a scope called "planner" that read planner_runners alone, 2,454
+  models, while the UI chip said "Planned 4,401". Coverage was then reported as
+  75.5% "of planned" when it was 42.1% of what the screen means by Planned, and
+  1,945 models had never been fetched at all. The two sets overlap by only 472,
+  so the narrow scope was missing roughly half the answer. The scope is named
+  after the thing it selects, and both sides read one tuple in config.
+
+  `--scope all` is every BOM in mes_assembly_map (118,973) — hours, not minutes,
+  and nothing needs it yet.
 
   A bom_id of 0/NULL is a real answer, not a gap: MES has the assembly and no BOM
   was ever loaded. All of LAMGB is like this, and 26% of MES overall.
 
-Run:  python -m modules.cycle_time.pipeline.bom_material            # planner
+Run:  python -m modules.cycle_time.pipeline.bom_material            # demand
       python -m modules.cycle_time.pipeline.bom_material --scope all
       python -m modules.cycle_time.pipeline.bom_material --selftest # offline
 
@@ -37,12 +47,10 @@ import time
 
 import pandas as pd
 
-from modules.cycle_time.config import CT_MART
+from modules.cycle_time.config import CT_MART, DEMAND_MARTS, EB_MART_DIR
 from modules.cycle_time.mes_webapi import post, MESWebApiError
 
 log = logging.getLogger(__name__)
-
-PLANNER = CT_MART["raw"].parent.parent / "ebuild" / "planner_runners.parquet"
 
 #: MES column -> mart column. Anything MES returns that is not here is dropped —
 #: an unmapped column silently changing name is how a mart grows a duplicate.
@@ -67,7 +75,7 @@ def _norm(s):
     return s.astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
 
 
-def bom_ids(scope: str = "planner") -> pd.Series:
+def bom_ids(scope: str = "demand") -> pd.Series:
     """The distinct BOM_IDs to fetch, as ints. Raises when the bridge has no
     bom_id column — that means mes_assembly_map predates this feature and has to
     be rebuilt first, which is a clearer failure than fetching nothing."""
@@ -82,9 +90,19 @@ def bom_ids(scope: str = "planner") -> pd.Series:
     if scope == "all":
         return am["_b"].drop_duplicates()
 
-    if not PLANNER.exists():
-        raise RuntimeError(f"planner mart missing: {PLANNER}")
-    pl = pd.read_parquet(PLANNER, columns=["customer", "assembly"])
+    # Both demand marts, never one: planner-only is 1,982 models and
+    # projection-only is 1,945, overlapping by 472. Reading either alone silently
+    # halves the scope.
+    frames = []
+    for name in DEMAND_MARTS:
+        f = EB_MART_DIR / name
+        if f.exists():
+            frames.append(pd.read_parquet(f, columns=["customer", "assembly"]))
+        else:
+            log.warning("demand mart missing, scope will be narrower: %s", f)
+    if not frames:
+        raise RuntimeError(f"no demand marts found in {EB_MART_DIR}: {DEMAND_MARTS}")
+    pl = pd.concat(frames, ignore_index=True)
     keys = set(_norm(pl["customer"]) + "|" + _norm(pl["assembly"]))
     am["_k"] = _norm(am["customer"]) + "|" + _norm(am["number"])
     return am[am["_k"].isin(keys)]["_b"].drop_duplicates()
@@ -126,7 +144,7 @@ def _write(rows: list[dict], prior: pd.DataFrame | None) -> pd.DataFrame:
     return df
 
 
-def run(scope: str = "planner", resume: bool = True) -> bool:
+def run(scope: str = "demand", resume: bool = True) -> bool:
     ids = bom_ids(scope)
     log.info("BOM material build starting - scope=%s, %d distinct BOMs", scope, len(ids))
     if ids.empty:
@@ -206,5 +224,5 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         _selftest()
     else:
-        scope = "all" if "all" in sys.argv else "planner"
+        scope = "all" if "all" in sys.argv else "demand"
         sys.exit(0 if run(scope) else 1)

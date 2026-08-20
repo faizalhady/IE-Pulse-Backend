@@ -32,6 +32,20 @@ TOKEN_EXPIRY_BUFFER_S = 60
 # ─── Paths ───────────────────────────────────────────────────────────────────
 BASE_DIR     = Path(__file__).parent.parent.parent          # IE-Pulse-Backend/
 CT_MART_DIR  = BASE_DIR / "data" / "mart" / "cycle_time"
+EB_MART_DIR  = BASE_DIR / "data" / "mart" / "ebuild"
+
+# ─── What "in demand" means, in ONE place ────────────────────────────────────
+# The models we are building or about to build: the 13-week planner sheet UNION
+# the MES ~4-week projection. 4,401 models; the two overlap by only 472, so
+# either one alone is roughly half the answer.
+#
+# THIS TUPLE EXISTS BECAUSE THE ANSWER WAS ONCE DEFINED TWICE. The report used
+# both marts and labelled the result "Planned 4,401"; the BOM pipeline used a
+# scope it called "planner" that read planner_runners alone, 2,454 models. Same
+# word, two sets — so BOM coverage was quoted as 75.5% of "planned" when it was
+# 42.1% of what the screen calls Planned, with 1,945 models never even fetched.
+# Anything that means "in demand" imports this rather than naming the files.
+DEMAND_MARTS = ("projection_runners.parquet", "planner_runners.parquet")
 
 CT_MART = {
     "raw":     CT_MART_DIR / "raw.parquet",       # one row per (assembly, revision, sub_workcenter, process)
@@ -83,6 +97,20 @@ MES_PROCESS_MAP_XLSX = os.getenv("MES_PROCESS_MAP_XLSX",
 MES_WEBAPI_BASE    = os.getenv("MES_WEBAPI_BASE", "https://mypenm0soap03.corp.jabil.org/meswebapi")
 MES_WEBAPI_KEY     = os.getenv("MES_WEBAPI_KEY", "")
 MES_WEBAPI_TIMEOUT = int(os.getenv("MES_WEBAPI_TIMEOUT", "30"))
+
+# ─── Chat (local LLM over Ollama) ────────────────────────────────────────────
+# The GPU is the only part of the chat that needs its own process, and Ollama
+# already is one — so where the card lives is a URL, not an architecture. Point
+# this at a server when the RTX 2000 Ada moves off a workstation.
+#
+# llama3.1:8b by measurement, not preference: on 7 realistic routing questions it
+# scored 6/7 at a 0.9s median, against 3/7 at 8.0s for qwen3.5. gemma4 is 9.6 GB
+# and does not fit an 8 GB card — it spills to system RAM and crawls. Reasoning
+# models (deepseek-r1) burn seconds thinking before a call that needs no thought.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_NUM_CTX  = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+OLLAMA_TIMEOUT  = int(os.getenv("OLLAMA_TIMEOUT", "180"))
 
 CT_STATE_FILE = CT_MART_DIR / ".ingest_state.json"
 

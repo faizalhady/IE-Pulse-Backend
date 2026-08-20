@@ -40,13 +40,19 @@ def _bridge() -> pd.DataFrame:
     """(customer, number, revision) -> bom_id, with the join keys precomputed.
     Cached: 203k rows re-normalised per request is 40x the cost of the lookup."""
     am = pd.read_parquet(CT_MART["mes_assembly_map"])
-    if "bom_id" not in am.columns:
-        log.warning("mes_assembly_map has no bom_id column - rebuild it; BOM tab will be empty")
+    ready = "bom_id" in am.columns
+    if not ready:
+        log.warning("mes_assembly_map has no bom_id column - rebuild it: "
+                    "python -m modules.cycle_time.pipeline.mes_assembly_map")
         am["bom_id"] = 0
     am["bom_id"] = pd.to_numeric(am["bom_id"], errors="coerce").fillna(0).astype("int64")
     am["_c"] = am["customer"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
     am["_a"] = am["number"].astype(str).str.upper().str.replace(r"[^A-Z0-9]", "", regex=True)
-    return am[["_c", "_a", "revision", "assembly_id", "bom_id"]]
+    out = am[["_c", "_a", "revision", "assembly_id", "bom_id"]]
+    # Set on the RETURNED frame, not on `am`: pandas does not reliably carry
+    # `attrs` through a column slice, so tagging the source frame loses it.
+    out.attrs["bridge_ready"] = ready
+    return out
 
 
 @lru_cache(maxsize=1)
@@ -123,6 +129,13 @@ def for_model(customer: str, assembly: str, revision: str | None = None) -> dict
         "has_bom": bom_id > 0,
         "in_mart": bool(mats),
         "in_mes": bool(len(hit)),
+        #: The bridge itself is built. False on a freshly-deployed server, where
+        #: mes_assembly_map predates the bom_id column and EVERY model would
+        #: otherwise report has_bom:false — i.e. the tab would tell you MES holds
+        #: no BOM for anything, which is a lie about MES rather than a statement
+        #: about us. Deploys are code-only ("Do not copy data/"), so prod always
+        #: passes through this state until the two pipelines have run.
+        "bridge_ready": bool(b.attrs.get("bridge_ready", True)),
         "materials": mats,
         "revisions": [{"revision": str(r["revision"]),
                        "assembly_id": int(r["assembly_id"]) if pd.notna(r["assembly_id"]) else None,

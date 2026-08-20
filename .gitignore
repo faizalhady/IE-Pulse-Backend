@@ -29,3 +29,8 @@ iedb_auth_service.cs
 
 # Local scratch (Servy exports, ad-hoc files)
 temp/
+
+# Raw reference data dropped next to docs (11MB+ — keep out of history)
+docs/ole/
+docs/ppqt/
+docs/MES/advantest_routesteps.xlsx

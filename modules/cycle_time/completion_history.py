@@ -12,9 +12,18 @@ One row per (iso_week, plant, workcell, status, reason), carrying:
     units    how much DEMAND those models represent
 
 Units, not models, is the number that matters. Volume is heavily concentrated -
-the top 500 of ~4,100 models are 88% of it - so a completion rate counted by
-model says something very different from one weighted by what we actually build.
-Both are stored; the report chooses.
+the top 500 of 4,401 demand models carry 88.1% of it, the top 100 carry 64.9% -
+so a completion rate counted by model says something very different from one
+weighted by what we actually build. Both are stored; the report chooses.
+
+DEMAND ONLY, AND IT HAS TO STAY THAT WAY
+The indicator is "how much of what we are BUILDING has complete cycle times".
+`_completion_demand` hands out more than that: it unions the graded mart and the
+whole model universe so the report can show every model that exists (57,074
+rows, of which 4,401 are in demand). Rolling that up would silently redefine the
+trend mid-series - the W32 snapshot on file counts 3,910 models, and the next
+one would have counted 57,074 without changing a single cycle time. `rollup`
+filters on `has_demand` so the caller cannot get this wrong.
 
 ONE ROW PER WEEK, NOT PER RUN
 Re-running on the same day replaces that week's rows rather than adding to them.
@@ -58,6 +67,16 @@ def rollup(models: list[dict], as_of: datetime) -> pd.DataFrame:
     # status carries the whole story. Leaving NaN in would split one bucket in two.
     df["reason"] = df["reason"].fillna("")
     df["plant"] = df["plant"].fillna("Unassigned")
+    # See the module docstring: the trend measures demand, and its source frame
+    # carries the whole universe. Absent column = an older caller that already
+    # passed demand only, so filtering on nothing is the correct no-op.
+    if "has_demand" in df.columns:
+        before = len(df)
+        df = df[df["has_demand"].fillna(False).astype(bool)]
+        if len(df) != before:
+            log.info("completion history: %d of %d rows are in demand", len(df), before)
+    if df.empty:
+        return pd.DataFrame(columns=_COLS)
 
     g = (df.groupby(["plant", "customer", "status", "reason"], as_index=False)
            .agg(models=("assembly", "count"), units=("units", "sum")))
