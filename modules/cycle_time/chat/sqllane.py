@@ -187,7 +187,8 @@ def execute_checked(sql: str, question: str = "") -> dict:
     caller already has. The agentic loop uses this — the big model writes its
     own SQL as a tool argument, and every layer of the cage still applies."""
     bad = validate(sql)
-    if not bad and question and _SUPERLATIVE_RE.search(question)             and not re.search(r"order\s+by", sql, re.I):
+    if not bad and question and _SUPERLATIVE_RE.search(question) \
+            and not re.search(r"\border\s+by\b", sql, re.I):
         bad = ("the question asks for a superlative but the query has no "
                "ORDER BY - add ORDER BY <measure> DESC/ASC with a small LIMIT")
     if bad:
@@ -262,6 +263,12 @@ if __name__ == "__main__":
     assert _ensure_workcell(s) == s                       # no assembly — untouched
     s = "SELECT assembly FROM llm_workcell_facts"
     assert _ensure_workcell(s) == s                       # wrong table — untouched
+    # the superlative guard: an ORDERED query passes, an unordered one is refused
+    # (line 190 once held literal backspace bytes instead of \b and refused both)
+    q = "two longest cycle time keysight models"
+    assert "error" not in execute_checked(
+        "SELECT assembly, ct_seconds FROM llm_process_facts ORDER BY ct_seconds DESC LIMIT 2", q)
+    assert execute_checked("SELECT assembly, ct_seconds FROM llm_process_facts LIMIT 2", q)["error"] == "sql_rejected"
     r = _execute("SELECT workcell_key, models FROM llm_workcell_facts ORDER BY models DESC")
     assert r["row_count"] <= 50 and "models" in r["columns"]
     try:
