@@ -55,7 +55,9 @@ _FORBIDDEN = re.compile(
     r"install|load|export|import|call|set|reset|vacuum|checkpoint|begin|"
     r"commit|rollback|grant|truncate|merge)\b", re.I)
 
-_TABLES = {"llm_model_facts", "llm_workcell_facts", "llm_process_facts"}
+#: Allowlist derives from the facts registry — a new view is queryable the
+#: moment it exists, and a typo'd table name still gets refused.
+_TABLES = set(facts.VIEWS)
 
 #: A superlative question answered by an UNORDERED query is the worst failure
 #: this lane can produce: 50 arbitrary rows, and the lead-in sentence then
@@ -86,10 +88,15 @@ _SHOTS = [
 
 
 def _prompt() -> str:
+    from datetime import date
+    today = date.today()
     return (
+        f"TODAY is {today.isoformat()} ({today.strftime('%A')}).\n"
         "Write ONE DuckDB SELECT statement that answers the user's question, "
         "using ONLY these tables:\n\n" + facts.ddl() + "\n\n"
         "Rules:\n"
+        "- Date columns are ISO TEXT — compare with CAST(col AS DATE); "
+        "CURRENT_DATE works in DuckDB.\n"
         "- SELECT only, one statement.\n"
         "- Filter workcells on workcell_key: the name in UPPERCASE letters and "
         "digits only ('lam research' -> 'LAMRESEARCH').\n"
@@ -133,7 +140,7 @@ def _ensure_workcell(sql: str) -> str:
     added to the SELECT (and to a GROUP BY that groups on assembly). Anything
     this cannot rewrite safely — CTEs, grouping not on assembly — is left
     exactly as written."""
-    if not re.search(r"\bllm_(model|process)_facts\b", sql, re.I):
+    if not re.search(r"\bllm_(model_facts|process_facts|route_steps|demand_weekly|builds)\b", sql, re.I):
         return sql
     if re.search(r"\bworkcell\b", sql, re.I):
         return sql
@@ -162,13 +169,11 @@ def _fix_workcells(sql: str) -> str:
 
 
 def _execute(sql: str) -> dict:
-    m, w, pr = facts.frames()
     con = duckdb.connect()                       # in-memory: holds ONLY the views
     try:
         con.execute("SET enable_external_access=false")
-        con.register("llm_model_facts", m)
-        con.register("llm_workcell_facts", w)
-        con.register("llm_process_facts", pr)
+        for name, frame in facts.frames().items():
+            con.register(name, frame)
         df = con.execute(f"SELECT * FROM ({sql.rstrip().rstrip(';')}) AS q LIMIT 50").df()
     finally:
         con.close()

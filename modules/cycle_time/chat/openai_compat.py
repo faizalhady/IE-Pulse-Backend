@@ -87,7 +87,11 @@ def _body(messages, temperature, format, stream, tools=None):
             "temperature": temperature, "max_tokens": 900, "stream": stream}
     if tools:
         body["tools"] = tools
-        body["max_tokens"] = 1500              # room for calls AND the final answer
+        # gpt-oss spends REASONING tokens inside max_tokens before the visible
+        # answer — 1500 left it planning eight-word finals. But Groq counts
+        # max_tokens as a RESERVATION against the 8k/min budget, so 4000 made
+        # every call request ~7.7k and 429 on arrival. 2000 = think + write.
+        body["max_tokens"] = 2000
     if format == "json":
         # json_object mode: the API insists the word "json" appears in the
         # messages, and the mode itself carries no schema — restate it.

@@ -85,7 +85,51 @@ def _fallback(results: list[dict]) -> str:
     if r.get("error") == "not_found":
         near = ", ".join(r.get("did_you_mean") or [])
         return f"No {r['kind']} matching {r['given']!r}." + (f" Did you mean: {near}?" if near else "")
-    return "Here is what I found:\n\n```json\n" + json.dumps(r, indent=2, default=str)[:900] + "\n```"
+    return _render_result(r)
+
+
+def _render_result(r: dict) -> str:
+    """Tool result -> readable markdown, NO model involved.
+
+    This is the floor of the whole chain — what the user sees when the cloud
+    is capped AND the local card is down at once. It used to be a raw ```json
+    block, which is exactly what a chatbot must never say out loud. Scalars
+    become bold-label lines, the first list of dicts becomes a markdown table
+    (the FE renders both)."""
+    def human(k: str) -> str:
+        return k.replace("_", " ")
+
+    lines, table = [], None
+    for k, v in r.items():
+        if str(k).startswith("_"):
+            continue
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            if table is None:
+                table = v
+            continue
+        if isinstance(v, dict):
+            # One level of scalars renders inline — the both-scopes payload
+            # ({planned: {...}, all_models: {...}}) must not vanish.
+            flat = ", ".join(f"{human(str(kk))} {vv}" for kk, vv in v.items()
+                             if not isinstance(vv, (dict, list)))
+            if flat:
+                lines.append(f"**{human(str(k))}** — {flat}")
+            continue
+        if isinstance(v, list):
+            continue                             # non-dict lists: noise
+        lines.append(f"**{human(str(k))}:** {v}")
+    out = "  \n".join(lines) or "No matching data."
+    if table:
+        cols = [c for c in table[0] if not str(c).startswith("_")][:6]
+        head = "| " + " | ".join(human(str(c)) for c in cols) + " |"
+        sep = "|" + " --- |" * len(cols)
+        body = "\n".join(
+            "| " + " | ".join(str(row.get(c, "") if row.get(c) is not None else "—")
+                              for c in cols) + " |"
+            for row in table[:20])
+        more = f"\n\n_… and {len(table) - 20} more rows_" if len(table) > 20 else ""
+        out += f"\n\n{head}\n{sep}\n{body}{more}"
+    return out
 
 
 #: Openers a small model uses when it narrates its own instructions instead of
@@ -238,8 +282,13 @@ def _rich_system() -> str:
     # questions about cycle-time completion...") acted as a scope fence and the
     # model refused "write a story about a knight and dragon with this data" —
     # a legitimate request to dress real numbers in another form.
+    from datetime import date
     from modules.cycle_time.chat import facts
+    today = date.today()
     return (
+        f"TODAY is {today.isoformat()} ({today.strftime('%A')}). Date columns "
+        "in the views are ISO TEXT — CAST(col AS DATE) to compare; DuckDB "
+        "CURRENT_DATE works.\n"
         "You are the IE-Pulse data ANALYST for Jabil Penang's IE team — and a "
         "capable, willing assistant. Answer ANY reasonable request: lookups, "
         "comparisons, assessments, opinions, multi-part questions, and STYLE "
@@ -250,18 +299,36 @@ def _rich_system() -> str:
         "For every FIGURE you state, call tools — never a number a tool did "
         "not return this turn or in this conversation. Chain tools freely: "
         "resolve both workcells, fetch both, compare. General questions may "
-        "be answered directly without tools. If a name is ambiguous the tool "
-        "says so - ask the user which one.\n"
-          "MATCH DEPTH TO THE QUESTION: a narrow question gets a sentence; a "
-          "broad one (compare X and Y, tell me about X, analyse X) deserves a "
-          "structured answer - for EACH side gather completion, the trend "
-          "(completion_trend) and notable models (models_by_status or "
-          "run_sql), then write the analysis.\n"
+        "be answered directly without tools.\n"
+        "NAMES: users typo constantly. When a lookup fails with exactly ONE "
+        "suggestion, take it, continue, and note the correction in your answer "
+        "('assuming you meant KEYSIGHT'). Only stop to ask when a name is "
+        "genuinely AMBIGUOUS (several real matches) or has no close match.\n"
+          "BE THOROUGH BY DEFAULT — you are a 120B analyst, not a lookup box. "
+          "A bare count is NEVER a full answer: when models are the subject, "
+          "LIST them (assembly + the key fact each) and add a line of context "
+          "or an insight (what stands out, what to do about it). ALWAYS state "
+          "the scope split when it differs — e.g. '12 models in total, 7 of "
+          "them Planned'. Default scope is ALL MODELS unless the user says "
+          "planned. Only greetings and single-fact questions deserve one "
+          "sentence.\n"
+          "Broad questions (compare X and Y, tell me about X, analyse X): for "
+          "EACH side gather completion, the trend (completion_trend) and "
+          "notable models (models_by_status or run_sql), then write the "
+          "analysis.\n"
           "FORMAT IN GITHUB-FLAVORED MARKDOWN - it renders. Narrow answer: "
           "plain sentences. Broad answer: **bold** labels or ### headings per "
           "section, bullet lines for findings, a compact md table for a "
           "side-by-side, and end with a one-line **Verdict:**. Never a wall "
           "of prose.\n"
+          "QUESTION -> SOURCE map, so you plan chains instead of guessing:\n"
+          "- how complete / status counts -> workcell_completion tool or llm_workcell_facts\n"
+          "- WHY incomplete, WHICH steps missing/unmapped -> llm_route_steps\n"
+          "- longest/slowest process or cycle time -> llm_process_facts\n"
+          "- WHEN is X building, next weeks, planned qty -> llm_demand_weekly\n"
+          "- what did we ACTUALLY build, how recently -> llm_builds\n"
+          "- what IS model X, family, description, BOM size -> llm_model_facts\n"
+          "- BOM materials list -> model_bom tool; trend over weeks -> completion_trend tool\n"
           "For open questions the run_sql tool queries these tables:\n"
         + facts.ddl()
         + "\n\nDOMAIN REFERENCE — what our words mean and today's live facts. "
@@ -286,6 +353,7 @@ def _ask_rich(question, history, done, emit, delta):
     messages.append({"role": "user", "content": question})
 
     calls, sources, sqls, last_rows = [], [], [], None
+    reminded = False
     for _ in range(_MAX_ROUNDS):
         try:
             # The CLOUD directly, never llm.chat: its per-call fallback would
@@ -345,6 +413,19 @@ def _ask_rich(question, history, done, emit, delta):
             messages.append({"role": "tool", "tool_call_id": tc.get("id") or name,
                              "content": json.dumps(slim, default=str)[:5000]})
 
+        # Positioned LAST on purpose: the depth rule sits mid-way through a 5k
+        # system prompt and gpt-oss ignored it — "how many models with no
+        # cycle time in asp" came back as eight words. Models weigh the end of
+        # the context; the reminder lands right where the answer gets written.
+        if calls and not reminded:
+            reminded = True
+            messages.append({"role": "system", "content":
+                "When you answer: be thorough. If models are the subject, LIST "
+                "them (assembly + one key fact each, markdown bullets or a "
+                "table). State the ALL-vs-Planned split when they differ. End "
+                "with one line of insight or context. A bare count is not an "
+                "answer."})
+
     # Rounds exhausted or empty reply - answer from EVERYTHING gathered, not
     # the last fetch: a comparison that lost the cloud after two workcell
     # pulls still has both workcells in hand.
@@ -382,7 +463,10 @@ def ask(question: str, history: list[dict] | None = None,
     def done(answer: str, lane: str, *, intent: str = "none", grounded: bool = False,
              calls: list | None = None, sources: list | None = None,
              error: str | None = None) -> dict:
-        out = {"answer": answer[:_MAX_ANSWER_CHARS].strip(), "lane": lane,
+        # The 1200-char guard was sized for one-sentence 8B answers; it would
+        # truncate a thorough analyst answer mid-table.
+        cap = 6000 if llm.rich() else _MAX_ANSWER_CHARS
+        out = {"answer": answer[:cap].strip(), "lane": lane,
                "intent": intent, "grounded": grounded,
                "calls": calls or [], "sources": sources or [],
                "model": llm.answered_by() or llm.MODEL, "elapsed_s": round(time.time() - t0, 1)}
@@ -399,8 +483,11 @@ def ask(question: str, history: list[dict] | None = None,
 
     ok, detail = llm.available()
     if not ok:
-        return done(f"The local model is not available. {detail}", "error",
-                    error="ollama_unavailable")
+        log.warning("chat unavailable: %s", detail)
+        return done("The model is not available right now - the local engine "
+                    "is down and no cloud model is reachable. Try again in a "
+                    "minute; if it persists, restart Ollama (or the machine).",
+                    "error", error="ollama_unavailable")
 
     # A cloud-class brain gets the agent loop: its own tool choices, its own
     # rounds. The deterministic fast paths above (instant, exact definitions)
@@ -424,7 +511,10 @@ def ask(question: str, history: list[dict] | None = None,
             emit("stage", "writing…")
             return done(_general(question, history, _general_prompt(), delta), "general")
         except llm.LLMError as e:
-            return done(f"The local model failed: {e}", "error", error="ollama_failed")
+            log.warning("chat model failed: %s", e)
+            return done("The model hit an error mid-answer. Try again - if it "
+                        "keeps happening, the local engine needs a restart.",
+                        "error", error="ollama_failed")
 
     if r["intent"] == "none":
         # In-domain but no tool answers it — usually a concept question ("what
@@ -442,7 +532,10 @@ def ask(question: str, history: list[dict] | None = None,
             return done(_general(question, history, glossary.system_prompt(), delta),
                         "cycletime", sources=["glossary"])
         except llm.LLMError as e:
-            return done(f"The local model failed: {e}", "error", error="ollama_failed")
+            log.warning("chat model failed: %s", e)
+            return done("The model hit an error mid-answer. Try again - if it "
+                        "keeps happening, the local engine needs a restart.",
+                        "error", error="ollama_failed")
 
     if r["intent"] == "open_query":
         from modules.cycle_time.chat import sqllane

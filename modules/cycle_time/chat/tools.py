@@ -87,14 +87,21 @@ def list_workcells() -> dict:
 
 
 def workcell_completion(workcell: str, scope: str = "demand") -> dict:
-    """Completion % and status breakdown for one workcell."""
+    """Completion % and status breakdown for one workcell — BOTH scopes.
+
+    Returning one scope made the chat disagree with whichever screen used the
+    other. Both ride back, labelled, so the answer can lead with Planned (the
+    headline convention) and still say what the whole catalogue looks like."""
     wc = resolve.workcell(workcell)
-    d = _demand(scope)
-    d = d[d["customer"].astype(str) == wc]
-    if d.empty:
+    allm = _demand("all")
+    allm = allm[allm["customer"].astype(str) == wc]
+    if allm.empty:
         return {"_src": "completion demand mart", "workcell": wc, "models": 0,
-                "note": f"{wc} has no models in this scope ({scope})."}
-    return {"_src": f"completion demand mart, scope={scope}", "workcell": wc, "scope": scope, **_rollup(d)}
+                "note": f"{wc} has no models at all."}
+    dem = allm[allm["has_demand"]] if "has_demand" in allm else allm
+    return {"_src": "completion demand mart, both scopes", "workcell": wc,
+            "planned": _rollup(dem) if len(dem) else {"models": 0},
+            "all_models": _rollup(allm)}
 
 
 def plant_completion(scope: str = "demand") -> dict:
@@ -150,16 +157,24 @@ def model_cycle_time(workcell: str, assembly: str) -> dict:
             "step_count": len(steps), "total_seconds": round(total, 1), "steps": steps}
 
 
-def models_by_status(workcell: str, status: str, limit: int = 25) -> dict:
-    """List the models in one workcell that carry a given status."""
+def models_by_status(workcell: str, status: str, limit: int = 40) -> dict:
+    """List the models in one workcell that carry a given status.
+
+    ALL models, always — this was hardcoded to the demand slice and answered
+    "7 models with no cycle time in ASP" while the workcell page showed 12;
+    the never-planned 5 were simply invisible to the model. The scope SPLIT
+    rides along so the answer can say both numbers instead of picking one.
+    """
     wc = resolve.workcell(workcell)
     st = resolve.status(status)
-    d = _demand()
+    d = _demand("all")
     d = d[(d["customer"].astype(str) == wc) & (d["status"] == st)]
-    d = d.sort_values("units", ascending=False)
-    return {"_src": "completion demand mart, scope=demand", "workcell": wc, "status": st,
-            "total": int(len(d)),
+    d = d.sort_values(["has_demand", "units"], ascending=False)
+    planned = int(d["has_demand"].sum()) if "has_demand" in d else 0
+    return {"_src": "completion demand mart, scope=all models", "workcell": wc, "status": st,
+            "total_all_models": int(len(d)), "of_which_planned": planned,
             "models": [{"assembly": str(r.assembly), "units": int(r.units or 0),
+                        "planned": bool(r.has_demand),
                         "reason": (None if pd.isna(r.reason) else r.reason)}
                        for r in d.head(int(limit)).itertuples()]}
 
@@ -197,7 +212,7 @@ def completion_trend(workcell: str = "") -> dict:
 #: — see the module docstring for what happened when they did not.
 _REGISTRY: list[tuple[Callable, str, dict]] = [
     (list_workcells,      "Names of the workcells. Only when the user named none.", {}),
-    (workcell_completion, "How many models, and completion %, for ONE named workcell.", {"workcell": "string"}),
+    (workcell_completion, "Completion % and status counts for ONE workcell, BOTH scopes (planned + all models).", {"workcell": "string"}),
     (plant_completion,    "Overall completion across all workcells, ranked.", {}),
     (model_status,        "Completion verdict for ONE model.", {"workcell": "string", "assembly": "string"}),
     (model_bom,           "MES BOM materials for one model.", {"workcell": "string", "assembly": "string"}),

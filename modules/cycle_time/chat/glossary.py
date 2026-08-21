@@ -120,6 +120,9 @@ def _live_facts() -> str:
     Degrades to nothing rather than raising: a chatbot that will not start
     because one mart is rebuilding is worse than one without a headline number.
     """
+    from datetime import date
+    today = date.today()
+    header = f"TODAY is {today.isoformat()} ({today.strftime('%A')}).\n"
     try:
         import pandas as pd
         from api.routers.cycle_time import _completion_demand, _completion_demand_key
@@ -127,12 +130,13 @@ def _live_facts() -> str:
         dem = d[d["has_demand"]] if "has_demand" in d else d
         wc = sorted(w for w in dem["customer"].dropna().astype(str).unique() if w.strip("- "))
         return (
-            f"\nRIGHT NOW: {len(dem):,} models are in demand, out of {len(d):,} that exist.\n"
+            "\n" + header
+            + f"RIGHT NOW: {len(dem):,} models are in demand, out of {len(d):,} that exist.\n"
             f"Workcells with demand ({len(wc)}): {', '.join(wc)}.\n"
         )
     except Exception as e:                       # never block a question over this
         log.warning("glossary: live facts unavailable (%s)", e)
-        return ""
+        return "\n" + header
 
 
 def system_prompt() -> str:
