@@ -1,9 +1,10 @@
 """
-api/routers/ppqt.py
-───────────────────
-FastAPI router for the PPQT module (capacity sizing).
+api/routers/ppqt_legacy.py
+──────────────────────────
+LEGACY PPQT router (Wabtec-workbook model, mart-computed). Superseded by
+api/routers/ppqt.py (LAMRES / EM-IE80-00003-B model). Kept for /ppqt-legacy.
 
-Mounted at /api/ppqt in api/main.py.
+Mounted at /api/ppqt-legacy in api/main.py.
 
 Endpoints:
   GET /api/ppqt/health     — source mart status
@@ -47,7 +48,7 @@ _RESOURCE_Q = Query("equipment", pattern="^(equipment|people)$",
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/ppqt", tags=["PPQT"])
+router = APIRouter(prefix="/api/ppqt-legacy", tags=["PPQT (legacy)"])
 
 
 @router.get("/health")

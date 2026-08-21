@@ -59,7 +59,8 @@ IE-Pulse-Backend/
 │       ├── downtime.py             ✅ live
 │       ├── transfers.py            ✅ live
 │       ├── cycle_time.py           ✅ live
-│       ├── ppqt.py                 🔲 stubbed
+│       ├── ppqt.py                 ✅ live — EM-IE80-00003-B workbook model (LAMRES 8.0)
+│       ├── ppqt_legacy.py          legacy Wabtec-model router at /api/ppqt-legacy
 │       ├── lbr.py                  🔲 stubbed
 │       └── ipk.py                  🔲 stubbed
 │
@@ -92,9 +93,13 @@ IE-Pulse-Backend/
 │   │   ├── config.py
 │   │   └── pipeline/refresh.py
 │   │
-│   ├── ppqt/                       🔲 stubbed
-│   │   ├── config.py
-│   │   └── pipeline/refresh.py
+│   ├── ppqt/                       ✅ live
+│   │   ├── config.py               # raw/mart paths, workbook vocabulary (areas, bay aliases)
+│   │   ├── compute.py              # the template's formulas + golden self-check (python -m modules.ppqt.compute)
+│   │   ├── capacity.py             # LEGACY mart-computed engine (Wabtec model) — used by ppqt_legacy router only
+│   │   └── pipeline/
+│   │       ├── ingest.py           # parse data/raw/ppqt/*.xlsx (visible sheets only) → marts
+│   │       └── refresh.py
 │   │
 │   └── ipk/                        🔲 stubbed
 │       ├── config.py
@@ -123,7 +128,7 @@ IE-Pulse-Backend/
 | Cycle Time | ✅ Live | docs/CYCLE_TIME_BUILD.md |
 | Downtime | ✅ Live | (router-only — operational SQLite, no modules/ folder) |
 | Transfers | ✅ Live | (router-only — operational SQLite, no modules/ folder) |
-| PPQT | 🔲 Stubbed — full pipeline pending | (FE has PPQT_BUILD.md; BE spec to be created when built) |
+| PPQT | ✅ Live — Excel-first (LAMRES 8.0 workbook); mart integration pending | docs/PPQT_BUILD.md (+ FE docs/PPQT_LAMRES_DIFF.md for the formula diff) |
 | IPK | 🔲 Stubbed — full pipeline pending | docs/IPK_BUILD.md |
 | LBR | 🔲 Stubbed — full pipeline pending | — (BE spec to be created when built) |
 

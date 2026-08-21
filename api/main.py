@@ -43,6 +43,7 @@ from api.routers.downtime    import router as downtime_router
 from api.routers.transfers   import router as transfers_router
 from api.routers.cycle_time  import router as cycle_time_router
 from api.routers.ppqt        import router as ppqt_router
+from api.routers.ppqt_legacy import router as ppqt_legacy_router
 from api.routers.lbr         import router as lbr_router
 from api.routers.ipk         import router as ipk_router
 from api.routers.ebuild      import router as ebuild_router
@@ -75,6 +76,7 @@ app.include_router(downtime_router)
 app.include_router(transfers_router)
 app.include_router(cycle_time_router)
 app.include_router(ppqt_router)
+app.include_router(ppqt_legacy_router)
 app.include_router(lbr_router)
 app.include_router(ipk_router)
 app.include_router(ebuild_router)
