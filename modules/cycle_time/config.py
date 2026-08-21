@@ -98,49 +98,6 @@ MES_WEBAPI_BASE    = os.getenv("MES_WEBAPI_BASE", "https://mypenm0soap03.corp.ja
 MES_WEBAPI_KEY     = os.getenv("MES_WEBAPI_KEY", "")
 MES_WEBAPI_TIMEOUT = int(os.getenv("MES_WEBAPI_TIMEOUT", "30"))
 
-# ─── Chat (local LLM over Ollama) ────────────────────────────────────────────
-# The GPU is the only part of the chat that needs its own process, and Ollama
-# already is one — so where the card lives is a URL, not an architecture. Point
-# this at a server when the RTX 2000 Ada moves off a workstation.
-#
-# llama3.1:8b by measurement, not preference: on 7 realistic routing questions it
-# scored 6/7 at a 0.9s median, against 3/7 at 8.0s for qwen3.5. gemma4 is 9.6 GB
-# and does not fit an 8 GB card — it spills to system RAM and crawls. Reasoning
-# models (deepseek-r1) burn seconds thinking before a call that needs no thought.
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-OLLAMA_MODEL    = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-OLLAMA_NUM_CTX  = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
-OLLAMA_TIMEOUT  = int(os.getenv("OLLAMA_TIMEOUT", "180"))
-
-# The chat's kill-switch. Testing-phase: set CT_CHAT_ENABLED=0 in the service
-# env on 02 and every /chat* endpoint answers instantly WITHOUT importing the
-# chat module or touching Ollama — no probes, no retries, nothing to time out.
-# Default ON so local dev needs no setup. The 02 frontend build hides the chat
-# UI independently (VITE_CHAT_ENABLED=0), so this is the second lock, not the
-# only one.
-CHAT_ENABLED = os.getenv("CT_CHAT_ENABLED", "1").strip().lower() not in ("0", "false", "no")
-
-# ─── Chat provider (local Ollama vs OpenAI-compatible cloud) ─────────────────
-# Company policy is currently OPEN for AI experimentation, so the model behind
-# the chat is an env decision, not an architecture one. "openai" here means the
-# PROTOCOL — Groq, Gemini (OpenAI-compat endpoint), OpenRouter, Cerebras and
-# NVIDIA NIM all speak it, so one client covers every alternative under test.
-#
-#   CHAT_PROVIDER=ollama                                   (default — local 8B)
-#   CHAT_PROVIDER=openai
-#   CHAT_API_BASE=https://api.groq.com/openai/v1           (Groq example)
-#   CHAT_API_KEY=gsk_...
-#   CHAT_MODEL=llama-3.3-70b-versatile
-#
-# Other bases: Gemini https://generativelanguage.googleapis.com/v1beta/openai
-#              OpenRouter https://openrouter.ai/api/v1
-# Defaults are Groq + llama-3.3-70b (the decided primary), so going cloud is
-# TWO env values: CHAT_PROVIDER=openai and CHAT_API_KEY=gsk_... The local 8B
-# stays as automatic fallback either way (see chat/llm.py).
-CHAT_PROVIDER  = os.getenv("CHAT_PROVIDER", "ollama").strip().lower()
-CHAT_API_BASE  = os.getenv("CHAT_API_BASE", "https://api.groq.com/openai/v1").rstrip("/")
-CHAT_API_KEY   = os.getenv("CHAT_API_KEY", "")
-CHAT_MODEL     = os.getenv("CHAT_MODEL", "llama-3.3-70b-versatile")
 
 CT_STATE_FILE = CT_MART_DIR / ".ingest_state.json"
 
