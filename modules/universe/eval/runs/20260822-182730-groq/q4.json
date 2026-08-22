@@ -1,0 +1,46 @@
+{
+ "id": 4,
+ "question": "what are all the steps this model has to go through and where. sort them end to end. model: the KEYSIGHT model with the most units out in the data",
+ "tool_calls": [],
+ "sqls": [],
+ "rounds": 1,
+ "stopped": "error: Client error '400 Bad Request' for url 'https://api.groq.com/openai/v1/chat/completions'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400",
+ "answer": "",
+ "usage": {
+  "prompt_tokens": 0,
+  "completion_tokens": 0
+ },
+ "started": "2026-08-22T18:31:30",
+ "elapsed_s": 6.9,
+ "model": "openai/gpt-oss-120b",
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": false
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "read v_route",
+    "passed": false
+   },
+   {
+    "name": "found the top model first",
+    "passed": false
+   },
+   {
+    "name": "ordered by step",
+    "passed": false
+   },
+   {
+    "name": "says where is blocked (bay ids)",
+    "passed": false
+   }
+  ],
+  "passed": 1,
+  "total": 6
+ }
+}

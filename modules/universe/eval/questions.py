@@ -29,7 +29,11 @@ def _mentions(rec, *words) -> bool:
 def grounded_numbers(rec) -> bool:
     """Every number of 3+ digits in the answer appears in some tool result.
     An answer that invents a figure fails, whatever else it says."""
-    answer_nums = set(re.findall(r"(?<![\d.])\d{3,}(?![\d.])", rec["answer"].replace(",", "")))
+    # "4 314" / "4\u202f314" — a space as thousands separator is one number
+    text = re.sub(r"(?<=\d)[\s\u202f\u00a0](?=\d{3}\b)", "", rec["answer"]).replace(",", "")
+    # digits glued to letters or hyphens are identifiers (N1092-63016), not figures
+    answer_nums = set(re.findall(r"(?<![\w.\-])\d{3,}(?![\w.\-])", text))
+    answer_nums -= {str(y) for y in range(2019, 2032)}          # years are not figures
     if not answer_nums:
         return True
     blob = " ".join(str(c.get("result_text", "")) for c in rec["tool_calls"]).replace(",", "")

@@ -1,0 +1,76 @@
+{
+ "id": 7,
+ "question": "what can we do to improve our yield",
+ "tool_calls": [
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_fpy_daily"
+   },
+   "ok": true,
+   "result_text": "v_fpy_daily\n  workcell (VARCHAR): Workcell = customer.\n  workcell_id (BIGINT): Join key to v_workcell.\n  assembly (VARCHAR): Part number = model = assembly.\n  model_id (BIGINT): Join key to dim_model.\n  step (VARCHAR): The MES test step (ICT, FVT \u2026) where the result was recorded.\n  date (DATE): Local date of the test scan.\n  boards_passed (BIGINT): Distinct boards whose FIRST test at this step passed.\n  boards_tested (BIGINT): Distinct boards tested at this step, first loop only (test_loop = 1). Retests are excluded \u2014 FPY is first pass.\n  fpy (DOUBLE): First-pass yield = boards_passed \u00f7 boards_tested. 'A' (aborted) results are excluded from both.",
+   "rows": null
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT workcell, step, AVG(fpy) AS avg_fpy, COUNT(*) AS days FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-08' GROUP BY workcell, step HAVING COUNT(*)>=5 ORDER BY avg_fpy ASC LIMIT 20"
+   },
+   "ok": true,
+   "result_text": "{\"columns\":[\"workcell\",\"step\",\"avg_fpy\",\"days\"],\"rows\":[{\"workcell\":\"RESMED\",\"step\":\"SCRAP\",\"avg_fpy\":0.0,\"days\":24},{\"workcell\":\"LTX (COHU)\",\"step\":\"BIRTH\",\"avg_fpy\":0.0,\"days\":10},{\"workcell\":\"HMB\",\"step\":\"SCRAP\",\"avg_fpy\":0.0,\"days\":10},{\"workcell\":\"ARISTA_NETWORKS_GLACIER\",\"step\":\"RTC\",\"avg_fpy\":0.0,\"days\":10},{\"workcell\":\"ARISTA NETWORKS\",\"step\":\"RTC SCRAP\",\"avg_fpy\":0.0,\"days\":29},{\"workcell\":\"BECKMAN COULTER\",\"step\":\"BIRTH\",\"avg_fpy\":0.0,\"days\":17},{\"workcell\":\"K_CTEC\",\"step\":\"BIRTH\",\"avg_fpy\":0.0,\"days\":11},{\"workcell\":\"FORTALEZA\",\"step\":\"BIRTH\",\"avg_fpy\":0.0,\"days\":8},{\"workcell\":\"ARISTA NETWORKS\",\"step\":\"SCRAP\",\"avg_fpy\":0.0,\"days\":179},{\"workcell\":\"KEYSIGHT\",\"step\":\"SCRAP\",\"avg_fpy\":0.0,\"days\":83},{\"workcell\":\"MICRON SIG\",\"step\":\"SCRAP\",\"avg_fpy\":0.0,\"days\":7},{\"workcell\":\"ADVANTEST\",\"step\":\"RTV SCRAP\",\"avg_fpy\":0.0,\"days\":5},{\"workcell\":\"TERRA SANA\",\"step\":\"SCRAP\",\"avg_fpy\":0.0,\"days\":6},{\"workcell\":\"LAM RESEARCH\",\"step\":\"SCRAP\",\"avg_fpy\":0.0,\"days\":71},{\"workcell\":\"ADVANTEST\",\"step\":\"BIRTH\",\"avg_fpy\":0.0,\"days\":493},{\"workcell\":\"ARISTA_NETWORKS_GLACIER\",\"step\":\"BIRTH\",\"avg_fpy\":0.0,\"days\":11},{\"workcell\":\"ADVANTEST\",\"step\":\"SCRAP\",\"avg_fpy\":0.0,\"days\":64},{\"workcell\":\"MOTOROLA\",\"step\":\"SCRAP\",\"avg_fpy\":0.0,\"days\":314},{\"workcell\":\"INFINERA LEGACY\",\"step\":\"BIRTH\",\"avg_fpy\":0.0,\"days\":136},{\"workcell\":\"LAM RESEARCH\",\"step\":\"RTC\",\"avg_fpy\":0.0,\"days\":78}],\"row_count\":20,\"truncated\":false,\"sql\":\"select * from (SELECT workcell, step, AVG(fpy) AS avg_fpy, COUNT(*) AS days FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-08' GROUP BY workcell, step HAVING COUNT(*)>=5 ORDER BY avg_fpy ASC LIMIT 20) as q limit 40\"}",
+   "rows": 20
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT workcell, AVG(fpy) AS avg_fpy FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-08' GROUP BY workcell HAVING COUNT(*)>=10 ORDER BY avg_fpy ASC LIMIT 10"
+   },
+   "ok": true,
+   "result_text": "{\"columns\":[\"workcell\",\"avg_fpy\"],\"rows\":[{\"workcell\":\"GOPRO\",\"avg_fpy\":0.7660234693877551},{\"workcell\":\"ADVANTEST\",\"avg_fpy\":0.8613628175159733},{\"workcell\":\"LIFE360\",\"avg_fpy\":0.8688520588235296},{\"workcell\":\"TERRA SANA\",\"avg_fpy\":0.8831599999999998},{\"workcell\":\"PHOTONICS\",\"avg_fpy\":0.89805344293543},{\"workcell\":\"BARCO\",\"avg_fpy\":0.918918918918919},{\"workcell\":\"MEDTRONIC\",\"avg_fpy\":0.9220903846153846},{\"workcell\":\"INFINERA LEGACY\",\"avg_fpy\":0.9292238103133807},{\"workcell\":\"RESMED\",\"avg_fpy\":0.930686694677871},{\"workcell\":\"MOTOROLA\",\"avg_fpy\":0.9326502586310598}],\"row_count\":10,\"truncated\":false,\"sql\":\"select * from (SELECT workcell, AVG(fpy) AS avg_fpy FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-08' GROUP BY workcell HAVING COUNT(*)>=10 ORDER BY avg_fpy ASC LIMIT 10) as q limit 40\"}",
+   "rows": 10
+  }
+ ],
+ "sqls": [
+  "select * from (SELECT workcell, step, AVG(fpy) AS avg_fpy, COUNT(*) AS days FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-08' GROUP BY workcell, step HAVING COUNT(*)>=5 ORDER BY avg_fpy ASC LIMIT 20) as q limit 40",
+  "select * from (SELECT workcell, AVG(fpy) AS avg_fpy FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-08' GROUP BY workcell HAVING COUNT(*)>=10 ORDER BY avg_fpy ASC LIMIT 10) as q limit 40"
+ ],
+ "rounds": 4,
+ "stopped": "answered",
+ "answer": "**What the data show**\n\n| Workcell (customer) | Step with the lowest average FPY* | Avg\u202fFPY | Days observed (\u22655) |\n|----------------------|-----------------------------------|--------|---------------------|\n| RESMED               | SCRAP                             | 0.00   | 24 |\n| LTX (COHU)           | BIRTH                             | 0.00   | 10 |\n| HMB                  | SCRAP                             | 0.00   | 10 |\n| ARISTA_NETWORKS_GLACIER | RTC                           | 0.00   | 10 |\n| ARISTA\u202fNETWORKS      | RTC\u202fSCRAP                         | 0.00   | 29 |\n| BECKMAN\u202fCOULTER      | BIRTH                             | 0.00   | 17 |\n| K_CTEC               | BIRTH                             | 0.00   | 11 |\n| \u2026 (others)           | \u2026                                 | 0.00   | \u2026 |\n\n\\*Step\u2011level FPY is taken from **v_fpy_daily** for the scan window\u202f9\u202fJul\u202f\u2192\u202f8\u202fAug\u202f2026. Only steps with \u22655 days of data are shown to avoid outliers.\n\nThe overall workcell\u2011level FPY ranking (higher is better) is:\n\n| Workcell | Avg\u202fFPY (all steps) |\n|----------|--------------------|\n| GOPRO    | 0.766 |\n| ADVANTEST| 0.861 |\n| LIFE360  | 0.869 |\n| \u2026        | \u2026 |\n\n**Key observations**\n\n1. **Zero\u2011FPY steps** \u2013 many workcells have at least one step (often \u201cSCRAP\u201d or \u201cBIRTH\u201d) with an average FPY of\u202f0.00, meaning every board scanned at that step was recorded as scrap or never passed the step during the month.\n2. **Scrap\u2011heavy steps** \u2013 \u201cSCRAP\u201d appears as a step for many customers (RESMED, KEYSIGHT, MOTOROLA, etc.). In the model, \u201cSCRAP\u201d is a terminal step that counts boards once; a 0\u202f% FPY there indicates all units exiting the line are being scrapped rather than moving to the next process.\n3. **Birth\u2011step failures** \u2013 \u201cBIRTH\u201d is the first MES test after the terminal step. A 0\u202f% FPY on BIRTH (e.g., LTX\u202f(COHU), BECKMAN\u202fCOULTER) suggests that no units are successfully completing the initial test, likely due to upstream quality or handling issues.\n\n**Actionable improvement levers**\n\n| Lever | Why it matters (based on the data) | Practical steps |\n|------|-----------------------------------|-----------------|\n| **Root\u2011cause analysis on zero\u2011FPY steps** | A 0\u202f% FPY on SCRAP or BIRTH signals a systematic failure, not random variation. | \u2022 Pull the last 30\u202fdays of defect codes (if available) for the affected workcells.<br>\u2022 Conduct a \u201c5\u202fWhy\u201d workshop with the line, quality, and engineering teams for each zero\u2011FPY step.<br>\u2022 Verify that the MES step definitions (e.g., SCRAP vs. PASS) are correctly mapped; mis\u2011classification can inflate zero\u2011FPY. |\n| **Process capability (SMH) review** | Low FPY often correlates with high cycle\u2011time variance or insufficient SMH (Standard Minute Value). | \u2022 Use **v_cycle_time** (study standard) vs. **v_process** (MES elapsed) to compute actual SMH for the problematic steps.<br>\u2022 If actual SMH\u202f>\u202fstandard\u202f\u00d7\u202f1.2, consider adding labor or equipment capacity. |\n| **Yield\u2011focused equipment tuning** | Equipment capacity is an authored seed; mismatches can cause bottlenecks that manifest as scrap. | \u2022 Compare planned capacity (from **v_route**) with actual output (**v_units_out_daily**).<br>\u2022 If output is far below capacity on a workcell with zero\u2011FPY, investigate equipment setup, preventive maintenance, and operator training. |\n| **Early\u2011stage quality gates** | BIRTH failures indicate upstream defects (e.g., incoming material, solder paste). | \u2022 Strengthen incoming inspection (IQC) for the affected customers.<br>\u2022 Implement in\u2011process SPC on critical dimensions before the BIRTH test.<br>\u2022 Add a \u201cpre\u2011birth\u201d functional test to catch defects earlier. |\n| **Scrap reduction programs** | High SCRAP FPY drags overall yield; each scrap board is a cost of material, labor, and re\u2011work. | \u2022 Deploy a \u201cZero\u2011Scrap\u201d Kaizen: track scrap reasons daily, set daily scrap\u2011reduction targets.<br>\u2022 Introduce real\u2011time scrap dashboards for the workcell supervisors.<br>\u2022 Review tooling wear\u2011out schedules; replace worn fixtures that cause systematic defects. |\n| **Cross\u2011workcell best\u2011practice sharing** | Workcells like GOPRO and ADVANTEST achieve >\u202f86\u202f% FPY. | \u2022 Benchmark their process parameters (cycle time, SMH, defect trends) against low\u2011performing cells.<br>\u2022 Replicate successful operator training, equipment settings, and quality\u2011control checklists. |\n| **Data\u2011quality audit** | The model counts boards once at the terminal step; any mis\u2011alignment between scan data and actual production can mis\u2011represent FPY. | \u2022 Verify that the \u201csource\u201d column in **v_output_daily** is set to \u201cMES scan\u201d for the period used.<br>\u2022 Ensure no duplicate scans are inflating scrap counts. |\n\n**What we could not determine from the model**\n\n* Defect\u2011code breakdowns \u2013 the model does not contain defect codes, so we cannot pinpoint the exact failure mode for each zero\u2011FPY step.  \n* Bay\u2011level equipment capacity \u2013 bay identities are not reconciled, so we cannot map a specific machine to the low\u2011yield step.  \n* Historical trend beyond the 9\u202fJul\u202f\u2192\u202f8\u202fAug\u202f2026 window \u2013 OLE share history (v_ole_daily) goes back to March but uses a different source; we focused on the MES scan period as required.\n\n**SQL used**\n\n```sql\n-- Step\u2011level FPY with zero average (\u22655 days of data)\nSELECT workcell,\n       step,\n       AVG(fpy) AS avg_fpy,\n       COUNT(*) AS days\nFROM v_fpy_daily\nWHERE date BETWEEN '2026-07-09' AND '2026-08-08'\nGROUP BY workcell, step\nHAVING COUNT(*) >= 5\nORDER BY avg_fpy ASC\nLIMIT 20;\n```\n\n```sql\n-- Overall workcell FPY ranking (\u226510 days of data)\nSELECT workcell,\n       AVG(fpy) AS avg_fpy\nFROM v_fpy_daily\nWHERE date BETWEEN '2026-07-09' AND '2026-08-08'\nGROUP BY workcell\nHAVING COUNT(*) >= 10",
+ "usage": {
+  "prompt_tokens": 5037,
+  "completion_tokens": 1775
+ },
+ "started": "2026-08-22T18:49:32",
+ "elapsed_s": 36.5,
+ "model": "openai/gpt-oss-120b",
+ "notes": [
+  "all numbers grounded"
+ ],
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": true
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "read v_fpy_daily",
+    "passed": true
+   },
+   {
+    "name": "names the worst step(s)",
+    "passed": true
+   },
+   {
+    "name": "says why is unknown (no defect codes)",
+    "passed": true
+   }
+  ],
+  "passed": 5,
+  "total": 5
+ }
+}

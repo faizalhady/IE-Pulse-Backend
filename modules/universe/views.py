@@ -197,7 +197,7 @@ VIEWS: dict[str, tuple[str, dict[str, str]]] = {
             "assembly": "Part number = model = assembly.",
             "model_id": "Join key to dim_model.",
             "line_id": "The line this route variant runs on.",
-            "step_order": "Order of the step on the route — sort on this for 'end to end'.",
+            "step_order": "Order of the step on the route — sort on this for 'end to end'. It restarts per line_id: a model with two lines has two routes; group or filter by line_id first.",
             "step_group": "Steps that belong together (a buffer point) when known.",
             "alias": "Process alias at this step.",
             "process_kind": "Kind of work at this step.",
@@ -238,7 +238,13 @@ VIEWS: dict[str, tuple[str, dict[str, str]]] = {
         from fact_scan s
         join dim_workcell w on w.workcell_id = s.workcell_id
         left join dim_model m on m.model_id = s.model_id
+        -- a real TEST step passes boards sometimes; an 'F' at SCRAP, BIRTH or RTC is a
+        -- disposition, not a test result (trial 2 reported FPY = 0.00 at SCRAP)
+        join (select workcell_id, step from fact_scan
+              where test_loop = 1 and test_status = 'P' group by 1, 2) ts
+          on ts.workcell_id = s.workcell_id and ts.step = s.step
         where s.test_loop = 1 and s.test_status in ('P', 'F')
+          and s.step not ilike '%SCRAP%' and s.step not ilike '%RTC%' and s.step not ilike 'BIRTH%'
         group by all
         """,
         {
@@ -246,7 +252,7 @@ VIEWS: dict[str, tuple[str, dict[str, str]]] = {
             "workcell_id": "Join key to v_workcell.",
             "assembly": "Part number = model = assembly.",
             "model_id": "Join key to dim_model.",
-            "step": "The MES test step (ICT, FVT …) where the result was recorded.",
+            "step": "The MES test step (ICT, FVT …) where the result was recorded. Only steps that pass boards count as test steps — SCRAP, RTC and BIRTH are dispositions, never tests.",
             "date": "Local date of the test scan.",
             "boards_passed": "Distinct boards whose FIRST test at this step passed.",
             "boards_tested": "Distinct boards tested at this step, first loop only (test_loop = 1). Retests are excluded — FPY is first pass.",
@@ -323,6 +329,7 @@ def connect() -> duckdb.DuckDBPyConnection:
     """An in-memory DuckDB holding every universe table as a view plus the semantic
     views above, column comments included. Close it when done."""
     con = duckdb.connect()
+    con.execute("set enable_progress_bar = false")
     from modules.universe.config import SMH_MISSING_POLICY
     con.create_function("smh_policy", lambda: SMH_MISSING_POLICY, [], str)
     for name, path in UNIVERSE_MART.items():

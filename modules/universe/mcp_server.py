@@ -29,7 +29,7 @@ def universe_describe(view: str | None = None) -> str:
     words (workcell = customer, units = boards counted once, fiscal year starts
     September …). Call this FIRST, before writing SQL. Pass a view name for one view,
     nothing for all of them."""
-    return json.dumps(T.describe(view), default=str)
+    return T.describe_compact(view)
 
 
 @mcp.tool(name="universe_query", annotations=_RO)

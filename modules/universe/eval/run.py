@@ -32,6 +32,14 @@ from modules.universe.eval import questions as Q
 ROOT = Path(__file__).resolve().parents[3]
 RUNS = Path(__file__).resolve().parent / "runs"
 
+# Groq's free tier caps gpt-oss-120b at ~8k tokens per request, max_tokens
+# included. Everything below is sized to stay under it: small tool results, a
+# character budget on the conversation, old results trimmed to a stub.
+CONTEXT_BUDGET_CHARS = 16_000     # ~4k tokens of messages
+TOOL_RESULT_CHARS = 3_500
+KEEP_FULL_RESULTS = 2             # the newest N tool results stay verbatim
+MAX_TOKENS = 1_500
+
 TOOLS_SPEC = [
     {"type": "function", "function": {
         "name": "universe_describe",
@@ -52,13 +60,17 @@ SYSTEM = """You are the analyst for Jabil Penang's Industrial Engineering team, 
 Rules that are not optional:
 - Workcell = CUSTOMER (KEYSIGHT, WABTEC …). Never a station or a line.
 - Every number you state must come from a tool result. Never estimate a figure you did not fetch.
-- Call universe_describe before your first query; the column comments carry meaning the names do not.
+- Views: v_workcell, v_units_out_daily, v_output_daily, v_ole_weekly, v_ole_daily, v_process, v_cycle_time, v_route, v_demand, v_fpy_daily. Call universe_describe with ONE view name before querying it; the column comments carry meaning the names do not. Results are capped at 40 rows — aggregate and filter; never list raw rows you do not need.
 - "How many workcells" has several true answers (active / inactive, customer / support) — say which.
 - "Which plant" is two facts: physical and governing. Say which you used.
 - Units are boards counted once at the model's terminal step — not scan rows.
 - Two cycle times exist: the study (standard, work content) and the MES scan delta (elapsed). Never mix them.
 - The scans cover 9 Jul → 8 Aug 2026 only; the OLE share history reaches back to March and counts differently (v_output_daily.source). Say which you used.
 - Bay identities are not reconciled; equipment capacity is an authored seed; defect codes do not exist. When a question needs one of these, say so plainly instead of guessing.
+- Never name a column you have not seen in a universe_describe result. If a query fails, describe the view, then retry — do not guess.
+- Routes are per line: step_order restarts for each line_id. Pick one line (or group by it) before listing steps end to end.
+- For a knowledge question, call universe_define for EACH term before answering, and quote the formula as defined.
+- When part of a question cannot be answered (bays, capacity, defect codes), say so in one line and answer the rest WITH numbers — demand, output, cycle time are always available.
 - Show the SQL you used in the answer (a short code block per query).
 - Be concise. Tables for numbers. One paragraph of reasoning for an analysis, with what you could not know."""
 
@@ -67,9 +79,9 @@ Rules that are not optional:
 
 def _dispatch(name: str, args: dict) -> dict:
     if name == "universe_describe":
-        return {"result": T.describe(args.get("view") or None)}
+        return {"result": T.describe_compact(args.get("view") or None)}
     if name == "universe_query":
-        return {"result": T.query(args.get("sql") or "")}
+        return {"result": T.query(args.get("sql") or "", max_rows=T.MODEL_ROWS)}
     if name == "universe_define":
         return {"result": T.define(args.get("term") or "")}
     return {"result": {"error": f"unknown tool {name}"}}
@@ -83,12 +95,15 @@ def answer(question: dict, model_fn, max_rounds: int = 8) -> dict:
            "rounds": 0, "stopped": "", "answer": "", "usage": {"prompt_tokens": 0, "completion_tokens": 0},
            "started": datetime.now().isoformat(timespec="seconds")}
     t0 = time.time()
-    for _ in range(max_rounds):
+    for rnd in range(max_rounds):
         rec["rounds"] += 1
+        _trim(messages)
+        last = rnd == max_rounds - 1
         try:
-            msg = model_fn(messages, TOOLS_SPEC)
+            # the last round gets no tools: answer with what you have
+            msg = model_fn(messages, None if last else TOOLS_SPEC)
         except Exception as e:                     # noqa: BLE001
-            rec["stopped"] = f"error: {str(e)[:200]}"
+            rec["stopped"] = f"error: {str(e)[:300]}"
             break
         u = msg.get("usage") or {}
         rec["usage"]["prompt_tokens"] += int(u.get("prompt_tokens", 0))
@@ -107,17 +122,37 @@ def answer(question: dict, model_fn, max_rounds: int = 8) -> dict:
             except ValueError:
                 args = {}
             out = _dispatch(name, args)["result"]
-            text = json.dumps(out, default=str)
+            text = out if isinstance(out, str) else json.dumps(out, default=str, separators=(",", ":"))
             ok = not (isinstance(out, dict) and out.get("error"))
             rec["tool_calls"].append({"name": name, "args": args, "ok": ok, "result_text": text[:20000],
                                       "rows": out.get("row_count") if isinstance(out, dict) else None})
             if name == "universe_query" and isinstance(out, dict) and out.get("sql"):
                 rec["sqls"].append(out["sql"])
-            messages.append({"role": "tool", "tool_call_id": tc.get("id") or name, "content": text[:12000]})
+            if len(text) > TOOL_RESULT_CHARS:
+                text = text[:TOOL_RESULT_CHARS] + f" …[truncated; {len(text)} chars — aggregate or filter for less]"
+            messages.append({"role": "tool", "tool_call_id": tc.get("id") or name, "content": text})
     else:
         rec["stopped"] = "round cap"
     rec["elapsed_s"] = round(time.time() - t0, 1)
     return rec
+
+
+def _trim(messages: list[dict]) -> None:
+    """Keep the conversation under the budget: older tool results become a stub
+    (the model already used them), newest KEEP_FULL_RESULTS stay verbatim."""
+    tool_idx = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    for i in tool_idx[:-KEEP_FULL_RESULTS] if len(tool_idx) > KEEP_FULL_RESULTS else []:
+        c = messages[i]["content"]
+        if len(c) > 300:
+            messages[i]["content"] = c[:240] + " …[older result trimmed]"
+    total = sum(len(m.get("content") or "") for m in messages)
+    i = 0
+    while total > CONTEXT_BUDGET_CHARS and i < len(tool_idx):
+        c = messages[tool_idx[i]]["content"]
+        if len(c) > 120:
+            messages[tool_idx[i]]["content"] = c[:100] + " …[trimmed]"
+            total = sum(len(m.get("content") or "") for m in messages)
+        i += 1
 
 
 def grade(rec: dict) -> dict:
@@ -145,8 +180,11 @@ def _load_env() -> None:
 
 def openai_compatible(base: str, key: str, model: str, temperature: float = 0.0):
     def call(messages, tools_spec):
-        body = {"model": model, "messages": messages, "tools": tools_spec, "tool_choice": "auto",
-                "temperature": temperature, "max_tokens": 2500}
+        body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": MAX_TOKENS}
+        if tools_spec:
+            body.update({"tools": tools_spec, "tool_choice": "auto"})
+        if "gpt-oss" in model:
+            body["reasoning_effort"] = "low"       # the budget is tokens per minute, not brains
         for attempt in range(4):
             r = httpx.post(f"{base.rstrip('/')}/chat/completions", json=body, timeout=180,
                            headers={"Authorization": f"Bearer {key}"} if key else {})
@@ -154,7 +192,8 @@ def openai_compatible(base: str, key: str, model: str, temperature: float = 0.0)
                 m = re.search(r"try again in ([\d.]+)s", r.text)
                 time.sleep(min(float(m.group(1)) if m else 5.0, 30.0) + 0.5)
                 continue
-            r.raise_for_status()
+            if r.status_code >= 400:
+                raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
             data = r.json()
             msg = data["choices"][0]["message"]
             return {"content": msg.get("content"), "tool_calls": msg.get("tool_calls"), "usage": data.get("usage", {})}

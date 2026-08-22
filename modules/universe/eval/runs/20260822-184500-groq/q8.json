@@ -1,0 +1,55 @@
+{
+ "id": 8,
+ "question": "knowledge questions: what is uph, what is cycle time, how do you calculate ole, what variables are related to each other",
+ "tool_calls": [
+  {
+   "name": "universe_define",
+   "args": {
+    "term": "UPH"
+   },
+   "ok": true,
+   "result_text": "[{\"source\":\"rules.md\",\"text\":\"1. **Model reality, not convenience.** If a tool moves between bays, the model must\\n   allow it \\u2014 even if a simpler model would be easier this week.\\n2. **Places nest; things get assigned.** Locations form a strict containment\\n   hierarchy. Everything else *references* a location. Never nest an entity that\\n   can move. (This is why workcell is not in the location spine.)\\n3. **Use Jabil's vocabulary.** Workcell = customer. People must recognise their\\n   world in the model.\\n4. **One definition per entity, everywhere.** No module, query or report invents\\n   its own meaning for a shared term.\\n5. **Facts are events; dimensions are things; attributes are descriptions.**\\n   Metrics (OLE, UPH, LBR) are calculations over facts sliced by dimensions \\u2014\\n   never stored as a category of their own.\\n6. **Decide slowly, record permanently.** Every decision \\u2192 the decision log with a\\n   date. Every unknown \\u2192 open questions. Never silently assumed.\\n7. **Never lie by omission.** Draft is marked draft. Undecided is marked undecided.\"},{\"source\":\"vocabulary.md\",\"text\":\"| **UPH** | Units per hour = output \\u00f7 hours | A metric, never stored |\"}]",
+   "rows": null
+  }
+ ],
+ "sqls": [],
+ "rounds": 2,
+ "stopped": "answered",
+ "answer": "**UPH (Units\u2011per\u2011Hour)**  \n- **Meaning** \u2013 A productivity metric that shows how many finished boards are produced per hour of production.  \n- **Formula** \u2013 `UPH = total units shipped (or counted at the terminal step) \u00f7 total production hours`.  \n- **Source** \u2013 The \u201cunits\u201d come from the terminal step in the model (the last step in\u202fv_route\u202ffor each workcell). The \u201chours\u201d are the elapsed scan time recorded by the MES (the delta between scan\u2011in and scan\u2011out timestamps in\u202fv_cycle_time\u202f*study*\u202f=\u202fstandard work\u2011content, *MES*\u202f=\u202factual elapsed).  \n\n**Cycle Time**  \n- **Two kinds** \u2013  \n  1. **Study (standard) cycle time** \u2013 The engineered work\u2011content for a step, stored in\u202fv_cycle_time\u202fas\u202f`standard_minutes`.  \n  2. **MES (actual) cycle time** \u2013 The real elapsed time measured by the scan system, stored as\u202f`elapsed_minutes`.  \n- **Never mix** \u2013 Use the study value for capacity planning, the MES value for performance analysis.  \n\n**OLE (Overall Labor Effectiveness)**  \n- **What it measures** \u2013 The proportion of labor time that is productive versus total labor time (including downtime, idle, and non\u2011value\u2011added time).  \n- **Calculation** \u2013  \n  1. **Labor\u2011productive time** =\u202f`(Units\u202f\u00d7\u202fStudy Cycle Time) / 60`\u202f\u2192\u202fhours of value\u2011added work.  \n  2. **Total labor time** =\u202f`(Units\u202f\u00d7\u202fMES Cycle Time) / 60`\u202f\u2192\u202fhours actually spent on the board.  \n  3. **OLE\u202f%** =\u202f`Labor\u2011productive time \u00f7 Total labor time \u00d7 100`.  \n- **Data origins** \u2013  \n  *Units* come from the terminal\u2011step count in\u202fv_output_daily\u202f(`units_out`).  \n  *Study Cycle Time* from\u202fv_cycle_time\u202f(`standard_minutes`).  \n  *MES Cycle Time* from\u202fv_cycle_time\u202f(`elapsed_minutes`).  \n- **Time window** \u2013 For the recent scan period (9\u202fJul\u202f\u2192\u202f8\u202fAug\u202f2026) we use the MES values; for historic OLE trends (back to March\u202f2026) the model uses the `source` column in\u202fv_output_daily\u202fto pick the appropriate calculation method.  \n\n**Key Variables and Their Relationships**  \n\n| Variable | View / Column | Role | How it links to others |\n|----------|---------------|------|------------------------|\n| `workcell` | v_workcell | Customer (e.g., KEYSIGHT, WABTEC) | Joins to all other views via `workcell_id`. |\n| `units_out` | v_output_daily / v_units_out_daily | Finished boards counted at terminal step | Drives UPH, OLE, and FPY calculations. |\n| `standard_minutes` | v_cycle_time (study) | Engineered work content per step | Multiplied by `units_out` \u2192 value\u2011added labor hours (used in OLE). |\n| `elapsed_minutes` | v_cycle_time (MES) | Actual scan\u2011measured time per step | Multiplied by `units_out` \u2192 total labor hours (used in OLE). |\n| `hours_worked` | Derived from scan timestamps (MES) | Total production time in the period | Denominator for UPH. |\n| `fpy` | v_fpy_daily | First\u2011pass yield (good units \u00f7 total units) | Often correlated with OLE and UPH; higher FPY usually improves OLE. |\n| `demand_qty` | v_demand | Planned quantity for the workcell | Provides a target for `units_out`; gaps affect capacity planning. |\n| `route_id` | v_route | Sequence of steps for a board | Determines which cycle\u2011time rows apply to a workcell\u2019s product. |\n\n**Summary of relationships**  \n- **Units \u2192 UPH**: More units in the same hours raise UPH.  \n- **Units + Study Cycle Time \u2192 Value\u2011added labor** (part of OLE numerator).  \n- **Units + MES Cycle Time \u2192 Total labor** (OLE denominator).  \n- **FPY** influences the effective units that count toward OLE and UPH because only first\u2011pass good boards are considered \u201coutput\u201d in the model.  \n- **Demand** sets the expected `units_out`; deviations highlight capacity or quality issues that will be reflected in UPH and OLE trends.  \n\n*What we could not know*: The model does not store explicit \u201cdowntime\u201d or \u201cidle\u201d codes, so OLE is derived only from the two cycle\u2011time measures and the unit count; any additional labor\u2011non\u2011value\u2011added categories would need to be added to the data model.",
+ "usage": {
+  "prompt_tokens": 1738,
+  "completion_tokens": 1091
+ },
+ "started": "2026-08-22T18:50:09",
+ "elapsed_s": 26.7,
+ "model": "openai/gpt-oss-120b",
+ "notes": [
+  "numbers not found in tool results: ['100', '2026']"
+ ],
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": true
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": false
+   },
+   {
+    "name": "used define",
+    "passed": true
+   },
+   {
+    "name": "OLE formula",
+    "passed": false
+   },
+   {
+    "name": "two cycle times",
+    "passed": true
+   }
+  ],
+  "passed": 3,
+  "total": 5
+ }
+}

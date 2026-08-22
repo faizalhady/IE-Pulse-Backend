@@ -25,7 +25,8 @@ import duckdb
 
 from modules.universe import views as V
 
-MAX_ROWS = 200
+MAX_ROWS = 200          # hard cap on rows returned
+MODEL_ROWS = 40         # what a model gets by default — enough to read, small enough for an 8k-token budget
 TIMEOUT_S = 30
 HIDDEN_VIEWS = {"v_employee"}
 ALLOWED_VIEWS = tuple(v for v in V.VIEWS if v not in HIDDEN_VIEWS)
@@ -75,6 +76,35 @@ def describe(view: str | None = None) -> list[dict]:
     return out
 
 
+def describe_compact(view: str | None = None) -> str:
+    """The same, as text a model reads cheaply: one line per column. All views
+    without a name gives names + one-line purpose only (ask for a view to see
+    its columns) — a full dump is ~4k tokens, half of a free-tier request."""
+    if view:
+        d = describe(view)
+        if not d:
+            return f"no such view: {view}. Views: {', '.join(ALLOWED_VIEWS)}"
+        return d[0]["view"] + "\n" + "\n".join(f"  {c['name']} ({c['type']}): {c['comment']}" for c in d[0]["columns"])
+    purpose = {
+        "v_workcell": "one row per workcell (= customer): type, status, physical and governing plant",
+        "v_units_out_daily": "boards completed per (workcell, assembly, date, shift) — scans 9 Jul → 8 Aug 2026",
+        "v_output_daily": "units per day from TWO sources side by side: boards (scans) and the OLE share (Mar → Aug) — source column",
+        "v_ole_weekly": "OLE per workcell per ISO week from the universe, beside the OLE module's number and the reason they differ",
+        "v_ole_daily": "OLE per workcell per date per shift; smh_policy column",
+        "v_process": "one row per process (alias level): kind, stage, who does it",
+        "v_cycle_time": "IEDB time studies: standard seconds per (workcell, assembly, revision, line, step)",
+        "v_route": "ordered route steps per (model, line): step_order, alias, station, standard seconds",
+        "v_demand": "planner demand per (workcell, assembly, period)",
+        "v_fpy_daily": "first-pass yield per (workcell, assembly, test step, date)",
+    }
+    con = _connection()
+    lines = []
+    for v in ALLOWED_VIEWS:
+        cols = [r[0] for r in con.execute("select column_name from duckdb_columns() where table_name = ? order by column_index", [v]).fetchall()]
+        lines.append(f"{v}: {purpose.get(v, '')}\n  columns: {', '.join(cols)}")
+    return "\n".join(lines) + "\nOnly these columns exist. Call universe_describe with a view name for what each column means."
+
+
 # ─── query ───────────────────────────────────────────────────────────────────
 
 def _strip_strings(sql: str) -> str:
@@ -101,12 +131,13 @@ def validate(sql: str) -> str | None:
     return None
 
 
-def query(sql: str) -> dict:
+def query(sql: str, max_rows: int = MAX_ROWS) -> dict:
     """Run one caged SELECT over the views. -> {columns, rows, row_count, sql, truncated} or {error, detail}."""
     bad = validate(sql)
     if bad:
         return {"error": "sql_rejected", "detail": bad, "sql": sql}
-    wrapped = f"select * from ({sql.strip().rstrip(';')}) as q limit {MAX_ROWS}"
+    max_rows = min(max_rows, MAX_ROWS)
+    wrapped = f"select * from ({sql.strip().rstrip(';')}) as q limit {max_rows}"
     con = _connection()
     timer = threading.Timer(TIMEOUT_S, con.interrupt)
     with _lock:
@@ -121,7 +152,7 @@ def query(sql: str) -> dict:
             timer.cancel()
     return {"columns": cols,
             "rows": [dict(zip(cols, (str(v) if not isinstance(v, (int, float, bool, type(None))) else v for v in r))) for r in rows],
-            "row_count": len(rows), "truncated": len(rows) >= MAX_ROWS, "sql": wrapped}
+            "row_count": len(rows), "truncated": len(rows) >= max_rows, "sql": wrapped}
 
 
 # ─── define ──────────────────────────────────────────────────────────────────

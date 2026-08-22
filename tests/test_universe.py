@@ -474,6 +474,11 @@ def test_fpy_view_is_loop_one_pass_over_tested():
         assert n > 1000, n
         (bad,) = con.execute("select count(*) from v_fpy_daily where boards_tested < boards_passed").fetchone()
         assert bad == 0, bad
+        # trial 2 finding: an F at SCRAP / BIRTH / RTC is a disposition, not a test result
+        (bad,) = con.execute("select count(*) from v_fpy_daily where step ilike '%SCRAP%' or step ilike 'BIRTH%' or step ilike '%RTC%'").fetchone()
+        assert bad == 0, bad
+        (dead,) = con.execute("select count(*) from (select workcell_id, step from v_fpy_daily group by 1, 2 having sum(boards_passed) = 0)").fetchone()
+        assert dead == 0, f"{dead} (workcell, step) pairs never pass a board — not test steps"
     finally:
         con.close()
 

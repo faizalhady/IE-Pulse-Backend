@@ -1,0 +1,119 @@
+{
+ "id": 8,
+ "question": "knowledge questions: what is uph, what is cycle time, how do you calculate ole, what variables are related to each other",
+ "tool_calls": [
+  {
+   "name": "universe_define",
+   "args": {
+    "term": "UPH"
+   },
+   "ok": true,
+   "result_text": "[{\"source\": \"rules.md\", \"text\": \"1. **Model reality, not convenience.** If a tool moves between bays, the model must\\n   allow it \\u2014 even if a simpler model would be easier this week.\\n2. **Places nest; things get assigned.** Locations form a strict containment\\n   hierarchy. Everything else *references* a location. Never nest an entity that\\n   can move. (This is why workcell is not in the location spine.)\\n3. **Use Jabil's vocabulary.** Workcell = customer. People must recognise their\\n   world in the model.\\n4. **One definition per entity, everywhere.** No module, query or report invents\\n   its own meaning for a shared term.\\n5. **Facts are events; dimensions are things; attributes are descriptions.**\\n   Metrics (OLE, UPH, LBR) are calculations over facts sliced by dimensions \\u2014\\n   never stored as a category of their own.\\n6. **Decide slowly, record permanently.** Every decision \\u2192 the decision log with a\\n   date. Every unknown \\u2192 open questions. Never silently assumed.\\n7. **Never lie by omission.** Draft is marked draft. Undecided is marked undecided.\"}, {\"source\": \"vocabulary.md\", \"text\": \"| **UPH** | Units per hour = output \\u00f7 hours | A metric, never stored |\"}]",
+   "rows": null
+  },
+  {
+   "name": "universe_define",
+   "args": {
+    "term": "cycle time"
+   },
+   "ok": true,
+   "result_text": "[{\"source\": \"SKILL.md\", \"text\": \"1. **Workcell = customer.** Never a workstation, a station, or a cell on a line. In\\n   MES the field is literally `CustomerName` / `Customer_ID`. One table, never two.\\n2. **A workcell is a thing, not a place.** It *occupies* bays \\u2014 rarely moves, but it\\n   moves, even across plants. The link is `bay_occupancy` with `valid_from` /\\n   `valid_to`. Never a workcell column on bay, never a bay column on workcell.\\n3. **The floor chunk is the bay.** \\\"Where does WABTEC build?\\\" is answered with a bay\\n   name. Lines sit inside bays (engineering view, IEDB only); typically one line = one\\n   workcell. Bays can be shared or split \\u2014 AOP's are shared by design.\\n4. **A process step belongs to the route**, never to a workstation. The station is\\n   where a step is *observed*. \\\"Step\\\" and \\\"process\\\" are synonyms on the floor.\\n5. **Never join on a raw workcell name.** The same workcell is spelled five to seven\\n   ways across systems. Resolve through `workcell_alias(system, value)` first.\\n   Demand \\u2194 cycle time joins on the normalised part number.\\n6. **Say which count.** \\\"How many workcells\\\" has three true answers (40 configured /\\n   34 with data / 27 real). Always name the column a count came from.\\n7. **T\"}, {\"source\": \"map.md\", \"text\": \"| `data/mart/universe/` | dim_workcell (111) \\u00b7 workcell_alias (537) \\u00b7 workcell_alias_conflict (7) \\u00b7 dim_calendar \\u00b7 dim_shift \\u00b7 dim_model (167k) \\u00b7 dim_model_revision (226k) \\u00b7 fact_scan (18.7M, 9 Jul \\u2192 8 Aug 2026) \\u00b7 model_terminal_step \\u00b7 fact_unit_out (1.67M) \\u00b7 fact_paid_hours \\u00b7 dim_smh \\u00b7 ole_reconciliation \\u00b7 **Phase 2/3:** dim_employee \\u00b7 dim_department \\u00b7 dim_process \\u00b7 process_alias \\u00b7 dim_scan_point \\u00b7 fact_cycle_time_study (4.46M) \\u00b7 fact_cycle_time_measured \\u00b7 fact_route (1.9M) \\u00b7 fact_demand \\u00b7 fact_production_share (separate, labelled) \\u00b7 completion_reconciliation \\u00b7 auth_* seeds. Views: v_workcell \\u00b7 v_units_out_daily \\u00b7 v_ole_weekly \\u00b7 v_ole_daily \\u00b7 v_employee \\u00b7 v_process \\u00b7 v_cycle_time \\u00b7 v_route \\u00b7 v_demand \\u00b7 v_fpy_daily \\u00b7 v_output_daily |\"}, {\"source\": \"SKILL.md\", \"text\": \"- Which **count** of workcells does this need, and does the user know there are three?\\n- Is \\\"in P1\\\" **physical** or **governing**? MICRON SIG, LAMGB, LAMMEC sit in BK, run by P1.\\n- Is the workcell name **resolved through the alias table**, or raw? (`TMO` = `THERMO FISHER`; `BC (DANAHER)` = `BECKMANCOULTER`.)\\n- Is the cycle time a **study** or a **scan delta**?\\n- Is the unit count at the **terminal step**, or a row count?\\n- Does the question touch **bays**? Then the two id schemes (layout vs MES) are still unreconciled \\u2014 say so.\\n- Is the answer a **lookup or an analysis**? Five of nine pool questions are analyses; reason over the numbers, show the SQL.\"}, {\"source\": \"map.md\", \"text\": \"| `C:\\\\Users\\\\4033375\\\\Projects\\\\docs\\\\registry\\\\` | The August draft registry \\u2014 107 files. `workcell.csv` (110 rows, 42 active) + `workcell_alias.csv` (531, 13 systems) \\u00b7 `model.parquet` (167k) \\u00b7 `model_revision.parquet` (226k) \\u00b7 `calendar.csv` (4,505) \\u00b7 **`production_scan.parquet`** (19.8M scans, 9 Jul \\u2192 8 Aug 2026) \\u00b7 `production_out.parquet` \\u00b7 `paid_hours.parquet` (327k) \\u00b7 `smh.parquet` \\u00b7 `cycle_time.parquet` \\u00b7 `demand.parquet` \\u00b7 `bay.csv`, `bay_occupancy.csv`, `line.csv`, `asset.csv`, `employee.csv`, `department.csv` \\u00b7 `schema/01_master_data.sql`, `02_semantic_views.sql` \\u00b7 `gen_*.py` generators (one-off, no tests) \\u00b7 `wipscan/` raw pulls (3.3 GB) |\"}, {\"source\": \"rules.md\", \"text\": \"- **Plant** carries two facts: physical plant and governing plant (MICRON SIG,\\n  LAMGB, LAMMEC sit in BK, are run by P1). Region above plant: Penang Island =\\n  P1 + P2, vs Batu Kawan.\\n- **Area** \\u2014 the word collides: geography (`P1A`, `P1B-L2`) in FSMS and the layout;\\n  process stage (`SMT` / `TH` / `BE`) in cycle time, PPQT and OLE. Two columns, never one.\\n- **Bay** \\u2014 the chunk a workcell occupies. Name decided; *identity* not: layout\\n  `BAY 14` vs MES `BAY 105`, 11 apparent overlaps, none trusted (case 9).\\n- **Line** \\u2014 `sub_workcenter`, exists only in IEDB; MES has no line. The line \\u2192 bay\\n  link is the only bridge between the engineering and shopfloor views.\\n- **Station** \\u2014 MES `StepName`, the scan point. **Workstation PC** \\u2014 EST1C `PCName`;\\n  whether it is a level or an attribute is undecided.\"}, {\"source\": \"vocabulary.md\", \"text\": \"| **Area** | \\u26a0\\ufe0f Two meanings. Geography: `P1A`, `P1B-L2`, `P1C` (FSMS, layout). Process stage: `SMT`, `TH`, `BE` (cycle time `workcenter`, PPQT `area`, OLE `scan_stage`) | Never one column for both. HLA is a *kind* of BE |\"}, {\"source\": \"vocabulary.md\", \"text\": \"| Alias | IEDB `alias` \\u2014 \\\"HLA (CPU) 1\\\" (1,309) \\u2014 **the identity** the cycle time sits on | |\"}, {\"source\": \"vocabulary.md\", \"text\": \"| **Cycle time (study)** | Seconds per unit per process, from a stopwatch study by an IE. IEDB. `mach` / `imt` / `hand` | Work content. The standard |\"}]",
+   "rows": null
+  },
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_units_out_daily"
+   },
+   "ok": true,
+   "result_text": "[{\"view\": \"v_units_out_daily\", \"columns\": [{\"name\": \"workcell\", \"type\": \"VARCHAR\", \"comment\": \"Workcell = customer the board was built for. Resolved through the registry, never a raw MES string.\"}, {\"name\": \"workcell_id\", \"type\": \"BIGINT\", \"comment\": \"Join key to v_workcell.\"}, {\"name\": \"assembly\", \"type\": \"VARCHAR\", \"comment\": \"The part number = model = assembly \\u2014 one thing, three words. A model is (workcell, assembly) together.\"}, {\"name\": \"model_id\", \"type\": \"BIGINT\", \"comment\": \"Join key to dim_model (assembly \\u00d7 revision lives beneath it).\"}, {\"name\": \"date\", \"type\": \"DATE\", \"comment\": \"Local (Asia/Singapore) date of the completing scan. MES timestamps were UTC; converted first.\"}, {\"name\": \"shift\", \"type\": \"INTEGER\", \"comment\": \"2 = 07:00\\u201319:00, 3 = 19:00\\u201307:00. Production runs only on these two; a scan before 07:00 belongs to the previous date's shift 3 \\u2014 see shift_date in fact_scan.\"}, {\"name\": \"iso_year\", \"type\": \"BIGINT\", \"comment\": \"ISO year of the date \\u2014 it LAGS the calendar year at year end (1 Jan 2027 is still 2026-W53).\"}, {\"name\": \"iso_week\", \"type\": \"BIGINT\", \"comment\": \"ISO week 1\\u201353. 2026 has a week 53.\"}, {\"name\": \"fiscal_year\", \"type\": \"BIGINT\", \"comment\": \"Jabil fiscal year \\u2014 starts in SEPTEMBER. Sep 2026 is Q1 of FY2027.\"}, {\"name\": \"fiscal_quarter\", \"type\": \"BIGINT\", \"comment\": \"Q1 Sep\\u2013Nov \\u00b7 Q2 Dec\\u2013Feb \\u00b7 Q3 Mar\\u2013May \\u00b7 Q4 Jun\\u2013Aug.\"}, {\"name\": \"units_out\", \"type\": \"BIGINT\", \"comment\": \"Boards completed, each counted ONCE, at the model's terminal step. Not scan rows: rework loops re-scan a step and would double count.\"}, {\"name\": \"terminal_step\", \"type\": \"VARCHAR\", \"comment\": \"The step this model's boards finish at \\u2014 learned from the boards themselves (PACKOUT for most; some routes end earlier). LINK is a logistics scan after completion and is never the terminal step unless nothing else was seen.\"}, {\"name\": \"terminal_learned\", \"type\": \"BOOLEAN\", \"comment\": \"true = learned from >= 5 boards with a >= 50% majority \\u00b7 false = too little history, PACKOUT assumed.\"}]}]",
+   "rows": null
+  },
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_ole_daily"
+   },
+   "ok": true,
+   "result_text": "[{\"view\": \"v_ole_daily\", \"columns\": [{\"name\": \"workcell\", \"type\": \"VARCHAR\", \"comment\": \"Workcell = customer.\"}, {\"name\": \"workcell_id\", \"type\": \"BIGINT\", \"comment\": \"Join key to v_workcell.\"}, {\"name\": \"date\", \"type\": \"DATE\", \"comment\": \"The shift's date (a scan before 07:00 belongs to the previous date's night shift).\"}, {\"name\": \"shift\", \"type\": \"INTEGER\", \"comment\": \"2 = 07:00\\u201319:00, 3 = 19:00\\u201307:00.\"}, {\"name\": \"units\", \"type\": \"BIGINT\", \"comment\": \"Boards completed this shift, once each, at the model's terminal step.\"}, {\"name\": \"units_missing_smh\", \"type\": \"BIGINT\", \"comment\": \"Of those, units with no SMH standard. What they earn depends on smh_policy.\"}, {\"name\": \"earned_smh\", \"type\": \"DOUBLE\", \"comment\": \"\\u03a3 units \\u00d7 SMH per unit \\u2014 standard man-hours earned. Under policy 'estimate', units without a standard earn the workcell's average.\"}, {\"name\": \"paid_hours\", \"type\": \"DOUBLE\", \"comment\": \"Paid direct-labour hours for the workcell on this shift (payroll).\"}, {\"name\": \"ole\", \"type\": \"DOUBLE\", \"comment\": \"OLE = earned \\u00f7 paid \\u00d7 100. The labour twin of OEE; high is good.\"}, {\"name\": \"smh_policy\", \"type\": \"VARCHAR\", \"comment\": \"zero = units without SMH earn nothing and the gap is visible (universe default) \\u00b7 estimate = they earn the workcell average (what the OLE module does with OLE_SMH_FALLBACK=avg). Case 62.\"}]}]",
+   "rows": null
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT workcell, date, shift, units_out FROM v_units_out_daily LIMIT 5"
+   },
+   "ok": true,
+   "result_text": "{\"columns\": [\"workcell\", \"date\", \"shift\", \"units_out\"], \"rows\": [{\"workcell\": \"MOTOROLA\", \"date\": \"2026-07-15\", \"shift\": 2, \"units_out\": 320}, {\"workcell\": \"FORTALEZA\", \"date\": \"2026-07-15\", \"shift\": 2, \"units_out\": 4}, {\"workcell\": \"LIFE360\", \"date\": \"2026-07-15\", \"shift\": 2, \"units_out\": 106}, {\"workcell\": \"ARISTA NETWORKS\", \"date\": \"2026-07-16\", \"shift\": 3, \"units_out\": 144}, {\"workcell\": \"MOTOROLA\", \"date\": \"2026-07-31\", \"shift\": 2, \"units_out\": 129}], \"row_count\": 5, \"truncated\": false, \"sql\": \"select * from (SELECT workcell, date, shift, units_out FROM v_units_out_daily LIMIT 5) as q limit 200\"}",
+   "rows": 5
+  },
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_cycle_time"
+   },
+   "ok": true,
+   "result_text": "[{\"view\": \"v_cycle_time\", \"columns\": [{\"name\": \"workcell\", \"type\": \"VARCHAR\", \"comment\": \"Workcell = customer.\"}, {\"name\": \"workcell_id\", \"type\": \"BIGINT\", \"comment\": \"Join key to v_workcell.\"}, {\"name\": \"assembly\", \"type\": \"VARCHAR\", \"comment\": \"Part number = model = assembly.\"}, {\"name\": \"model_id\", \"type\": \"BIGINT\", \"comment\": \"Join key to dim_model.\"}, {\"name\": \"revision\", \"type\": \"VARCHAR\", \"comment\": \"The revision this study is for. Standards are per revision; a new revision does NOT automatically inherit (open question).\"}, {\"name\": \"line_id\", \"type\": \"VARCHAR\", \"comment\": \"The line (sub-workcenter) the route runs on \\u2014 IEDB only.\"}, {\"name\": \"step_order\", \"type\": \"INTEGER\", \"comment\": \"Position of the step on the route.\"}, {\"name\": \"alias\", \"type\": \"VARCHAR\", \"comment\": \"The process alias \\u2014 the identity the time sits on.\"}, {\"name\": \"process_kind\", \"type\": \"VARCHAR\", \"comment\": \"The kind of work (IEDB process).\"}, {\"name\": \"workcenter\", \"type\": \"VARCHAR\", \"comment\": \"SMT \\u00b7 TH \\u00b7 BE stage.\"}, {\"name\": \"cycle_time_sec\", \"type\": \"DOUBLE\", \"comment\": \"The STANDARD: stopwatch work content per unit, seconds, from an IE time study. Never an elapsed time \\u2014 that is fact_cycle_time_measured.\"}, {\"name\": \"mach_sec\", \"type\": \"DOUBLE\", \"comment\": \"Machine time component.\"}, {\"name\": \"imt_sec\", \"type\": \"DOUBLE\", \"comment\": \"Operator-at-machine component.\"}, {\"name\": \"hand_sec\", \"type\": \"DOUBLE\", \"comment\": \"Pure hand time component.\"}, {\"name\": \"headcount\", \"type\": \"DOUBLE\", \"comment\": \"Operators at the step.\"}, {\"name\": \"parallel_cap\", \"type\": \"DOUBLE\", \"comment\": \"Parallel capacity within ONE study row (panel-up). NOT machines available.\"}, {\"name\": \"fpy\", \"type\": \"DOUBLE\", \"comment\": \"First-pass yield assumed by the study.\"}, {\"name\": \"ct_status\", \"type\": \"VARCHAR\", \"comment\": \"measured = a study with a time \\u00b7 missing = the step exists in IEDB with no time. Absence is a value (case 41).\"}, {\"name\": \"updated_on\", \"type\": \"VARCHAR\", \"comment\": \"When IEDB last touched the row.\"}, {\"name\": \"study_id\", \"type\": \"BIGINT\", \"comment\": \"The IEDB row id \\u2014 studies are append-only events.\"}]}]",
+   "rows": null
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT workcell, assembly, cycle_time_sec, mach_sec, imt_sec, hand_sec, headcount FROM v_cycle_time LIMIT 5"
+   },
+   "ok": true,
+   "result_text": "{\"columns\": [\"workcell\", \"assembly\", \"cycle_time_sec\", \"mach_sec\", \"imt_sec\", \"hand_sec\", \"headcount\"], \"rows\": [{\"workcell\": \"KEYSIGHT\", \"assembly\": \"54760-66421N\", \"cycle_time_sec\": 192.54, \"mach_sec\": null, \"imt_sec\": null, \"hand_sec\": 192.54, \"headcount\": 1.0}, {\"workcell\": \"KEYSIGHT\", \"assembly\": \"54760-66421N\", \"cycle_time_sec\": 251.87, \"mach_sec\": null, \"imt_sec\": null, \"hand_sec\": 251.87, \"headcount\": 1.0}, {\"workcell\": \"KEYSIGHT\", \"assembly\": \"54760-66421N\", \"cycle_time_sec\": 251.87, \"mach_sec\": null, \"imt_sec\": null, \"hand_sec\": 251.87, \"headcount\": 1.0}, {\"workcell\": \"KEYSIGHT\", \"assembly\": \"54760-66421N\", \"cycle_time_sec\": 1800.0, \"mach_sec\": null, \"imt_sec\": null, \"hand_sec\": 1800.0, \"headcount\": 1.0}, {\"workcell\": \"KEYSIGHT\", \"assembly\": \"54760-66421N\", \"cycle_time_sec\": 182.74, \"mach_sec\": null, \"imt_sec\": null, \"hand_sec\": 182.74, \"headcount\": 1.0}], \"row_count\": 5, \"truncated\": false, \"sql\": \"select * from (SELECT workcell, assembly, cycle_time_sec, mach_sec, imt_sec, hand_sec, headcount FROM v_cycle_time LIMIT 5) as q limit 200\"}",
+   "rows": 5
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT workcell, date, shift, units, earned_smh, paid_hours, ole FROM v_ole_daily LIMIT 5"
+   },
+   "ok": true,
+   "result_text": "{\"columns\": [\"workcell\", \"date\", \"shift\", \"units\", \"earned_smh\", \"paid_hours\", \"ole\"], \"rows\": [{\"workcell\": \"KEYSIGHT\", \"date\": \"2026-07-29\", \"shift\": 3, \"units\": 1040, \"earned_smh\": 0.0, \"paid_hours\": 1175.98, \"ole\": 0.0}, {\"workcell\": \"INFINERA LEGACY\", \"date\": \"2026-07-29\", \"shift\": 3, \"units\": 1749, \"earned_smh\": 0.0, \"paid_hours\": 2435.83, \"ole\": 0.0}, {\"workcell\": \"ARISTA NETWORKS\", \"date\": \"2026-07-30\", \"shift\": 2, \"units\": 2612, \"earned_smh\": 0.0, \"paid_hours\": 4643.85, \"ole\": 0.0}, {\"workcell\": \"ARISTA NETWORKS\", \"date\": \"2026-08-07\", \"shift\": 2, \"units\": 5006, \"earned_smh\": 0.0, \"paid_hours\": 4475.08, \"ole\": 0.0}, {\"workcell\": \"KEYSIGHT\", \"date\": \"2026-07-30\", \"shift\": 2, \"units\": 1280, \"earned_smh\": 0.0, \"paid_hours\": 984.0, \"ole\": 0.0}], \"row_count\": 5, \"truncated\": false, \"sql\": \"select * from (SELECT workcell, date, shift, units, earned_smh, paid_hours, ole FROM v_ole_daily LIMIT 5) as q limit 200\"}",
+   "rows": 5
+  }
+ ],
+ "sqls": [
+  "select * from (SELECT workcell, date, shift, units_out FROM v_units_out_daily LIMIT 5) as q limit 200",
+  "select * from (SELECT workcell, assembly, cycle_time_sec, mach_sec, imt_sec, hand_sec, headcount FROM v_cycle_time LIMIT 5) as q limit 200",
+  "select * from (SELECT workcell, date, shift, units, earned_smh, paid_hours, ole FROM v_ole_daily LIMIT 5) as q limit 200"
+ ],
+ "rounds": 8,
+ "stopped": "round cap",
+ "answer": "",
+ "usage": {
+  "prompt_tokens": 25842,
+  "completion_tokens": 1901
+ },
+ "started": "2026-08-22T18:38:54",
+ "elapsed_s": 162.9,
+ "model": "openai/gpt-oss-120b",
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": false
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "used define",
+    "passed": true
+   },
+   {
+    "name": "OLE formula",
+    "passed": false
+   },
+   {
+    "name": "two cycle times",
+    "passed": false
+   }
+  ],
+  "passed": 2,
+  "total": 5
+ }
+}
