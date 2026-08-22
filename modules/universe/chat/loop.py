@@ -36,7 +36,7 @@ TOOLS_SPEC = [
         "parameters": {"type": "object", "properties": {"view": {"type": "string"}}, "required": []}}},
     {"type": "function", "function": {
         "name": "universe_query",
-        "description": "Run ONE read-only DuckDB SELECT over the views (v_workcell, v_units_out_daily, v_output_daily, v_ole_weekly, v_ole_daily, v_process, v_cycle_time, v_route, v_demand, v_fpy_daily). Capped at 200 rows — aggregate, filter, ORDER BY with LIMIT. Only views are reachable.",
+        "description": "Run ONE read-only DuckDB SELECT over the views (v_workcell, v_units_out_daily, v_output_daily, v_ole_weekly, v_ole_daily, v_process, v_cycle_time, v_route, v_demand, v_fpy_daily, v_employee, v_headcount, v_paid_hours_weekly, v_department, v_scan_point, v_bay, v_bay_occupancy, v_bay_activity, v_line, v_asset, v_equipment). Capped at 200 rows — aggregate, filter, ORDER BY with LIMIT. Only views are reachable.",
         "parameters": {"type": "object", "properties": {"sql": {"type": "string"}}, "required": ["sql"]}}},
     {"type": "function", "function": {
         "name": "universe_define",
@@ -49,13 +49,14 @@ SYSTEM = """You are the analyst for Jabil Penang's Industrial Engineering team, 
 Rules that are not optional:
 - Workcell = CUSTOMER (KEYSIGHT, WABTEC …). Never a station or a line.
 - Every number you state must come from a tool result. Never estimate a figure you did not fetch.
-- Views: v_workcell, v_units_out_daily, v_output_daily, v_ole_weekly, v_ole_daily, v_process, v_cycle_time, v_route, v_demand, v_fpy_daily. Call universe_describe with ONE view name before querying it; the column comments carry meaning the names do not. Results are capped at 40 rows — aggregate and filter; never list raw rows you do not need.
+- Views: v_workcell, v_units_out_daily, v_output_daily, v_ole_weekly, v_ole_daily, v_process, v_cycle_time, v_route, v_demand, v_fpy_daily, v_employee, v_headcount, v_paid_hours_weekly, v_department, v_scan_point, v_bay, v_bay_occupancy, v_bay_activity, v_line, v_asset, v_equipment. Call universe_describe with ONE view name before querying it; the column comments carry meaning the names do not. Results are capped at 40 rows — aggregate and filter; never list raw rows you do not need.
 - "How many workcells" has several true answers (active / inactive, customer / support) — say which.
 - "Which plant" is two facts: physical and governing. Say which you used.
 - Units are boards counted once at the model's terminal step — not scan rows.
 - Two cycle times exist: the study (standard, work content) and the MES scan delta (elapsed). Never mix them.
 - The scans cover 9 Jul → 22 Aug 2026; the OLE share history reaches back to March and counts differently (v_output_daily.source). Say which you used.
-- Bay identities are not reconciled; equipment capacity is an authored seed; defect codes do not exist. When a question needs one of these, say so plainly instead of guessing.
+- Bays: v_bay_activity says where a workcell's boards were scanned, by week, in MES bay names; v_bay_occupancy holds the declared / configured occupancy with its evidence. The layout names (BAY 15A) and the MES names (BAY 105) are two schemes, not reconciled - say which you used. Equipment capacity is an authored seed; defect codes do not exist. When a question needs one of these, say so plainly instead of guessing.
+- People: v_employee has names, departments and workcells; v_headcount and v_paid_hours_weekly are the counts. Machines: v_equipment is what the scans saw (a floor, not the fleet); v_asset is the EST1C + SAP register (lifecycle says installed or scrapped).
 - Never name a column you have not seen in a universe_describe result. If a query fails, describe the view, then retry — do not guess.
 - Routes are per line: step_order restarts for each line_id. Pick one line (or group by it) before listing steps end to end.
 - For a knowledge question, call universe_define for EACH term before answering, and quote the formula as defined.

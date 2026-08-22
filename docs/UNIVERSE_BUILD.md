@@ -162,3 +162,25 @@ api/routers/universe_chat.py   POST /api/universe/chat (stream) · GET/PATCH/DEL
 - The answer ends with a `data-model` part ("chain: gemini-3.7-flash -> groq-gpt-oss-120b") — the page shows "answered by <last slot>" beside the thumbs; every tool step of an answer folds into one accordion.
 - Design: `docs/superpowers/specs/2026-08-23-universe-chat-design.md`.
 
+## Wave 4 (2026-08-23) — bays, lines, assets, equipment, and the people views
+
+`modules/universe/pipeline/build4.py` (run by `build_all`, or alone with
+`python -m modules.universe.pipeline.build4`):
+
+| Table | Rows | Built from |
+|---|---|---|
+| `dim_bay` | 269 | `bay.csv` (148 layout + 121 MES) **+ every `manufacturing_area` the scans name** (4 more, `sources = 'fact_scan'`) |
+| `bay_occupancy` | 1,081 | `bay_occupancy.csv` — keeps `evidence`: observed_production · configured_in_mes · declared_on_layout |
+| `fact_bay_week` | 1,656 | `fact_scan` — workcell × bay × ISO week: boards, scans, first/last |
+| `dim_line` | 230 | `line.csv`; 147 parse to a bay code |
+| `dim_asset` | 13,943 | `asset.csv` (EST1C + SAP); lifecycle installed / scrapped |
+| `dim_equipment` | 3,571 | `fact_scan` — one row per MES equipment id, where and at what step it was seen most |
+
+New views: `v_bay`, `v_bay_occupancy`, `v_bay_activity`, `v_line`, `v_asset`, `v_equipment`,
+`v_headcount`, `v_paid_hours_weekly`, `v_department`, `v_scan_point`. **21 views total, and
+`HIDDEN_VIEWS` is now empty** — Faiz ruled on 2026-08-23 that names are included, so
+`v_employee` is reachable by the model like any other view.
+
+Cases added: 73 (four bays only the scans know; "where" has two honest answers),
+74 (tools link to workcells well, to places badly). 59/59 assertions.
+

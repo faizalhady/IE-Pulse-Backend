@@ -55,6 +55,12 @@ UNIVERSE_MART = {
     "fact_production_share": UNIVERSE_MART_DIR / "fact_production_share.parquet",  # one row per (workcell, sub-workcell, assembly, date, shift) from the OLE share — a second opinion, never merged with boards
     # ── Phase 3 ──
     "completion_reconciliation": UNIVERSE_MART_DIR / "completion_reconciliation.parquet",  # one row per (workcell, model): completion from the universe beside the Cycle Time module, delta explained
+    "dim_bay":            UNIVERSE_MART_DIR / "dim_bay.parquet",            # wave 4: both naming schemes + every bay the scans name (case 9 unresolved)
+    "bay_occupancy":      UNIVERSE_MART_DIR / "bay_occupancy.parquet",      # wave 4: who occupies which bay, with evidence
+    "fact_bay_week":      UNIVERSE_MART_DIR / "fact_bay_week.parquet",      # wave 4: workcell x bay x ISO week from the scans
+    "dim_line":           UNIVERSE_MART_DIR / "dim_line.parquet",           # wave 4: IEDB sub_workcenter lines
+    "dim_asset":          UNIVERSE_MART_DIR / "dim_asset.parquet",          # wave 4: tools + machines, EST1C + SAP
+    "dim_equipment":      UNIVERSE_MART_DIR / "dim_equipment.parquet",      # wave 4: machines as the scans see them (case 55)
     "auth_equipment_capacity": UNIVERSE_MART_DIR / "auth_equipment_capacity.parquet",  # AUTHORED: machines per (workcell, process) — seeded, to be corrected by people
     "auth_playbook":          UNIVERSE_MART_DIR / "auth_playbook.parquet",           # AUTHORED: operator → station per (workcell, model, route)
     "auth_process_group":     UNIVERSE_MART_DIR / "auth_process_group.parquet",      # AUTHORED: which steps form one buffer point (IPK)

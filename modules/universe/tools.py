@@ -28,7 +28,7 @@ from modules.universe import views as V
 MAX_ROWS = 200          # hard cap on rows returned
 MODEL_ROWS = 40         # what a model gets by default — enough to read, small enough for an 8k-token budget
 TIMEOUT_S = 30
-HIDDEN_VIEWS = {"v_employee"}
+HIDDEN_VIEWS: set[str] = set()          # 2026-08-23, Faiz: names included - nothing hidden
 ALLOWED_VIEWS = tuple(v for v in V.VIEWS if v not in HIDDEN_VIEWS)
 from modules.universe import config as C
 

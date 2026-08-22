@@ -604,9 +604,13 @@ def test_query_tool_is_caged():
     from modules.universe import tools
     for bad in ("drop table v_workcell", "select 1; select 2", "select * from fact_scan limit 1",
                 "select * from read_parquet('x.parquet')", "select * from dim_workcell",
-                "install httpfs", "select * from v_employee limit 1"):
+                "install httpfs"):
         r = tools.query(bad)
         assert r.get("error"), bad
+    # 2026-08-23, Faiz: names are included — every view is reachable, the cage is about
+    # HOW (one SELECT, views only, capped), not about which view.
+    r = tools.query("select name, workcell from v_employee limit 1")
+    assert not r.get("error"), r
     r = tools.query("select workcell, status from v_workcell order by 1")
     assert not r.get("error"), r
     assert r["row_count"] <= tools.MAX_ROWS and r["sql"].lower().rstrip().endswith(f"limit {tools.MAX_ROWS}"), r["sql"]
@@ -620,7 +624,7 @@ def test_describe_tool_returns_columns_with_meaning():
     assert {v["view"] for v in all_views} >= {"v_workcell", "v_units_out_daily", "v_fpy_daily"}, all_views
     one = tools.describe("v_workcell")
     assert one and all(c["comment"] for c in one[0]["columns"]), one
-    assert "v_employee" not in {v["view"] for v in all_views}, "payroll names must not be exposed to the trial"
+    assert "v_employee" in {v["view"] for v in all_views}, "nothing is hidden from the model (Faiz, 2026-08-23)"
 
 
 def test_define_tool_finds_the_rules():
@@ -709,6 +713,88 @@ def test_define_reads_the_metric_glossary():
     assert "TPHDirect" in hits[0]["text"] and "v_ole_weekly" in hits[0]["text"], hits[0]["text"][:200]
     assert all(len(h["text"]) <= 1200 for h in hits)
     assert tools.define("takt")[0]["text"].startswith("| **TAKT**")
+
+
+# --- Wave 4: the places and the things (2026-08-23) ------------------------------
+
+def test_dim_bay_holds_both_schemes_and_every_bay_the_scans_name():
+    """Case 9: two naming schemes coexist. Both are in dim_bay, unreconciled, and every
+    manufacturing_area the scans carry has a row - so 'where' questions never dead-end."""
+    assert U.UNIVERSE_MART["dim_bay"].exists(), "dim_bay.parquet not built"
+    schemes = dict(_q("select naming_scheme, count(*) from dim_bay group by 1"))
+    assert schemes.get("layout", 0) >= 140 and schemes.get("mes", 0) >= 96, schemes
+    (missing,) = _q("""select count(*) from (select distinct upper(trim(bay_id)) b from fact_scan where bay_id is not null and trim(bay_id) <> '')
+                       where b not in (select upper(trim(name)) from dim_bay where naming_scheme = 'mes')""")[0]
+    assert missing == 0, missing
+    (with_plant,) = _q("select count(*) from dim_bay where naming_scheme = 'mes' and scans > 0 and plant is null")[0]
+    assert with_plant == 0
+
+
+def test_bay_occupancy_carries_its_evidence_and_the_scans_say_where_wabtec_builds():
+    ev = dict(_q("select evidence, count(*) from bay_occupancy group by 1"))
+    assert {"observed_production", "configured_in_mes", "declared_on_layout"} <= set(ev), ev
+    rows = _q("""select f.bay, sum(f.boards) from fact_bay_week f join dim_workcell w using (workcell_id)
+                 where w.name = 'WABTEC' group by 1 order by 2 desc limit 3""")
+    assert rows and rows[0][1] > 1000, rows
+    from modules.universe import views
+    con = views.connect()
+    try:
+        top = con.execute("select bay, boards from v_bay_activity where workcell = 'WABTEC' order by boards desc limit 1").fetchone()
+        assert top and top[1] > 0
+        obs = con.execute("select workcells_observed from v_bay where upper(trim(bay)) = upper(trim(?)) and naming_scheme = 'mes'", [top[0]]).fetchone()[0]
+        assert obs and "WABTEC" in obs, obs
+    finally:
+        con.close()
+
+
+def test_dim_line_keeps_every_line_and_how_many_parse_to_a_bay():
+    (n, parsed) = _q("select count(*), count(*) filter (where parsed) from dim_line")[0]
+    assert n == 230 and parsed == 147, (n, parsed)
+    (no_wc,) = _q("select count(*) from dim_line where workcell_id is null")[0]
+    assert no_wc < n * 0.2, no_wc
+
+
+def test_dim_asset_keeps_lifecycle_and_links_smart_torque_tools_to_workcells():
+    (n, installed, st, st_linked) = _q("""select count(*), count(*) filter (where lifecycle = 'installed'),
+                                              count(*) filter (where is_smart_torque), count(*) filter (where is_smart_torque and workcell_id is not null)
+                                       from dim_asset""")[0]
+    # 1,349 smart-torque tools (case 35); 94% carry a workcell, only ~180 a bay - the location text is the gap
+    assert n == 13943 and installed > 5000 and st == 1349 and st_linked >= 0.9 * st, (n, installed, st, st_linked)
+
+
+def test_equipment_observed_from_scans_is_a_floor_not_the_fleet():
+    (n,) = _q("select count(*) from dim_equipment")[0]
+    assert n >= 3000, n
+    (nulls,) = _q("select count(*) from dim_equipment where last_seen is null or scans = 0")[0]
+    assert nulls == 0
+    top = _q("select name, step from dim_equipment order by scans desc limit 1")[0]
+    assert top[1], top
+
+
+def test_wave4_views_are_commented_and_the_model_sees_everything():
+    """Every wave-4 view exists with a comment on every column, and nothing is hidden from
+    the model any more - Faiz's ruling of 2026-08-23: names included."""
+    from modules.universe import views, tools
+    wanted = ["v_employee", "v_headcount", "v_paid_hours_weekly", "v_department", "v_scan_point",
+              "v_bay", "v_bay_occupancy", "v_bay_activity", "v_line", "v_asset", "v_equipment"]
+    for name in wanted:
+        assert name in views.VIEWS, name
+        sql, comments = views.VIEWS[name]
+        assert name in tools.ALLOWED_VIEWS, f"{name} hidden from the model"
+        cols = [c for c, _t, _cm in views.describe(name)]
+        missing = [c for c in cols if not comments.get(c)]
+        assert not missing, (name, missing)
+    con = views.connect()
+    try:
+        (people,) = con.execute("select sum(people) from v_headcount").fetchone()
+        (emp,) = con.execute("select count(*) from v_employee").fetchone()
+        assert people == emp > 10000, (people, emp)
+        (wk,) = con.execute("select count(*) from v_paid_hours_weekly where paid_hours > 0").fetchone()
+        assert wk > 100
+        r = tools.query("select workcell, bay, boards from v_bay_activity where workcell = 'KEYSIGHT' order by boards desc limit 3", 5)
+        assert r.get("row_count") == 3, r
+    finally:
+        con.close()
 
 
 # ─── The free-model chain ────────────────────────────────────────────────────

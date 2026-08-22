@@ -985,6 +985,8 @@ def build_all() -> dict:
                build_completion_reconciliation, build_authored_seeds):
         report.update(fn())
         log.info("built %s", fn.__name__)
+    from modules.universe.pipeline.build4 import build_wave4
+    report.update(build_wave4())
     return report
 
 
