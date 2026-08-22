@@ -266,6 +266,86 @@ def build_fact_scan() -> dict:
             "fact_scan_range": f"{lo} → {hi}"}
 
 
+# ─── model_terminal_step + fact_unit_out ─────────────────────────────────────
+
+def build_terminal_step_and_units() -> dict:
+    """Learn, per model, the step its boards finish at — from the boards
+    themselves (§8.1 #9, refined by Faiz 2026-08-22). Then count every board
+    once, at that step (case 48).
+
+    Two corrections the raw "last scan" needs: LINK is a logistics scan AFTER
+    completion, so a board ending at LINK finished at the step before it; a
+    board ending at SCRAP is an end but not a unit. Both lists live in config."""
+    f = C.UNIVERSE_MART["fact_scan"].as_posix()
+    dst_t = C.UNIVERSE_MART["model_terminal_step"].as_posix()
+    dst_u = C.UNIVERSE_MART["fact_unit_out"].as_posix()
+    post = ", ".join(f"'{x}'" for x in C.POST_COMPLETION_STEPS)
+    scrap = ", ".join(f"'{x}'" for x in C.NON_COMPLETION_STEPS)
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            create temp table board_end as
+            select wip_id, model_id,
+                   arg_max(step, completed_at_utc) as last_step,
+                   arg_max(case when step not in ({post}) then step end,
+                           case when step not in ({post}) then completed_at_utc end) as last_work_step
+            from read_parquet('{f}')
+            where model_id is not null
+            group by 1, 2
+        """)
+        con.execute(f"""
+            copy (
+              with ends as (
+                select model_id, coalesce(last_work_step, last_step) as end_step
+                from board_end where last_step not in ({scrap})
+              ),
+              per_model as (select model_id, end_step, count(*) as n from ends group by 1, 2),
+              best as (
+                select model_id, arg_max(end_step, n) as modal_step, max(n) as n_modal, sum(n) as boards
+                from per_model group by 1
+              )
+              select model_id,
+                     case when boards >= {C.TERMINAL_MIN_BOARDS} and n_modal * 1.0 / boards >= {C.TERMINAL_MIN_SHARE}
+                          then modal_step else '{C.DEFAULT_TERMINAL_STEP}' end as terminal_step,
+                     modal_step as learned_step,
+                     round(n_modal * 1.0 / boards, 4) as share,
+                     boards,
+                     (boards >= {C.TERMINAL_MIN_BOARDS} and n_modal * 1.0 / boards >= {C.TERMINAL_MIN_SHARE}) as learned,
+                     case when modal_step = '{C.DEFAULT_TERMINAL_STEP}' then 'packout'
+                          when modal_step in ({post}) then 'link'
+                          else 'other' end as terminal_kind,
+                     'learned from fact_scan {date.today().isoformat()}' as source
+              from best
+            ) to '{dst_t}' (format parquet)
+        """)
+        con.execute(f"""
+            copy (
+              select s.wip_id, s.model_id, any_value(s.workcell_id) as workcell_id, t.terminal_step, t.learned,
+                     max(s.completed_at_utc) as completed_at_utc,
+                     max(s.completed_at_local) as completed_at_local,
+                     arg_max(s.date, s.completed_at_utc) as date,
+                     arg_max(s.shift, s.completed_at_utc) as shift,
+                     arg_max(s.shift_date, s.completed_at_utc) as shift_date,
+                     arg_max(s.bay_id, s.completed_at_utc) as bay_id,
+                     max(s.process_loop) as process_loop
+              from read_parquet('{f}') s
+              join read_parquet('{dst_t}') t on t.model_id = s.model_id
+              join board_end b on b.wip_id = s.wip_id and b.model_id = s.model_id
+              where s.step = t.terminal_step and b.last_step not in ({scrap})
+              group by s.wip_id, s.model_id, t.terminal_step, t.learned
+            ) to '{dst_u}' (format parquet)
+        """)
+        (n_t,) = con.execute(f"select count(*) from read_parquet('{dst_t}')").fetchone()
+        (n_learned,) = con.execute(f"select count(*) from read_parquet('{dst_t}') where learned").fetchone()
+        (n_u,) = con.execute(f"select count(*) from read_parquet('{dst_u}')").fetchone()
+        steps = con.execute(f"select terminal_step, count(*) from read_parquet('{dst_t}') group by 1 order by 2 desc limit 6").fetchall()
+    finally:
+        con.close()
+    log.info("terminal step: %d models, %d learned; units out: %d; top steps %s", n_t, n_learned, n_u, steps)
+    return {"model_terminal_step": n_t, "terminal_learned": n_learned, "fact_unit_out": n_u,
+            "terminal_steps_top": steps}
+
+
 # ─── dim_calendar + dim_shift ────────────────────────────────────────────────
 
 def build_dim_calendar() -> dict:
@@ -298,7 +378,8 @@ def build_dim_shift() -> dict:
 
 def build_all() -> dict:
     report = {}
-    for fn in (build_dim_workcell, build_dim_calendar, build_dim_shift, build_dim_model, build_fact_scan):
+    for fn in (build_dim_workcell, build_dim_calendar, build_dim_shift, build_dim_model, build_fact_scan,
+               build_terminal_step_and_units):
         report.update(fn())
         log.info("built %s", fn.__name__)
     return report

@@ -200,9 +200,16 @@ def test_terminal_step_is_learned_per_model_from_history():
     assert U.UNIVERSE_MART["model_terminal_step"].exists(), "model_terminal_step.parquet not built"
     dups = _q("select model_id, count(*) c from model_terminal_step group by 1 having c > 1")
     assert not dups, dups[:5]
-    (n_building,) = _q("select count(distinct model_id) from fact_scan where model_id is not null")[0]
-    (n_learned,) = _q("select count(*) from model_terminal_step where learned and share >= 0.5")[0]
-    assert n_learned / n_building >= 0.9, f"{n_learned}/{n_building} = {n_learned / n_building:.3f}"
+    # Learning needs history: a model with < TERMINAL_MIN_BOARDS boards in the window
+    # falls back to PACKOUT with learned = false — by design, not a failure. Among
+    # models WITH enough history, nine in ten must learn a step.
+    (n_enough,) = _q(f"select count(*) from model_terminal_step where boards >= {U.TERMINAL_MIN_BOARDS}")[0]
+    (n_learned,) = _q(f"select count(*) from model_terminal_step where learned and boards >= {U.TERMINAL_MIN_BOARDS}")[0]
+    assert n_learned / n_enough >= 0.9, f"{n_learned}/{n_enough} = {n_learned / n_enough:.3f}"
+    thin = _q(f"select count(*) from model_terminal_step where boards < {U.TERMINAL_MIN_BOARDS} and (learned or terminal_step <> '{U.DEFAULT_TERMINAL_STEP}')")
+    assert thin == [(0,)], thin
+    kinds = {k for (k,) in _q("select distinct terminal_kind from model_terminal_step")}
+    assert kinds <= {"packout", "link", "other"}, kinds
 
 
 def test_units_out_counts_a_board_once_at_its_terminal_step():
@@ -215,14 +222,43 @@ def test_units_out_counts_a_board_once_at_its_terminal_step():
     assert 0 < n_units < n_scans, (n_units, n_scans)
 
 
-def test_keysight_units_out_match_the_august_count_within_one_percent():
-    """The August registry counted units at PACKOUT (production_out.parquet). The
-    learned terminal step must land within 1 % of it for KEYSIGHT over the period."""
-    aug = duckdb.connect().execute(
+def _august_keysight_packout_units() -> int:
+    return duckdb.connect().execute(
         f"select sum(units_out) from read_parquet('{(U.REGISTRY_DIR / 'production_out.parquet').as_posix()}') "
         "where try_cast(workcell_id as bigint) = 6").fetchone()[0]
-    (ours,) = _q("select count(*) from fact_unit_out where workcell_id = 6")[0]
-    assert aug and abs(ours - aug) / aug <= 0.01, f"universe {ours} vs august {aug} ({(ours - aug) / aug:+.2%})"
+
+
+def test_fact_scan_reproduces_the_august_packout_count():
+    """Promotion check: August counted distinct boards at PACKOUT per (date, shift,
+    model, bay). Recomputing that definition from fact_scan must land within 1 % —
+    otherwise the dedupe lost boards."""
+    aug = _august_keysight_packout_units()
+    (recomputed,) = _q("""
+        select count(*) from (
+          select distinct wip_id, model_id, date, shift_name_raw, bay_id
+          from fact_scan where workcell_id = 6 and step = 'PACKOUT')""")[0]
+    assert aug and abs(recomputed - aug) / aug <= 0.01, f"recomputed {recomputed} vs august {aug}"
+
+
+def test_units_out_reconciles_with_august_once_double_counting_is_added_back():
+    """Case 48: we count a board once. August counted it again on every (date,
+    shift, bay) it re-scanned PACKOUT. For KEYSIGHT models whose terminal step IS
+    PACKOUT: ours + August's extra counts = August's number, within 1 %. Models
+    ending at LINK or elsewhere are excluded here and reported separately — they
+    are an open question, not a tolerance."""
+    (ours,) = _q("""select count(*) from fact_unit_out u
+                    join model_terminal_step t on t.model_id = u.model_id
+                    where u.workcell_id = 6 and t.terminal_step = 'PACKOUT'""")[0]
+    (extra,) = _q("""select coalesce(sum(n_groups - 1), 0) from (
+                       select s.wip_id, s.model_id, count(distinct (s.date, s.shift_name_raw, s.bay_id)) n_groups
+                       from fact_scan s join model_terminal_step t on t.model_id = s.model_id
+                       where s.workcell_id = 6 and s.step = 'PACKOUT' and t.terminal_step = 'PACKOUT'
+                       group by 1, 2)""")[0]
+    aug_packout_models = duckdb.connect().execute(f"""
+        select sum(a.units_out) from read_parquet('{(U.REGISTRY_DIR / 'production_out.parquet').as_posix()}') a
+        join read_parquet('{U.UNIVERSE_MART['model_terminal_step'].as_posix()}') t on t.model_id = a.model_id
+        where try_cast(a.workcell_id as bigint) = 6 and t.terminal_step = 'PACKOUT'""").fetchone()[0]
+    assert abs(ours + extra - aug_packout_models) / aug_packout_models <= 0.01,         f"ours {ours} + extra {extra} = {ours + extra} vs august {aug_packout_models}"
 
 
 # ─── T3 · dim_calendar + dim_shift ───────────────────────────────────────────

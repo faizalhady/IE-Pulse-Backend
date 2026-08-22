@@ -33,6 +33,8 @@ UNIVERSE_MART = {
     "dim_calendar":   UNIVERSE_MART_DIR / "dim_calendar.parquet",   # one row per date, 2019-09-01 → 2031-12-31
     "dim_shift":      UNIVERSE_MART_DIR / "dim_shift.parquet",      # one row per shift code
     "fact_scan":      UNIVERSE_MART_DIR / "fact_scan.parquet",      # one row per board × step (MES WipScanData), deduped
+    "model_terminal_step": UNIVERSE_MART_DIR / "model_terminal_step.parquet",  # one row per model: the step its boards finish at, learned
+    "fact_unit_out":  UNIVERSE_MART_DIR / "fact_unit_out.parquet",  # one row per board that completed (its scan at the terminal step)
 }
 
 # ─── Plant vocabulary ─────────────────────────────────────────────────────────
@@ -78,3 +80,15 @@ SHIFTS = [
 ]
 
 PROJECT_ROOT = PROJECT_ROOT
+
+# ─── Completion vocabulary (case 48, §8.1 #9 refined) ─────────────────────────
+# A scan AFTER completion: the board is already a unit; LINK is the logistics
+# scan that follows PACKOUT (median 5.7 h later — a queue, not work). Boards
+# whose history ends here are counted at the step before it.
+POST_COMPLETION_STEPS = ("LINK",)
+# An end that is NOT a unit: the board left the line as scrap.
+NON_COMPLETION_STEPS = ("SCRAP",)
+# Fallback when a model's history is too thin or too mixed to learn from.
+DEFAULT_TERMINAL_STEP = "PACKOUT"
+TERMINAL_MIN_BOARDS = 5       # fewer boards than this → default, learned = false
+TERMINAL_MIN_SHARE = 0.5      # the modal end step must hold at least this share
