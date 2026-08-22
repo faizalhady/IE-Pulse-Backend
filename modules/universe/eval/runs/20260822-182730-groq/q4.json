@@ -32,6 +32,10 @@
     "passed": false
    },
    {
+    "name": "kept the KEYSIGHT filter when picking the model",
+    "passed": false
+   },
+   {
     "name": "ordered by step",
     "passed": false
    },
@@ -41,6 +45,6 @@
    }
   ],
   "passed": 1,
-  "total": 6
+  "total": 7
  }
 }

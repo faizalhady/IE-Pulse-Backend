@@ -81,9 +81,6 @@
  "started": "2026-08-22T18:47:57",
  "elapsed_s": 95.7,
  "model": "openai/gpt-oss-120b",
- "notes": [
-  "numbers not found in tool results: ['314']"
- ],
  "grade": {
   "checks": [
    {
@@ -92,7 +89,7 @@
    },
    {
     "name": "numbers grounded in tool results",
-    "passed": false
+    "passed": true
    },
    {
     "name": "read cycle time or route",
@@ -107,7 +104,10 @@
     "passed": true
    }
   ],
-  "passed": 4,
+  "passed": 5,
   "total": 5
- }
+ },
+ "notes": [
+  "all numbers grounded"
+ ]
 }

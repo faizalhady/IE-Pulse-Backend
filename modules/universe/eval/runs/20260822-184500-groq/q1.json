@@ -44,9 +44,6 @@
  "started": "2026-08-22T18:45:00",
  "elapsed_s": 5.3,
  "model": "openai/gpt-oss-120b",
- "notes": [
-  "all numbers grounded"
- ],
  "grade": {
   "checks": [
    {
@@ -68,5 +65,8 @@
   ],
   "passed": 4,
   "total": 4
- }
+ },
+ "notes": [
+  "all numbers grounded"
+ ]
 }

@@ -23,9 +23,6 @@
  "started": "2026-08-22T18:50:09",
  "elapsed_s": 26.7,
  "model": "openai/gpt-oss-120b",
- "notes": [
-  "numbers not found in tool results: ['100', '2026']"
- ],
  "grade": {
   "checks": [
    {
@@ -51,5 +48,8 @@
   ],
   "passed": 3,
   "total": 5
- }
+ },
+ "notes": [
+  "numbers not found in tool results: ['100']"
+ ]
 }

@@ -44,6 +44,12 @@ def grounded_numbers(rec) -> bool:
     return not missing
 
 
+def _sql_has(rec, view: str, needle: str) -> bool:
+    """Some query over `view` contains `needle` — e.g. the workcell filter the question named."""
+    return any(view in (c.get("args", {}).get("sql") or "").lower() and needle.lower() in (c.get("args", {}).get("sql") or "").lower()
+               for c in rec["tool_calls"] if c["name"] == "universe_query")
+
+
 def answered(rec) -> bool:
     return rec["stopped"] == "answered" and len(rec["answer"].strip()) > 20
 
@@ -62,10 +68,12 @@ QUESTIONS = [
     {"id": 4, "text": "what are all the steps this model has to go through and where. sort them end to end. model: the KEYSIGHT model with the most units out in the data",
      "checks": [("read v_route", lambda r: _used(r, "v_route")),
                 ("found the top model first", lambda r: _used(r, "v_units_out_daily") or _used(r, "v_output_daily")),
+                ("kept the KEYSIGHT filter when picking the model", lambda r: _sql_has(r, "v_units_out_daily", "keysight") or _sql_has(r, "v_output_daily", "keysight")),
                 ("ordered by step", lambda r: _mentions(r, "step") and ("step_order" in " ".join((c.get("args", {}).get("sql") or "") for c in r["tool_calls"]).lower())),
                 ("says where is blocked (bay ids)", lambda r: _mentions(r, "bay", "where", "station", "not available"))]},
     {"id": 5, "text": "show me the trend of the top KEYSIGHT model's output for the data we have. and generally what is the workcell's output trend",
      "checks": [("read units out", lambda r: _used(r, "v_units_out_daily") or _used(r, "v_output_daily")),
+                ("filtered to KEYSIGHT", lambda r: _sql_has(r, "v_units_out_daily", "keysight") or _sql_has(r, "v_output_daily", "keysight")),
                 ("trend words", lambda r: _mentions(r, "trend", "week", "daily", "increas", "decreas", "flat", "stable", "peak"))]},
     {"id": 6, "text": "which process do u think can be improved for the top KEYSIGHT model based on looking at other faster models. give few suggestions.",
      "checks": [("read cycle time or route", lambda r: _used(r, "v_cycle_time") or _used(r, "v_route")),

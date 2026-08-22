@@ -54,9 +54,6 @@
  "started": "2026-08-22T18:47:03",
  "elapsed_s": 53.3,
  "model": "openai/gpt-oss-120b",
- "notes": [
-  "numbers not found in tool results: ['090', '091', '096', '112', '131', '196', '212', '219', '253', '314', '326', '332', '344', '350', '369', '377', '381', '449', '506', '520', '607', '679', '858', '866', '889', '900', '989']"
- ],
  "grade": {
   "checks": [
    {
@@ -65,10 +62,14 @@
    },
    {
     "name": "numbers grounded in tool results",
-    "passed": false
+    "passed": true
    },
    {
     "name": "read units out",
+    "passed": true
+   },
+   {
+    "name": "filtered to KEYSIGHT",
     "passed": true
    },
    {
@@ -76,7 +77,10 @@
     "passed": true
    }
   ],
-  "passed": 3,
-  "total": 4
- }
+  "passed": 5,
+  "total": 5
+ },
+ "notes": [
+  "all numbers grounded"
+ ]
 }

@@ -28,11 +28,15 @@
     "passed": false
    },
    {
+    "name": "filtered to KEYSIGHT",
+    "passed": false
+   },
+   {
     "name": "trend words",
     "passed": false
    }
   ],
   "passed": 1,
-  "total": 4
+  "total": 5
  }
 }

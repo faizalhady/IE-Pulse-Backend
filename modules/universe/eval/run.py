@@ -99,9 +99,15 @@ def answer(question: dict, model_fn, max_rounds: int = 8) -> dict:
         rec["rounds"] += 1
         _trim(messages)
         last = rnd == max_rounds - 1
+        if last:
+            messages.append({"role": "user", "content": "Your tool budget is used up. Write the final answer now from the results above. Do not call any tool."})
         try:
-            # the last round gets no tools: answer with what you have
-            msg = model_fn(messages, None if last else TOOLS_SPEC)
+            # the last round keeps the tool schema (some models emit a call anyway and
+            # the API rejects a call with no schema) but forbids choosing one
+            try:
+                msg = model_fn(messages, TOOLS_SPEC, "none" if last else "auto")
+            except TypeError:
+                msg = model_fn(messages, TOOLS_SPEC)
         except Exception as e:                     # noqa: BLE001
             rec["stopped"] = f"error: {str(e)[:300]}"
             break
@@ -179,10 +185,10 @@ def _load_env() -> None:
 
 
 def openai_compatible(base: str, key: str, model: str, temperature: float = 0.0):
-    def call(messages, tools_spec):
+    def call(messages, tools_spec, tool_choice="auto"):
         body = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": MAX_TOKENS}
         if tools_spec:
-            body.update({"tools": tools_spec, "tool_choice": "auto"})
+            body.update({"tools": tools_spec, "tool_choice": tool_choice})
         if "gpt-oss" in model:
             body["reasoning_effort"] = "low"       # the budget is tokens per minute, not brains
         for attempt in range(4):
@@ -223,8 +229,21 @@ def main() -> None:
     ap.add_argument("--provider", default="groq")
     ap.add_argument("--only", nargs="*", type=int)
     ap.add_argument("--rounds", type=int, default=8)
+    ap.add_argument("--regrade", help="re-grade an existing run directory with the current checks and rewrite its REPORT.md")
     ap.add_argument("--model", help="override the provider's model (e.g. openai/gpt-oss-20b when the 120b daily cap is spent)")
     a = ap.parse_args()
+    if a.regrade:
+        d = Path(a.regrade)
+        recs = []
+        for f in sorted(d.glob("q*.json"), key=lambda p: int(p.stem[1:])):
+            rec = json.loads(f.read_text(encoding="utf-8"))
+            rec.pop("notes", None)
+            rec["grade"] = grade(rec)
+            f.write_text(json.dumps(rec, indent=1, default=str), encoding="utf-8")
+            recs.append(rec)
+        _report(d, recs, recs[0].get("model", "?") if recs else "?")
+        print(f"{d.name}: {sum(r['grade']['passed'] for r in recs)}/{sum(r['grade']['total'] for r in recs)}")
+        return
     if a.model:
         os.environ["CHAT_MODEL"] = a.model
         os.environ["OLLAMA_MODEL"] = a.model

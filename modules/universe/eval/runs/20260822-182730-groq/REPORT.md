@@ -1,6 +1,6 @@
 # Universe LLM trial — openai/gpt-oss-120b
 
-Run: `20260822-182730-groq` · 9 questions · 21/43 checks passed
+Run: `20260822-182730-groq` · 9 questions · 22/45 checks passed
 
 | Q | question | stopped | rounds | s | prompt tok | grade | failed checks |
 |---|---|---|---|---|---|---|---|
@@ -8,9 +8,9 @@ Run: `20260822-182730-groq` · 9 questions · 21/43 checks passed
 | 2 | how many workcells are in p1 | answered | 3 | 3.4 | 3269 | 4/4 |  |
 | 3 | is the current number of bays for workcell KEYSIGHT enough?  | round cap | 8 | 135.5 | 16378 | 3/5 | answered; names what it cannot know (bays / capacity authored) |
 | 4 | what are all the steps this model has to go through and wher | error: Client error '400 Bad Request' for url 'https://api.groq.com/openai/v1/chat/completions'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400 | 1 | 6.9 | 0 | 1/6 | answered; read v_route; found the top model first; ordered by step; says where is blocked (bay ids) |
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400 | 1 | 6.9 | 0 | 1/7 | answered; read v_route; found the top model first; kept the KEYSIGHT filter when picking the model; ordered by step; says where is blocked (bay ids) |
 | 5 | show me the trend of the top KEYSIGHT model's output for the | error: Client error '413 Payload Too Large' for url 'https://api.groq.com/openai/v1/chat/completions'
-For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413 | 5 | 150.7 | 14395 | 2/4 | answered; trend words |
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413 | 5 | 150.7 | 14395 | 3/5 | answered; trend words |
 | 6 | which process do u think can be improved for the top KEYSIGH | error: Client error '413 Payload Too Large' for url 'https://api.groq.com/openai/v1/chat/completions'
 For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/413 | 5 | 6.3 | 5184 | 2/5 | answered; names a process; gives suggestions |
 | 7 | what can we do to improve our yield | error: Client error '413 Payload Too Large' for url 'https://api.groq.com/openai/v1/chat/completions'
@@ -158,8 +158,6 @@ FROM v_workcell
 WHERE plant_physical = 'P1';
 ```
 
-**Notes:** all numbers grounded
-
 **Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_workcell · ✅ distinguishes physical from governing plant
 
 
@@ -204,7 +202,7 @@ For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/St
 
 _(none)_
 
-**Checks:** ❌ answered · ✅ numbers grounded in tool results · ❌ read v_route · ❌ found the top model first · ❌ ordered by step · ❌ says where is blocked (bay ids)
+**Checks:** ❌ answered · ✅ numbers grounded in tool results · ❌ read v_route · ❌ found the top model first · ❌ kept the KEYSIGHT filter when picking the model · ❌ ordered by step · ❌ says where is blocked (bay ids)
 
 
 ## Q5 — show me the trend of the top KEYSIGHT model's output for the data we have. and generally what is the workcell's output trend
@@ -248,7 +246,7 @@ ORDER BY u.date) as q limit 200
 
 _(none)_
 
-**Checks:** ❌ answered · ✅ numbers grounded in tool results · ✅ read units out · ❌ trend words
+**Checks:** ❌ answered · ✅ numbers grounded in tool results · ✅ read units out · ✅ filtered to KEYSIGHT · ❌ trend words
 
 
 ## Q6 — which process do u think can be improved for the top KEYSIGHT model based on looking at other faster models. give few suggestions.

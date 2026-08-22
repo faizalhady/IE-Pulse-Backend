@@ -34,9 +34,6 @@
  "started": "2026-08-22T18:29:11",
  "elapsed_s": 3.4,
  "model": "openai/gpt-oss-120b",
- "notes": [
-  "all numbers grounded"
- ],
  "grade": {
   "checks": [
    {

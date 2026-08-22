@@ -63,9 +63,6 @@
  "started": "2026-08-22T18:45:42",
  "elapsed_s": 80.8,
  "model": "openai/gpt-oss-120b",
- "notes": [
-  "numbers not found in tool results: ['314']"
- ],
  "grade": {
   "checks": [
    {
@@ -74,7 +71,7 @@
    },
    {
     "name": "numbers grounded in tool results",
-    "passed": false
+    "passed": true
    },
    {
     "name": "read v_route",
@@ -82,6 +79,10 @@
    },
    {
     "name": "found the top model first",
+    "passed": true
+   },
+   {
+    "name": "kept the KEYSIGHT filter when picking the model",
     "passed": true
    },
    {
@@ -93,7 +94,10 @@
     "passed": true
    }
   ],
-  "passed": 5,
-  "total": 6
- }
+  "passed": 7,
+  "total": 7
+ },
+ "notes": [
+  "all numbers grounded"
+ ]
 }
