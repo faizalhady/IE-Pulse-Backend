@@ -1,0 +1,43 @@
+{
+ "id": 8,
+ "question": "knowledge questions: what is uph, what is cycle time, how do you calculate ole, what variables are related to each other",
+ "tool_calls": [],
+ "sqls": [],
+ "rounds": 1,
+ "stopped": "error: every slot is down or cooling: ",
+ "answer": "",
+ "usage": {
+  "prompt_tokens": 0,
+  "completion_tokens": 0
+ },
+ "started": "2026-08-23T03:30:12",
+ "elapsed_s": 0.0,
+ "model": "chain",
+ "chain_trace": [],
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": false
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "used define",
+    "passed": false
+   },
+   {
+    "name": "OLE formula",
+    "passed": false
+   },
+   {
+    "name": "two cycle times",
+    "passed": false
+   }
+  ],
+  "passed": 1,
+  "total": 5
+ }
+}

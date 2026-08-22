@@ -698,5 +698,50 @@ def main() -> None:
         raise SystemExit(1)
 
 
+# ─── The free-model chain ────────────────────────────────────────────────────
+
+def test_chain_walks_top_down_waits_short_cooldowns_and_reads_retry_hints():
+    """Start from the top, skip cooling slots, wait when the soonest cooldown is short,
+    and read the wait from what the provider said (header, 'try again in', 'per day')."""
+    import time
+    import httpx
+    from modules.universe.eval import chain
+    # 1. retry hints
+    def resp(status, text, headers=None):
+        return httpx.Response(status, text=text, headers=headers or {}, request=httpx.Request("POST", "http://x"))
+    assert chain._retry_seconds(resp(429, "try again in 12.5s")) == 12.5
+    assert chain._retry_seconds(resp(429, "slow", {"retry-after": "7"})) == 7.0
+    assert chain._retry_seconds(resp(429, "Rate limit reached ... tokens per day (TPD)")) > 600   # until midnight UTC
+    assert chain._retry_seconds(resp(429, "nothing useful")) == 60.0
+    # 2. the walk, with fake slots and a fake call
+    a, b = chain.Slot("a", "http://a", None, "m-a"), chain.Slot("b", "http://b", None, "m-b")
+    served, calls = [], {"n": 0}
+    def fake_call(slot, messages, tools_spec, tool_choice, max_tokens, temperature):
+        calls["n"] += 1
+        if slot.name == "a" and calls["n"] == 1:
+            raise chain.RateLimited(0.2, "a: try again in 0.2s")    # a cools briefly, b takes it
+        if slot.name == "b" and calls["n"] == 3:
+            raise chain.RateLimited(0.2, "b too")                  # both cooling -> wait, a is back
+        return {"content": slot.name, "tool_calls": None, "usage": {}, "slot": slot.name}
+    old_slots, old_call = chain.SLOTS, chain._call
+    chain.SLOTS, chain._call = [a, b], fake_call
+    try:
+        chain.trace.clear()
+        served.append(chain.chat([{"role": "user", "content": "hi"}])["slot"])   # a 429 -> b
+        time.sleep(0.3)
+        served.append(chain.chat([{"role": "user", "content": "hi"}])["slot"])   # a back -> a
+        served.append(chain.chat([{"role": "user", "content": "hi"}])["slot"])   # a, b both cool briefly -> waits -> a
+        assert served == ["b", "a", "a"], served
+        assert chain.take_trace() == ["b", "a", "a"]
+        a.blocked_until = b.blocked_until = time.time() + chain.MAX_WAIT_S + 10   # an outage, not a minute limit
+        try:
+            chain.chat([{"role": "user", "content": "hi"}])
+            assert False, "should have raised"
+        except RuntimeError as e:
+            assert "cooling" in str(e)
+    finally:
+        chain.SLOTS, chain._call = old_slots, old_call
+
+
 if __name__ == "__main__":
     main()

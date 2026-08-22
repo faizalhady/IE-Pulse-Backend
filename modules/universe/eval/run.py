@@ -215,6 +215,9 @@ def provider(name: str):
     if name == "groq":
         base = os.getenv("CHAT_API_BASE", "https://api.groq.com/openai/v1")
         return openai_compatible(base, os.getenv("CHAT_API_KEY", ""), os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")), os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
+    if name == "chain":
+        from modules.universe.eval import chain
+        return chain.chat, "chain"
     if name == "ollama":
         base = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434") + "/v1"
         model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
@@ -226,7 +229,7 @@ def provider(name: str):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--provider", default="groq")
+    ap.add_argument("--provider", default="groq", help="groq | chain (the free-model fallback loop, eval/chain.py) | ollama")
     ap.add_argument("--only", nargs="*", type=int)
     ap.add_argument("--rounds", type=int, default=8)
     ap.add_argument("--regrade", help="re-grade an existing run directory with the current checks and rewrite its REPORT.md")
@@ -258,6 +261,10 @@ def main() -> None:
         print(f"Q{q['id']} …", end=" ", flush=True)
         rec = answer(q, model_fn, max_rounds=a.rounds)
         rec["model"] = model_name
+        if a.provider == "chain":
+            from modules.universe.eval import chain
+            rec["chain_trace"] = chain.take_trace()          # which slot served each round
+            rec["model"] = "chain: " + " -> ".join(dict.fromkeys(rec["chain_trace"])) if rec["chain_trace"] else "chain"   # ascii: cp1252 console
         rec["grade"] = grade(rec)
         (out / f"q{q['id']}.json").write_text(json.dumps(rec, indent=1, default=str), encoding="utf-8")
         print(f"{rec['stopped']} · {rec['rounds']} rounds · {rec['elapsed_s']}s · {rec['grade']['passed']}/{rec['grade']['total']}")

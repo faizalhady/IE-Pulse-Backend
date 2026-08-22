@@ -125,6 +125,8 @@ Every delta has a reason in the table. Nothing was tuned to agree.
 ```
 python -m modules.universe.pipeline.build     rebuild every table from the sources (~3 min)
 python tests/test_universe.py                 the 46 assertions (one rebuilds fact_scan from the raw CSVs — slow)
+python -m modules.universe.eval.chain                                   ping every free-model slot (key? cooling?)
+python -m modules.universe.eval.run --provider chain                    the exam through the fallback chain
 python -m modules.universe.pipeline.refresh pull 2026-08-23 2026-08-30   MES scans, UTC days [start, end)
 python -m modules.universe.pipeline.refresh pull-paid-hours             new payroll files from the share
 python -m modules.universe.pipeline.refresh count   distinct scan keys across the raw pulls
