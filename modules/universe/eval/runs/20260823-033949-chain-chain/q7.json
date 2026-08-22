@@ -48,9 +48,6 @@
   "gemini-3.5-flash-lite",
   "groq-gpt-oss-120b"
  ],
- "notes": [
-  "all numbers grounded"
- ],
  "grade": {
   "checks": [
    {
@@ -76,5 +73,8 @@
   ],
   "passed": 5,
   "total": 5
- }
+ },
+ "notes": [
+  "all numbers grounded"
+ ]
 }

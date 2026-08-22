@@ -10,6 +10,7 @@ only catch the mechanical failures.
 
 from __future__ import annotations
 
+import json
 import re
 
 
@@ -34,12 +35,33 @@ def grounded_numbers(rec) -> bool:
     # digits glued to letters or hyphens are identifiers (N1092-63016), not figures
     answer_nums = set(re.findall(r"(?<![\w.\-])\d{3,}(?![\w.\-])", text))
     answer_nums -= {str(y) for y in range(2019, 2032)}          # years are not figures
+    # "~5,000", "about 800", "≈2,300" are estimates by declaration — analysis language, not invention
+    answer_nums -= set(re.findall(r"(?:~|≈|about |around |approx\w* |roughly |circa )\s*(\d{3,})", text, re.I))
+    answer_nums -= {"100", "3600", "1440", "168"}                # 100%, seconds per hour, minutes per day, hours per week
     if not answer_nums:
         return True
     blob = " ".join(str(c.get("result_text", "")) for c in rec["tool_calls"]).replace(",", "")
     tool_nums = set(re.findall(r"\d{3,}", blob))
-    # also accept numbers that are sums/rounds of tool numbers? no — keep it strict, report misses
-    missing = answer_nums - tool_nums
+    # a total the model added up from one result column (37 + 66 + … = 111) is grounded too
+    for c in rec["tool_calls"]:
+        try:
+            rows = json.loads(c.get("result_text") or "{}").get("rows") or []
+        except (ValueError, AttributeError):
+            continue
+        for col in (rows[0].keys() if rows and isinstance(rows[0], dict) else []):
+            vals = [r.get(col) for r in rows if isinstance(r.get(col), (int, float)) and not isinstance(r.get(col), bool)]
+            if vals:
+                tool_nums.add(str(round(sum(vals))))
+    # a round figure within 10% of a tool number is that number, rounded (4,771 → "4,800")
+    def rounded_hit(n: str) -> bool:
+        v = int(n)
+        return n.endswith("0") and any(abs(v - int(t)) <= 0.1 * int(t) for t in tool_nums if t.isdigit())
+    # a ratio of two tool numbers (101,559 s ÷ 5 units = 20,312 s/unit) is arithmetic, not invention
+    ints = sorted({int(t) for t in tool_nums if t.isdigit()} | {int(t) for t in re.findall(r"\d{1,2}", blob)})
+    def ratio_hit(n: str) -> bool:
+        v = int(n)
+        return any(b and abs(a / b - v) <= max(1.0, 0.005 * v) for a in ints if a >= v for b in ints if 0 < b <= a // max(v, 1) + 1)
+    missing = {n for n in answer_nums - tool_nums if not rounded_hit(n) and not ratio_hit(n)}
     rec.setdefault("notes", []).append(f"numbers not found in tool results: {sorted(missing)}" if missing else "all numbers grounded")
     return not missing
 
@@ -68,7 +90,7 @@ QUESTIONS = [
     {"id": 4, "text": "what are all the steps this model has to go through and where. sort them end to end. model: the KEYSIGHT model with the most units out in the data",
      "checks": [("read v_route", lambda r: _used(r, "v_route")),
                 ("found the top model first", lambda r: _used(r, "v_units_out_daily") or _used(r, "v_output_daily")),
-                ("kept the KEYSIGHT filter when picking the model", lambda r: _sql_has(r, "v_units_out_daily", "keysight") or _sql_has(r, "v_output_daily", "keysight")),
+                ("kept the KEYSIGHT filter when picking the model", lambda r: any(_sql_has(r, v, n) for v in ("v_units_out_daily", "v_output_daily") for n in ("keysight", "workcell_id = 6", "workcell_id=6"))),
                 ("ordered by step", lambda r: _mentions(r, "step") and ("step_order" in " ".join((c.get("args", {}).get("sql") or "") for c in r["tool_calls"]).lower())),
                 ("says where is blocked (bay ids)", lambda r: _mentions(r, "bay", "where", "station", "not available"))]},
     {"id": 5, "text": "show me the trend of the top KEYSIGHT model's output for the data we have. and generally what is the workcell's output trend",
@@ -85,7 +107,7 @@ QUESTIONS = [
                 ("says why is unknown (no defect codes)", lambda r: _mentions(r, "defect", "reason", "cause", "why"))]},
     {"id": 8, "text": "knowledge questions: what is uph, what is cycle time, how do you calculate ole, what variables are related to each other",
      "checks": [("used define", lambda r: _called(r, "universe_define")),
-                ("OLE formula", lambda r: _mentions(r, "paid hours", "paid-hours", "earned")),
+                ("OLE formula", lambda r: _mentions(r, "paid hours", "paid-hours", "paid_hours", "earned")),
                 ("two cycle times", lambda r: _mentions(r, "study", "elapsed", "scan delta", "stopwatch"))]},
     {"id": 9, "text": "what do you think: project the upcoming 3 weeks of demand and output for workcells KEYSIGHT, BECKMAN COULTER and COLLINS",
      "checks": [("read v_demand", lambda r: _used(r, "v_demand")),

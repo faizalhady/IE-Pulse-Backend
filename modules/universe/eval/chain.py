@@ -66,19 +66,22 @@ SLOTS: list[Slot] = [
     Slot("or-glm-5.2",              OPENROUTER, "OPENROUTER_API_KEY", "z-ai/glm-5.2:free"),
     Slot("gemini-3.5-flash-lite",   GEMINI,     "GEMINI_API_KEY",     "gemini-3.5-flash-lite"),
     Slot("groq-gpt-oss-120b",       GROQ,       "CHAT_API_KEY",       "openai/gpt-oss-120b"),
-    Slot("groq-qwen3.6-27b",        GROQ,       "CHAT_API_KEY",       "qwen/qwen3.6-27b"),
     Slot("mistral-medium",          MISTRAL,    "MISTRAL_API_KEY",    "mistral-medium-latest"),
     Slot("cerebras-gemma-4-31b",    CEREBRAS,   "CEREBRAS_API_KEY",   "gemma-4-31b"),
     Slot("gemini-gemma-4-31b",      GEMINI,     "GEMINI_API_KEY",     "gemma-4-31b-it"),
     Slot("or-nemotron-3-super-120b", OPENROUTER, "OPENROUTER_API_KEY", "nvidia/nemotron-3-super-120b-a12b:free"),
     Slot("or-gemma-4-31b",          OPENROUTER, "OPENROUTER_API_KEY", "google/gemma-4-31b-it:free"),
     Slot("mistral-small",           MISTRAL,    "MISTRAL_API_KEY",    "mistral-small-latest"),
+    # the floor: every miss in the exam runs of 2026-08-23 came from these two (invented a table
+    # of test counts, narrated SQL instead of running it, dropped the caveat). Outage-only.
+    Slot("groq-qwen3.6-27b",        GROQ,       "CHAT_API_KEY",       "qwen/qwen3.6-27b"),
     Slot("groq-gpt-oss-20b",        GROQ,       "CHAT_API_KEY",       "openai/gpt-oss-20b"),
     Slot("ollama",                os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434") + "/v1", None,
          os.getenv("OLLAMA_MODEL", "llama3.1:8b")),
 ]
 
 trace: list[str] = []       # slot name per successful call; run.py copies it into each question's record
+events: list[str] = []      # why a slot was skipped (429 -> 60s, HTTP 402 …); the run explains itself
 
 
 class RateLimited(Exception):
@@ -140,6 +143,7 @@ def chat(messages, tools_spec=None, tool_choice="auto", max_tokens: int = 1500, 
                 slot.blocked_until = time.time() + e.seconds
                 slot.last_error = f"429 -> {e.seconds:.0f}s"
                 errors.append(f"{slot.name}: {slot.last_error}")
+                events.append(f"{slot.name}: {slot.last_error}")
             except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as e:
                 # a 401/402/403/404 is the key, the plan or the model id — it will not heal in a
                 # minute; a 5xx or a timeout might. (413 = this request, not the slot: a minute.)
@@ -147,6 +151,7 @@ def chat(messages, tools_spec=None, tool_choice="auto", max_tokens: int = 1500, 
                 slot.blocked_until = time.time() + (24 * 3600 if hard else 60)
                 slot.last_error = str(e)[:120]
                 errors.append(f"{slot.name}: {slot.last_error}")
+                events.append(f"{slot.name}: {slot.last_error[:60]}")
         # every slot is cooling. With one provider on one key that is the normal minute
         # limit, not an outage: wait for the soonest slot when the wait is short.
         keyed = [s for s in SLOTS if s.key_env is None or s.key]
@@ -159,6 +164,11 @@ def chat(messages, tools_spec=None, tool_choice="auto", max_tokens: int = 1500, 
 
 def take_trace() -> list[str]:
     out, trace[:] = list(trace), []
+    return out
+
+
+def take_events() -> list[str]:
+    out, events[:] = list(events), []
     return out
 
 

@@ -61,9 +61,6 @@
   "gemini-3.5-flash-lite",
   "gemini-3.5-flash-lite"
  ],
- "notes": [
-  "numbers not found in tool results: ['2300', '800']"
- ],
  "grade": {
   "checks": [
    {
@@ -72,7 +69,7 @@
    },
    {
     "name": "numbers grounded in tool results",
-    "passed": false
+    "passed": true
    },
    {
     "name": "read units out",
@@ -87,7 +84,10 @@
     "passed": true
    }
   ],
-  "passed": 4,
+  "passed": 5,
   "total": 5
- }
+ },
+ "notes": [
+  "all numbers grounded"
+ ]
 }

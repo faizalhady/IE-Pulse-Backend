@@ -72,7 +72,9 @@ Rules that are not optional:
 - For a knowledge question, call universe_define for EACH term before answering, and quote the formula as defined.
 - When part of a question cannot be answered (bays, capacity, defect codes), say so in one line and answer the rest WITH numbers — demand, output, cycle time are always available.
 - Show the SQL you used in the answer (a short code block per query).
-- Be concise. Tables for numbers. One paragraph of reasoning for an analysis, with what you could not know."""
+- Be concise. Tables for numbers. One paragraph of reasoning for an analysis, with what you could not know.
+- A capacity or what-if question needs three things before any verdict: the demand (v_demand), the standard time per unit (v_cycle_time) and recent output (v_units_out_daily). Read all three; say what is still missing (bay ids, machine counts) only after that.
+"""
 
 
 # ─── the loop ────────────────────────────────────────────────────────────────
@@ -85,6 +87,10 @@ def _dispatch(name: str, args: dict) -> dict:
     if name == "universe_define":
         return {"result": T.define(args.get("term") or "")}
     return {"result": {"error": f"unknown tool {name}"}}
+
+
+def _norm_sql(q: str) -> str:
+    return re.sub(r"\s+", " ", q.strip().rstrip(";")).lower()
 
 
 def answer(question: dict, model_fn, max_rounds: int = 8) -> dict:
@@ -116,7 +122,17 @@ def answer(question: dict, model_fn, max_rounds: int = 8) -> dict:
         rec["usage"]["completion_tokens"] += int(u.get("completion_tokens", 0))
         tcs = msg.get("tool_calls") or []
         if not tcs:
-            rec["answer"] = (msg.get("content") or "").strip()
+            content = (msg.get("content") or "").strip()
+            # an answer that shows SQL it never ran is a plan, not an answer (weaker models narrate
+            # the query instead of calling the tool) — once, push it to run the query
+            ran = " ".join(_norm_sql(q) for q in rec["sqls"])
+            unrun = [q for q in re.findall(r"```sql\s*(.*?)```", content, re.S | re.I) if _norm_sql(q) not in ran]
+            if unrun and not last and not rec.get("nudged"):
+                rec["nudged"] = True
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content": "You wrote SQL but did not run it. Call universe_query with that SQL now, then answer from its result."})
+                continue
+            rec["answer"] = content
             rec["stopped"] = "answered"
             break
         messages.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": tcs})
@@ -264,6 +280,7 @@ def main() -> None:
         if a.provider == "chain":
             from modules.universe.eval import chain
             rec["chain_trace"] = chain.take_trace()          # which slot served each round
+            rec["chain_events"] = chain.take_events()        # why slots were skipped (429 -> 60s, HTTP 402 …)
             rec["model"] = "chain: " + " -> ".join(dict.fromkeys(rec["chain_trace"])) if rec["chain_trace"] else "chain"   # ascii: cp1252 console
         rec["grade"] = grade(rec)
         (out / f"q{q['id']}.json").write_text(json.dumps(rec, indent=1, default=str), encoding="utf-8")

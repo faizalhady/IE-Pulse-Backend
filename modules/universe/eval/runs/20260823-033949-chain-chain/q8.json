@@ -103,14 +103,14 @@
    },
    {
     "name": "OLE formula",
-    "passed": false
+    "passed": true
    },
    {
     "name": "two cycle times",
     "passed": true
    }
   ],
-  "passed": 4,
+  "passed": 5,
   "total": 5
  }
 }

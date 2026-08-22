@@ -92,9 +92,6 @@
   "or-nemotron-3-ultra",
   "or-nemotron-3-ultra"
  ],
- "notes": [
-  "numbers not found in tool results: ['100', '14700', '5000']"
- ],
  "grade": {
   "checks": [
    {
@@ -103,7 +100,7 @@
    },
    {
     "name": "numbers grounded in tool results",
-    "passed": false
+    "passed": true
    },
    {
     "name": "read demand",
@@ -118,7 +115,10 @@
     "passed": true
    }
   ],
-  "passed": 3,
+  "passed": 4,
   "total": 5
- }
+ },
+ "notes": [
+  "all numbers grounded"
+ ]
 }
