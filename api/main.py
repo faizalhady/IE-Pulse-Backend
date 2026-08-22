@@ -50,6 +50,7 @@ from api.routers.ebuild      import router as ebuild_router
 from api.routers.access      import router as access_router
 from api.routers.saved_reports import router as saved_reports_router
 from api.routers.smh         import router as smh_router
+from api.routers.universe    import router as universe_router
 
 
 # Dual console+file logging, faulthandler, and global excepthooks. Done at import
@@ -77,6 +78,7 @@ app.include_router(transfers_router)
 app.include_router(cycle_time_router)
 app.include_router(ppqt_router)
 app.include_router(ppqt_legacy_router)
+app.include_router(universe_router)
 app.include_router(lbr_router)
 app.include_router(ipk_router)
 app.include_router(ebuild_router)
