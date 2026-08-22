@@ -143,3 +143,16 @@ OLE_RAW_PRODUCTION = DATA_MART_DIR / "ole" / "raw_production.parquet"  # the sha
 # with OLE_SMH_FALLBACK=avg. A switch, never a silent choice.
 SMH_MISSING_POLICY = "zero"          # 'zero' | 'estimate'
 COMPLETION_DELTA = 0.10              # a coverage delta above this must carry a reason
+
+# ─── the chat client ─────────────────────────────────────────────────────────
+# Pilot: only these NTIDs may use the chat (comma list, case-insensitive). Empty = nobody.
+CHAT_USERS: set[str] = set()
+
+
+def reload_chat_users() -> set[str]:
+    CHAT_USERS.clear()
+    CHAT_USERS.update(u.strip().lower() for u in os.getenv("UNIVERSE_CHAT_USERS", "").split(",") if u.strip())
+    return CHAT_USERS
+
+
+reload_chat_users()
