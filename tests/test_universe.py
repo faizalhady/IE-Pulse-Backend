@@ -586,6 +586,72 @@ def test_authored_seeds_carry_provenance_and_are_marked_authored():
         assert n > 0, t
 
 
+# ═══ PHASE 4 — the access layer and the exam ══════════════════════════════════
+
+def test_query_tool_is_caged():
+    """v1's cage was right: one SELECT over the views, capped, no way out."""
+    from modules.universe import tools
+    for bad in ("drop table v_workcell", "select 1; select 2", "select * from fact_scan limit 1",
+                "select * from read_parquet('x.parquet')", "select * from dim_workcell",
+                "install httpfs", "select * from v_employee limit 1"):
+        r = tools.query(bad)
+        assert r.get("error"), bad
+    r = tools.query("select workcell, status from v_workcell order by 1")
+    assert not r.get("error"), r
+    assert r["row_count"] <= tools.MAX_ROWS and r["sql"].lower().rstrip().endswith(f"limit {tools.MAX_ROWS}"), r["sql"]
+    r = tools.query("select count(*) as n from v_workcell")
+    assert r["rows"][0]["n"] == 111, r
+
+
+def test_describe_tool_returns_columns_with_meaning():
+    from modules.universe import tools
+    all_views = tools.describe()
+    assert {v["view"] for v in all_views} >= {"v_workcell", "v_units_out_daily", "v_fpy_daily"}, all_views
+    one = tools.describe("v_workcell")
+    assert one and all(c["comment"] for c in one[0]["columns"]), one
+    assert "v_employee" not in {v["view"] for v in all_views}, "payroll names must not be exposed to the trial"
+
+
+def test_define_tool_finds_the_rules():
+    from modules.universe import tools
+    hits = tools.define("workcell")
+    assert any("customer" in h["text"].lower() for h in hits), hits[:2]
+    hits = tools.define("fiscal year")
+    assert any("september" in h["text"].lower() for h in hits), hits[:2]
+    assert tools.define("zzz-no-such-term") == []
+
+
+def test_mcp_server_registers_the_three_tools():
+    from modules.universe import mcp_server
+    names = {t.name for t in __import__("asyncio").run(mcp_server.mcp.list_tools())}
+    assert names == {"universe_describe", "universe_query", "universe_define"}, names
+
+
+def test_harness_grades_a_stub_model_and_stops_at_the_round_cap():
+    """The loop and the grader are tested on a stub — the real model costs quota."""
+    from modules.universe.eval import run as R, questions as Q
+    calls = {"n": 0}
+
+    def stub(messages, tools_spec):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            import json
+            return {"tool_calls": [{"id": "c1", "function": {"name": "universe_query",
+                                    "arguments": json.dumps({"sql": "select count(*) as n from v_workcell where status = 'active'"})}}]}
+        return {"content": "There are 42 active rows; say which count you mean."}
+
+    rec = R.answer(Q.QUESTIONS[0], stub, max_rounds=8)
+    assert rec["rounds"] == 2 and rec["tool_calls"][0]["name"] == "universe_query", rec
+    assert "42" in rec["answer"]
+    g = R.grade(rec)
+    assert g["passed"] >= 1, g
+
+    def looper(messages, tools_spec):
+        return {"tool_calls": [{"id": "x", "function": {"name": "universe_describe", "arguments": "{}"}}]}
+    rec = R.answer(Q.QUESTIONS[0], looper, max_rounds=3)
+    assert rec["rounds"] == 3 and rec["stopped"] == "round cap", rec
+
+
 # ─── T3 · dim_calendar + dim_shift ───────────────────────────────────────────
 
 def test_fiscal_year_starts_in_september():
