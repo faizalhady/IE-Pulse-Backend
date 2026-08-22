@@ -32,6 +32,7 @@ UNIVERSE_MART = {
     "dim_model_revision": UNIVERSE_MART_DIR / "dim_model_revision.parquet", # one row per (model, revision)
     "dim_calendar":   UNIVERSE_MART_DIR / "dim_calendar.parquet",   # one row per date, 2019-09-01 → 2031-12-31
     "dim_shift":      UNIVERSE_MART_DIR / "dim_shift.parquet",      # one row per shift code
+    "fact_scan":      UNIVERSE_MART_DIR / "fact_scan.parquet",      # one row per board × step (MES WipScanData), deduped
 }
 
 # ─── Plant vocabulary ─────────────────────────────────────────────────────────

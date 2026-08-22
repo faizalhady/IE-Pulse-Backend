@@ -154,6 +154,15 @@ def build_dim_workcell() -> dict:
         for i, p, r in zip(out["workcell_id"], out["plant_physical"], wc["region"])]
     out["source"] = f"registry {src.name} + {C.WORKCELL_GROUP_XLSX.name} (built {date.today().isoformat()})"
 
+    # The unknown member (case 6): a scan whose Customer_ID resolves to nothing
+    # lands here, never on a NULL key. Zero rows may land on it today; it exists
+    # so the join can never silently drop a board.
+    unknown = {c: None for c in out.columns}
+    unknown.update({"workcell_id": 0, "name": "UNKNOWN", "match_key": "UNKNOWN", "entity_type": "unknown",
+                    "status": "n/a", "confidence": "n/a", "source": "universe: unknown member (case 6)"})
+    out = pd.concat([out, pd.DataFrame([unknown])], ignore_index=True)
+    out["workcell_id"] = out["workcell_id"].astype("int64")
+
     out.to_parquet(C.UNIVERSE_MART["dim_workcell"], index=False)
     alias.to_parquet(C.UNIVERSE_MART["workcell_alias"], index=False)
     conflict_df.to_parquet(C.UNIVERSE_MART["workcell_alias_conflict"], index=False)
@@ -211,6 +220,52 @@ def build_dim_model() -> dict:
     return {"dim_model": n_m, "dim_model_revision": n_r, "models_without_workcell": n_orphan}
 
 
+# ─── fact_scan ───────────────────────────────────────────────────────────────
+
+def build_fact_scan() -> dict:
+    """One row per board × step — MES WipScanData as pulled in August (hourly
+    windows, 9 Jul → 8 Aug 2026). The raw parquet holds ~1.1M duplicated keys
+    from overlapping windows; one survives. Shift and shift_date follow the
+    LOCAL clock (case 49): 07:00–19:00 → 2, else 3; a scan before 07:00 belongs
+    to the previous date's night shift. Unknown workcells land on row 0."""
+    src = (C.REGISTRY_DIR / "production_scan.parquet").as_posix()
+    wc = C.UNIVERSE_MART["dim_workcell"].as_posix()
+    dst = C.UNIVERSE_MART["fact_scan"].as_posix()
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              select
+                s.wip_id, s.step, s.step_instance, s.completed_at_utc, s.completed_at_local,
+                cast(s.completed_at_local as date) as date,
+                case when hour(s.completed_at_local) between 7 and 18 then 2 else 3 end as shift,
+                case when hour(s.completed_at_local) < 7
+                     then cast(s.completed_at_local as date) - 1
+                     else cast(s.completed_at_local as date) end as shift_date,
+                coalesce(w.workcell_id, 0) as workcell_id,
+                s.model_id, s.bay_id, s.process_type_id, s.equipment_id,
+                s.process_loop, s.test_loop, s.test_status,
+                s.workcell_raw, s.part_number_raw, s.revision_raw, s.route_raw,
+                s.area_raw, s.equipment_raw, s.plant as plant_raw, s.shift_name as shift_name_raw
+              from read_parquet('{src}') s
+              left join read_parquet('{wc}') w on w.workcell_id = try_cast(s.workcell_id as bigint)
+              qualify row_number() over (
+                partition by s.wip_id, s.step, s.step_instance, s.completed_at_utc
+                order by s.process_loop, s.test_loop) = 1
+              order by s.completed_at_utc
+            ) to '{dst}' (format parquet, row_group_size 1000000)
+        """)
+        (n_src,) = con.execute(f"select count(*) from read_parquet('{src}')").fetchone()
+        (n,) = con.execute(f"select count(*) from read_parquet('{dst}')").fetchone()
+        (n_unknown,) = con.execute(f"select count(*) from read_parquet('{dst}') where workcell_id = 0").fetchone()
+        lo, hi = con.execute(f"select min(date), max(date) from read_parquet('{dst}')").fetchone()
+    finally:
+        con.close()
+    log.info("fact_scan: %d rows (%d duplicates removed), %s → %s, %d on UNKNOWN", n, n_src - n, lo, hi, n_unknown)
+    return {"fact_scan": n, "fact_scan_duplicates_removed": n_src - n, "fact_scan_unknown_workcell": n_unknown,
+            "fact_scan_range": f"{lo} → {hi}"}
+
+
 # ─── dim_calendar + dim_shift ────────────────────────────────────────────────
 
 def build_dim_calendar() -> dict:
@@ -243,7 +298,7 @@ def build_dim_shift() -> dict:
 
 def build_all() -> dict:
     report = {}
-    for fn in (build_dim_workcell, build_dim_calendar, build_dim_shift, build_dim_model):
+    for fn in (build_dim_workcell, build_dim_calendar, build_dim_shift, build_dim_model, build_fact_scan):
         report.update(fn())
         log.info("built %s", fn.__name__)
     return report

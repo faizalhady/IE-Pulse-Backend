@@ -142,6 +142,89 @@ def test_revisions_hang_off_models():
     assert orphans == [(0,)], orphans
 
 
+# ─── T5 · fact_scan — one row per board × step ───────────────────────────────
+
+def test_fact_scan_is_one_row_per_board_step_scan():
+    assert U.UNIVERSE_MART["fact_scan"].exists(), "fact_scan.parquet not built"
+    (n,) = _q("select count(*) from fact_scan")[0]
+    # The August pull is 19,841,768 raw rows; 1,094,216 are duplicate keys from
+    # overlapping hourly windows. The truth is the deduped count.
+    assert n >= 18_700_000, n
+    dups = _q("""select count(*) from (select wip_id, step, step_instance, completed_at_utc, count(*) c
+                 from fact_scan group by 1,2,3,4 having c > 1)""")
+    assert dups == [(0,)], dups
+
+
+def test_every_scan_points_at_a_workcell_row_even_unknown():
+    """Customer_ID = 0 is an answer (case 6): an UNKNOWN workcell row, never a NULL key."""
+    nulls = _q("select count(*) from fact_scan where workcell_id is null")
+    assert nulls == [(0,)], nulls
+    orphans = _q("""select count(*) from fact_scan f left join dim_workcell w on w.workcell_id = f.workcell_id
+                    where w.workcell_id is null""")
+    assert orphans == [(0,)], orphans
+    unknown_row = _q("select name, entity_type from dim_workcell where workcell_id = 0")
+    assert unknown_row == [("UNKNOWN", "unknown")], unknown_row    # the row exists even when nothing lands on it
+
+
+def test_every_scan_model_resolves_or_is_null():
+    orphans = _q("""select count(*) from fact_scan f left join dim_model m on m.model_id = f.model_id
+                    where f.model_id is not null and m.model_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+def test_local_time_is_utc_plus_8_and_shift_follows_it():
+    """Case 49: convert before assigning shift, or every boundary vanishes."""
+    bad_tz = _q("select count(*) from fact_scan where completed_at_local <> completed_at_utc + interval 8 hour")
+    assert bad_tz == [(0,)], bad_tz
+    bad_shift = _q("""select count(*) from fact_scan
+                      where (hour(completed_at_local) between 7 and 18 and shift <> 2)
+                         or (hour(completed_at_local) not between 7 and 18 and shift <> 3)""")
+    assert bad_shift == [(0,)], bad_shift
+
+
+def test_night_shift_after_midnight_belongs_to_the_previous_date():
+    rows = _q("""select count(*) from fact_scan
+                 where hour(completed_at_local) < 7 and shift_date <> cast(completed_at_local as date) - 1""")
+    assert rows == [(0,)], rows
+    rows = _q("""select count(*) from fact_scan
+                 where hour(completed_at_local) >= 7 and shift_date <> cast(completed_at_local as date)""")
+    assert rows == [(0,)], rows
+
+
+# ─── T6 · terminal step per model, units out ─────────────────────────────────
+
+def test_terminal_step_is_learned_per_model_from_history():
+    """§8.1 #9 (refined): the last step is learned from the boards themselves —
+    the step their final scan lands on — with the share of boards as confidence.
+    PACKOUT is only the default when nothing was learned."""
+    assert U.UNIVERSE_MART["model_terminal_step"].exists(), "model_terminal_step.parquet not built"
+    dups = _q("select model_id, count(*) c from model_terminal_step group by 1 having c > 1")
+    assert not dups, dups[:5]
+    (n_building,) = _q("select count(distinct model_id) from fact_scan where model_id is not null")[0]
+    (n_learned,) = _q("select count(*) from model_terminal_step where learned and share >= 0.5")[0]
+    assert n_learned / n_building >= 0.9, f"{n_learned}/{n_building} = {n_learned / n_building:.3f}"
+
+
+def test_units_out_counts_a_board_once_at_its_terminal_step():
+    """Case 48: counting scan rows double-counts rework. A unit = one board, once."""
+    assert U.UNIVERSE_MART["fact_unit_out"].exists(), "fact_unit_out.parquet not built"
+    dups = _q("select wip_id, model_id, count(*) c from fact_unit_out group by 1, 2 having c > 1")
+    assert not dups, dups[:5]
+    (n_units,) = _q("select count(*) from fact_unit_out")[0]
+    (n_scans,) = _q("select count(*) from fact_scan")[0]
+    assert 0 < n_units < n_scans, (n_units, n_scans)
+
+
+def test_keysight_units_out_match_the_august_count_within_one_percent():
+    """The August registry counted units at PACKOUT (production_out.parquet). The
+    learned terminal step must land within 1 % of it for KEYSIGHT over the period."""
+    aug = duckdb.connect().execute(
+        f"select sum(units_out) from read_parquet('{(U.REGISTRY_DIR / 'production_out.parquet').as_posix()}') "
+        "where try_cast(workcell_id as bigint) = 6").fetchone()[0]
+    (ours,) = _q("select count(*) from fact_unit_out where workcell_id = 6")[0]
+    assert aug and abs(ours - aug) / aug <= 0.01, f"universe {ours} vs august {aug} ({(ours - aug) / aug:+.2%})"
+
+
 # ─── T3 · dim_calendar + dim_shift ───────────────────────────────────────────
 
 def test_fiscal_year_starts_in_september():
