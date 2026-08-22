@@ -261,6 +261,95 @@ def test_units_out_reconciles_with_august_once_double_counting_is_added_back():
     assert abs(ours + extra - aug_packout_models) / aug_packout_models <= 0.01,         f"ours {ours} + extra {extra} = {ours + extra} vs august {aug_packout_models}"
 
 
+# ─── T7 · the OLE proof — paid hours, SMH, and a reconciliation with the OLE module ──
+
+def test_fact_paid_hours_is_one_row_per_person_shift_and_points_at_workcells():
+    assert U.UNIVERSE_MART["fact_paid_hours"].exists(), "fact_paid_hours.parquet not built"
+    dups = _q("""select count(*) from (select employee_no, date, shift, workcell_id, sub_workcell_raw, count(*) c
+                 from fact_paid_hours group by 1,2,3,4,5 having c > 1)""")
+    assert dups == [(0,)], dups
+    orphans = _q("""select count(*) from fact_paid_hours f left join dim_workcell w on w.workcell_id = f.workcell_id
+                    where w.workcell_id is null""")
+    assert orphans == [(0,)], orphans
+    (neg,) = _q("select count(*) from fact_paid_hours where paid_hours < 0")[0]
+    assert neg == 0, neg
+
+
+def test_smh_is_one_standard_per_model_and_stage():
+    """SMH — standard man-hours per unit — is the earned-hours input to OLE."""
+    assert U.UNIVERSE_MART["dim_smh"].exists(), "dim_smh.parquet not built"
+    dups = _q("select workcell_id, model_id, scan_stage, count(*) c from dim_smh group by 1,2,3 having c > 1")
+    assert not dups, dups[:5]
+    (bad,) = _q("select count(*) from dim_smh where smh_per_unit is null or smh_per_unit <= 0")[0]
+    assert bad == 0, bad
+
+
+def test_ole_from_the_universe_reconciles_with_the_ole_module():
+    """The proof. OLE = Σ(units_out × SMH) ÷ Σ paid_hours, per workcell per ISO
+    week, computed from universe tables only, set beside the OLE module's own
+    weekly number for the weeks both cover. Every delta over 2 points carries a
+    computed reason — the point is not that they agree, it is that every
+    disagreement is explained."""
+    assert U.UNIVERSE_MART["ole_reconciliation"].exists(), "ole_reconciliation.parquet not built"
+    rows = _q("""select workcell, iso_week, ole_universe, ole_module, delta_pts, reason
+                 from ole_reconciliation where ole_module is not null""")
+    assert len(rows) >= 10, len(rows)
+    unexplained = [r for r in rows if abs(r[4]) > 2 and not (r[5] or "").strip()]
+    assert not unexplained, unexplained[:5]
+    # and the universe number is a real OLE, not a ratio of nothing
+    (n_real,) = _q("select count(*) from ole_reconciliation where ole_universe between 1 and 200")[0]
+    assert n_real >= 10, n_real
+
+
+# ─── T8 · semantic views — the layer a model (or a person) reads ─────────────
+
+def test_views_carry_meaning_in_column_comments():
+    """A view without column comments is a column list; a model cannot know that
+    workcell = customer or that units are boards-once from the names alone."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        for v in ("v_workcell", "v_units_out_daily", "v_ole_weekly"):
+            cols = con.execute(f"select column_name, comment from duckdb_columns() where table_name = '{v}'").fetchall()
+            assert cols, f"{v} missing"
+            missing = [c for c, cm in cols if not (cm or "").strip()]
+            assert not missing, f"{v}: columns without a comment: {missing}"
+    finally:
+        con.close()
+
+
+def test_pool_q1_list_all_workcells_from_the_view_only():
+    """Pool Q1. The view must say WHICH count — so it exposes status and entity_type,
+    and the active-customer count equals the registry's."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        (n,) = con.execute("select count(*) from v_workcell where status = 'active' and entity_type = 'customer'").fetchone()
+        assert n == 37, n
+        row = con.execute("select plant_physical, plant_governing from v_workcell where workcell = 'MICRON SIG'").fetchone()
+        assert row == ("BK", "P1"), row
+    finally:
+        con.close()
+
+
+def test_pool_q5_output_trend_for_one_model_from_the_view_only():
+    """Pool Q5. Output trend of one model in one workcell, by day — a query over
+    v_units_out_daily alone, no parquet paths, no joins the asker must know."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        rows = con.execute("""
+            select date, units_out from v_units_out_daily
+            where workcell = 'KEYSIGHT' and assembly = (
+              select assembly from v_units_out_daily where workcell = 'KEYSIGHT'
+              group by 1 order by sum(units_out) desc limit 1)
+            order by date""").fetchall()
+        assert len(rows) >= 20, len(rows)
+        assert all(u > 0 for _, u in rows), rows[:3]
+    finally:
+        con.close()
+
+
 # ─── T3 · dim_calendar + dim_shift ───────────────────────────────────────────
 
 def test_fiscal_year_starts_in_september():

@@ -35,6 +35,9 @@ UNIVERSE_MART = {
     "fact_scan":      UNIVERSE_MART_DIR / "fact_scan.parquet",      # one row per board × step (MES WipScanData), deduped
     "model_terminal_step": UNIVERSE_MART_DIR / "model_terminal_step.parquet",  # one row per model: the step its boards finish at, learned
     "fact_unit_out":  UNIVERSE_MART_DIR / "fact_unit_out.parquet",  # one row per board that completed (its scan at the terminal step)
+    "fact_paid_hours": UNIVERSE_MART_DIR / "fact_paid_hours.parquet",  # one row per (employee, date, shift, workcell, sub-workcell) — wave 2, pulled forward for the OLE proof
+    "dim_smh":        UNIVERSE_MART_DIR / "dim_smh.parquet",        # one row per (workcell, model, scan_stage): standard man-hours per unit
+    "ole_reconciliation": UNIVERSE_MART_DIR / "ole_reconciliation.parquet",  # one row per (workcell, ISO week): OLE from the universe beside the OLE module, delta explained
 }
 
 # ─── Plant vocabulary ─────────────────────────────────────────────────────────
@@ -92,3 +95,9 @@ NON_COMPLETION_STEPS = ("SCRAP",)
 DEFAULT_TERMINAL_STEP = "PACKOUT"
 TERMINAL_MIN_BOARDS = 5       # fewer boards than this → default, learned = false
 TERMINAL_MIN_SHARE = 0.5      # the modal end step must hold at least this share
+
+# ─── The OLE proof ────────────────────────────────────────────────────────────
+# The OLE module's own marts — read ONLY to compare against, never to compute from
+# (nothing reads below its own layer; this is a reconciliation, not a dependency).
+OLE_WEEKLY_PARQUET = DATA_MART_DIR / "ole" / "ole_weekly.parquet"
+RECON_DELTA_PTS = 2.0          # a delta above this must carry a computed reason

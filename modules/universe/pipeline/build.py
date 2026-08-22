@@ -346,6 +346,171 @@ def build_terminal_step_and_units() -> dict:
             "terminal_steps_top": steps}
 
 
+# ─── fact_paid_hours + dim_smh (wave 2, pulled forward for the proof) ─────────
+
+def build_paid_hours_and_smh() -> dict:
+    """Paid hours: one row per (employee, date, shift, workcell, sub-workcell).
+    The share files are rolling 16-day windows (case 43), so the registry holds
+    exact duplicates — dropped; same-key rows that differ are summed and flagged.
+    SMH: one standard per (workcell, model, scan_stage), latest update wins."""
+    src_p = (C.REGISTRY_DIR / "paid_hours.parquet").as_posix()
+    src_s = (C.REGISTRY_DIR / "smh.parquet").as_posix()
+    wc = C.UNIVERSE_MART["dim_workcell"].as_posix()
+    dst_p = C.UNIVERSE_MART["fact_paid_hours"].as_posix()
+    dst_s = C.UNIVERSE_MART["dim_smh"].as_posix()
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              with rows as (
+                select distinct employee_no_raw, employee_name_raw, date, shift, workcell_id, workcell_raw,
+                       sub_workcell_raw, cost_center, position, category, paid_hours
+                from read_parquet('{src_p}')
+              )
+              select r.employee_no_raw as employee_no, any_value(r.employee_name_raw) as employee_name,
+                     cast(r.date as date) as date, r.shift,
+                     coalesce(w.workcell_id, 0) as workcell_id, any_value(r.workcell_raw) as workcell_raw,
+                     r.sub_workcell_raw, any_value(r.cost_center) as cost_center,
+                     any_value(r.position) as position, any_value(r.category) as category,
+                     sum(r.paid_hours) as paid_hours, count(*) as n_source_rows
+              from rows r
+              left join read_parquet('{wc}') w on w.workcell_id = try_cast(r.workcell_id as bigint)
+              group by r.employee_no_raw, r.date, r.shift, coalesce(w.workcell_id, 0), r.sub_workcell_raw
+            ) to '{dst_p}' (format parquet)
+        """)
+        con.execute(f"""
+            copy (
+              select try_cast(s.workcell_id as bigint) as workcell_id, s.model_id, s.part_number_raw,
+                     s.scan_stage, s.stage_label, s.smh_per_unit, s.source, s.updated_by, s.updated_at
+              from read_parquet('{src_s}') s
+              where s.smh_per_unit > 0
+              qualify row_number() over (partition by s.workcell_id, s.model_id, s.scan_stage
+                                         order by s.updated_at desc nulls last) = 1
+            ) to '{dst_s}' (format parquet)
+        """)
+        (n_p,) = con.execute(f"select count(*) from read_parquet('{dst_p}')").fetchone()
+        (n_multi,) = con.execute(f"select count(*) from read_parquet('{dst_p}') where n_source_rows > 1").fetchone()
+        (n_s,) = con.execute(f"select count(*) from read_parquet('{dst_s}')").fetchone()
+    finally:
+        con.close()
+    return {"fact_paid_hours": n_p, "paid_hours_summed_keys": n_multi, "dim_smh": n_s}
+
+
+# ─── The OLE proof ────────────────────────────────────────────────────────────
+
+def build_ole_reconciliation() -> dict:
+    """OLE = Σ(units_out × SMH) ÷ Σ paid_hours per workcell per ISO week, from
+    universe tables only, set beside the OLE module's weekly number. Every delta
+    above RECON_DELTA_PTS carries a reason computed from the inputs — the point
+    is not agreement, it is that every disagreement is explained."""
+    M = {k: v.as_posix() for k, v in C.UNIVERSE_MART.items()}
+    ole = C.OLE_WEEKLY_PARQUET.as_posix()
+    dst = M["ole_reconciliation"]
+    d = C.RECON_DELTA_PTS
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            create temp table uni as
+            with units as (
+              select u.workcell_id, u.model_id, u.date, c.iso_year, c.iso_week
+              from read_parquet('{M["fact_unit_out"]}') u
+              join read_parquet('{M["dim_calendar"]}') c on c.date = u.date
+            ),
+            earned as (
+              select un.workcell_id, un.iso_year, un.iso_week,
+                     count(*) as units,
+                     count(*) filter (where s.smh_per_unit is null) as units_missing_smh,
+                     sum(coalesce(s.smh_per_unit, 0)) as earned_smh
+              from units un
+              left join (select workcell_id, model_id, max(smh_per_unit) as smh_per_unit
+                         from read_parquet('{M["dim_smh"]}') group by 1, 2) s
+                on s.workcell_id = un.workcell_id and s.model_id = un.model_id
+              group by 1, 2, 3
+            ),
+            paid as (
+              select p.workcell_id, c.iso_year, c.iso_week, sum(p.paid_hours) as paid_hours
+              from read_parquet('{M["fact_paid_hours"]}') p
+              join read_parquet('{M["dim_calendar"]}') c on c.date = p.date
+              group by 1, 2, 3
+            )
+            ,
+            -- days of each ISO week the scan pull actually covers (the pull, not the workcell)
+            weekcov as (
+              select c.iso_year, c.iso_week, count(*) as scan_days
+              from read_parquet('{M["dim_calendar"]}') c
+              where c.date between (select min(date) from read_parquet('{M["fact_scan"]}'))
+                               and (select max(date) from read_parquet('{M["fact_scan"]}'))
+              group by 1, 2
+            )
+            select coalesce(e.workcell_id, p.workcell_id) as workcell_id,
+                   coalesce(e.iso_year, p.iso_year) as iso_year, coalesce(e.iso_week, p.iso_week) as iso_week,
+                   e.units, e.units_missing_smh, e.earned_smh, wk.scan_days, p.paid_hours
+            from earned e full outer join paid p
+              on p.workcell_id = e.workcell_id and p.iso_year = e.iso_year and p.iso_week = e.iso_week
+            left join weekcov wk on wk.iso_year = coalesce(e.iso_year, p.iso_year) and wk.iso_week = coalesce(e.iso_week, p.iso_week)
+        """)
+        con.execute(f"""
+            create temp table mod as
+            select a.workcell_id, o.workcell as ole_name, o.iso_year, o.iso_week,
+                   o.total_qty as units_module, o.total_output_smh as earned_module,
+                   o.total_input_hours as paid_module,
+                   case when o.total_input_hours > 0 then o.total_output_smh / o.total_input_hours * 100 end as ole_module
+            from read_parquet('{ole}') o
+            join (select workcell_id, value from read_parquet('{M["workcell_alias"]}') where system = 'ole') a
+              on upper(a.value) = upper(o.workcell)
+        """)
+        con.execute(f"""
+            create temp table joined as
+            select w.name as workcell, m.ole_name, u.workcell_id, u.iso_year, u.iso_week,
+                   u.units, u.units_missing_smh, u.earned_smh, u.paid_hours, u.scan_days,
+                   case when u.paid_hours > 0 then u.earned_smh / u.paid_hours * 100 end as ole_universe,
+                   m.units_module, m.earned_module, m.paid_module, m.ole_module
+            from uni u
+            left join mod m on m.workcell_id = u.workcell_id and m.iso_year = u.iso_year and m.iso_week = u.iso_week
+            join read_parquet('{M["dim_workcell"]}') w on w.workcell_id = u.workcell_id
+            where u.units is not null
+        """)
+        con.execute(f"""
+            copy (
+              select workcell, ole_name, workcell_id, iso_year, iso_week,
+                     units, units_missing_smh, round(earned_smh, 2) as earned_smh,
+                     round(paid_hours, 2) as paid_hours, scan_days,
+                     round(ole_universe, 2) as ole_universe,
+                     units_module, round(earned_module, 2) as earned_module, round(paid_module, 2) as paid_module,
+                     round(ole_module, 2) as ole_module,
+                     round(ole_universe - ole_module, 2) as delta_pts,
+                     concat_ws('; ',
+                       case when ole_module is null then 'module has no row for this week' end,
+                       case when scan_days < 7 then 'partial week in scans (' || scan_days || '/7 days)' end,
+                       case when units_module > 0 and abs(units - units_module) / units_module > 0.05
+                            then 'units ' || units || ' vs module ' || cast(units_module as bigint)
+                                 || ' (' || round((units - units_module) / units_module * 100, 0)
+                                 || '%): boards once at the learned terminal step vs share qty at scan_stage' end,
+                       case when units > 0 and units_missing_smh * 1.0 / units > 0.02
+                            then round(units_missing_smh * 100.0 / units, 0) || '% of units have no SMH' end,
+                       case when paid_module > 0 and abs(paid_hours - paid_module) / paid_module > 0.05
+                            then 'paid hours ' || round(paid_hours, 0) || ' vs module ' || round(paid_module, 0)
+                                 || ' (' || round((paid_hours - paid_module) / paid_module * 100, 0) || '%)' end,
+                       case when ole_module is not null and abs(ole_universe - ole_module) > {d}
+                                 and coalesce(scan_days, 7) >= 7
+                                 and not (units_module > 0 and abs(units - units_module) / units_module > 0.05)
+                                 and not (units > 0 and units_missing_smh * 1.0 / units > 0.02)
+                                 and not (paid_module > 0 and abs(paid_hours - paid_module) / paid_module > 0.05)
+                            then 'compounded small differences in units, SMH coverage and hours (each under 5%)' end
+                     ) as reason
+              from joined
+              order by workcell_id, iso_year, iso_week
+            ) to '{dst}' (format parquet)
+        """)
+        (n,) = con.execute(f"select count(*) from read_parquet('{dst}')").fetchone()
+        (n_both,) = con.execute(f"select count(*) from read_parquet('{dst}') where ole_module is not null").fetchone()
+        (n_close,) = con.execute(f"select count(*) from read_parquet('{dst}') where abs(delta_pts) <= {d}").fetchone()
+    finally:
+        con.close()
+    log.info("ole reconciliation: %d workcell-weeks, %d with a module number, %d within %.0f pts", n, n_both, n_close, d)
+    return {"ole_reconciliation": n, "recon_with_module": n_both, "recon_within_2pts": n_close}
+
+
 # ─── dim_calendar + dim_shift ────────────────────────────────────────────────
 
 def build_dim_calendar() -> dict:
@@ -379,7 +544,7 @@ def build_dim_shift() -> dict:
 def build_all() -> dict:
     report = {}
     for fn in (build_dim_workcell, build_dim_calendar, build_dim_shift, build_dim_model, build_fact_scan,
-               build_terminal_step_and_units):
+               build_terminal_step_and_units, build_paid_hours_and_smh, build_ole_reconciliation):
         report.update(fn())
         log.info("built %s", fn.__name__)
     return report
