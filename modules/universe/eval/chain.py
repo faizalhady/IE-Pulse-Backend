@@ -41,8 +41,10 @@ class Slot:
     base: str
     key_env: str | None          # None = no key needed (Ollama)
     model: str
+    rpd: int | None = None       # the free tier's requests per day, where known (plan note / case 69)
+    tpd: int | None = None       # … and tokens per day
     blocked_until: float = 0.0
-    calls: int = 0
+    calls: int = 0               # counted here, today (UTC) — this server's share of the quota
     tokens: int = 0
     last_error: str = ""
 
@@ -60,22 +62,25 @@ class Slot:
 # Model ids are what each provider's GET /models returned on 2026-08-23 — the README's list
 # (gemini-3-flash, gpt-oss-120b:free on OpenRouter, gpt-oss-120b on Cerebras, llama-3.x on Groq)
 # was already gone. Re-check with `python -m modules.universe.eval.chain` when a slot 404s.
+# Limits are the free tiers as the plan note recorded them (Todo/Free LLM Fallback Chain)
+# and Groq's measured caps (case 69). Unknown = None; the OpenRouter 50/day is one pool
+# shared by every :free model. Mistral's free tier is per month, not per day.
 SLOTS: list[Slot] = [
-    Slot("gemini-3.7-flash",        GEMINI,     "GEMINI_API_KEY",     "gemini-3.7-flash"),
-    Slot("or-nemotron-3-ultra",     OPENROUTER, "OPENROUTER_API_KEY", "nvidia/nemotron-3-ultra-550b-a55b:free"),
-    Slot("or-glm-5.2",              OPENROUTER, "OPENROUTER_API_KEY", "z-ai/glm-5.2:free"),
-    Slot("gemini-3.5-flash-lite",   GEMINI,     "GEMINI_API_KEY",     "gemini-3.5-flash-lite"),
-    Slot("groq-gpt-oss-120b",       GROQ,       "CHAT_API_KEY",       "openai/gpt-oss-120b"),
+    Slot("gemini-3.7-flash",        GEMINI,     "GEMINI_API_KEY",     "gemini-3.7-flash",                        rpd=20),
+    Slot("or-nemotron-3-ultra",     OPENROUTER, "OPENROUTER_API_KEY", "nvidia/nemotron-3-ultra-550b-a55b:free",  rpd=50),
+    Slot("or-glm-5.2",              OPENROUTER, "OPENROUTER_API_KEY", "z-ai/glm-5.2:free",                       rpd=50),
+    Slot("gemini-3.5-flash-lite",   GEMINI,     "GEMINI_API_KEY",     "gemini-3.5-flash-lite",                   rpd=500),
+    Slot("groq-gpt-oss-120b",       GROQ,       "CHAT_API_KEY",       "openai/gpt-oss-120b",                     rpd=1000, tpd=200_000),
     Slot("mistral-medium",          MISTRAL,    "MISTRAL_API_KEY",    "mistral-medium-latest"),
-    Slot("cerebras-gemma-4-31b",    CEREBRAS,   "CEREBRAS_API_KEY",   "gemma-4-31b"),
-    Slot("gemini-gemma-4-31b",      GEMINI,     "GEMINI_API_KEY",     "gemma-4-31b-it"),
-    Slot("or-nemotron-3-super-120b", OPENROUTER, "OPENROUTER_API_KEY", "nvidia/nemotron-3-super-120b-a12b:free"),
-    Slot("or-gemma-4-31b",          OPENROUTER, "OPENROUTER_API_KEY", "google/gemma-4-31b-it:free"),
+    Slot("cerebras-gemma-4-31b",    CEREBRAS,   "CEREBRAS_API_KEY",   "gemma-4-31b",                             rpd=14_400),
+    Slot("gemini-gemma-4-31b",      GEMINI,     "GEMINI_API_KEY",     "gemma-4-31b-it",                          rpd=14_400),
+    Slot("or-nemotron-3-super-120b", OPENROUTER, "OPENROUTER_API_KEY", "nvidia/nemotron-3-super-120b-a12b:free",  rpd=50),
+    Slot("or-gemma-4-31b",          OPENROUTER, "OPENROUTER_API_KEY", "google/gemma-4-31b-it:free",              rpd=50),
     Slot("mistral-small",           MISTRAL,    "MISTRAL_API_KEY",    "mistral-small-latest"),
     # the floor: every miss in the exam runs of 2026-08-23 came from these two (invented a table
     # of test counts, narrated SQL instead of running it, dropped the caveat). Outage-only.
-    Slot("groq-qwen3.6-27b",        GROQ,       "CHAT_API_KEY",       "qwen/qwen3.6-27b"),
-    Slot("groq-gpt-oss-20b",        GROQ,       "CHAT_API_KEY",       "openai/gpt-oss-20b"),
+    Slot("groq-qwen3.6-27b",        GROQ,       "CHAT_API_KEY",       "qwen/qwen3.6-27b",                        rpd=1000, tpd=200_000),
+    Slot("groq-gpt-oss-20b",        GROQ,       "CHAT_API_KEY",       "openai/gpt-oss-20b",                      rpd=1000, tpd=200_000),
     Slot("ollama",                os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434") + "/v1", None,
          os.getenv("OLLAMA_MODEL", "llama3.1:8b")),
 ]
@@ -120,6 +125,7 @@ def _call(slot: Slot, messages, tools_spec, tool_choice, max_tokens: int, temper
     data = r.json()
     msg = data["choices"][0]["message"]
     usage = data.get("usage", {}) or {}
+    _roll_day()
     slot.calls += 1
     slot.tokens += int(usage.get("total_tokens") or 0)
     return {"content": msg.get("content"), "tool_calls": msg.get("tool_calls"), "usage": usage, "slot": slot.name}
@@ -172,11 +178,35 @@ def take_events() -> list[str]:
     return out
 
 
+_day = datetime.now(timezone.utc).date().isoformat()
+
+
+def _roll_day() -> None:
+    """The counters are per UTC day, like the free tiers: a new day zeroes them."""
+    global _day
+    today = datetime.now(timezone.utc).date().isoformat()
+    if today != _day:
+        for s in SLOTS:
+            s.calls = s.tokens = 0
+        _day = today
+
+
+def _resets_at() -> str:
+    now = datetime.now(timezone.utc)
+    return (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+
 def status(ping: bool = False) -> list[dict]:
+    _roll_day()
     rows = []
     for s in SLOTS:
-        row = {"slot": s.name, "model": s.model, "key": "—" if s.key_env is None else ("yes" if s.key else "MISSING"),
-               "cooldown_s": max(0, math.ceil(s.blocked_until - time.time())), "calls": s.calls, "tokens": s.tokens, "ping": ""}
+        pct = max((s.calls / s.rpd * 100) if s.rpd else 0, (s.tokens / s.tpd * 100) if s.tpd else 0)
+        host = s.base.split("/")[2] if "//" in s.base else s.base
+        row = {"slot": s.name, "model": s.model, "provider": host.split(".")[-2] if host.count(".") >= 1 else host,
+               "key": "—" if s.key_env is None else ("yes" if s.key else "MISSING"),
+               "cooldown_s": max(0, math.ceil(s.blocked_until - time.time())), "calls": s.calls, "tokens": s.tokens,
+               "limits": {"rpd": s.rpd, "tpd": s.tpd}, "usage_pct": min(100, round(pct)), "resets_at": _resets_at(),
+               "last_error": s.last_error, "ping": ""}
         if ping and (s.key or s.key_env is None):
             try:
                 _call(s, [{"role": "user", "content": "Reply with the single word: ok"}], None, "none", 5, 0.0)

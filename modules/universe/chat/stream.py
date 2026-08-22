@@ -54,6 +54,8 @@ def sse(events: Iterable[tuple], message_id: str | None = None) -> Iterator[str]
             yield _line({"type": "text-end", "id": tid})
         elif kind == "error":
             yield _line({"type": "error", "errorText": payload})
+        elif kind == "model":                      # which slot(s) answered — shown beside the thumbs
+            yield _line({"type": "data-model", "data": {"label": payload}})
     yield _line({"type": "finish"})
     yield "data: [DONE]\n\n"
 
@@ -74,4 +76,6 @@ def parts(events: Iterable[tuple]) -> list[dict]:
                 part["output"] = _output(payload)
         elif kind == "text":
             out.append({"type": "text", "text": payload})
+        elif kind == "model":
+            out.append({"type": "data-model", "data": {"label": payload}})
     return out

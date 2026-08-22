@@ -222,7 +222,8 @@ def test_router_chat_streams_and_saves_both_messages():
     assert types[0] == "start" and "tool-input-available" in types and "text-delta" in types and types[-1] == "finish"
     saved = threads.get(t["id"], "faiz")["messages"]
     assert [m["role"] for m in saved] == ["user", "assistant"]
-    assert saved[1]["parts"][0]["type"] == "tool-universe_describe" and saved[1]["parts"][-1] == {"type": "text", "text": "111 rows."}
+    assert saved[1]["parts"][0]["type"] == "tool-universe_describe" and {"type": "text", "text": "111 rows."} in saved[1]["parts"]
+    assert saved[1]["parts"][-1]["type"] == "data-model"        # who answered, last
     assert saved[1]["model"]
     # the saved answer keeps the id the stream announced, so the page's thumbs find it
     start = next(json.loads(l[6:]) for l in r.text.split("\n\n") if l.startswith('data: {"type":"start"'))
@@ -245,6 +246,75 @@ def test_router_chat_without_a_thread_creates_one():
     assert r.headers["x-thread-id"], "the new thread id comes back in a header so the page can adopt it"
     mine = threads.list_for("faiz")
     assert len(mine) == 1 and mine[0]["title"] == "hello there"
+
+
+# ─── which model answered, and the models panel ─────────────────────────────
+
+def test_stream_carries_the_model_label_as_a_data_part():
+    """The page shows "answered by …" beside the thumbs: the loop's consumer appends a
+    ("model", label) event; it streams as a data-model chunk and is stored as a part."""
+    from modules.universe.chat import stream
+    events = [("text", "Hi."), ("model", "chain: gemini-3.7-flash -> groq-gpt-oss-120b"),
+              ("done", {"stopped": "answered", "rounds": 1, "sqls": [], "usage": {}})]
+    chunks = [json.loads(l[6:]) for l in list(stream.sse(events, message_id="m"))[:-1]]
+    assert {"type": "data-model", "data": {"label": "chain: gemini-3.7-flash -> groq-gpt-oss-120b"}} in chunks
+    assert chunks.index(next(c for c in chunks if c["type"] == "data-model")) < chunks.index({"type": "finish"})
+    parts = stream.parts(events)
+    assert parts[-1] == {"type": "data-model", "data": {"label": "chain: gemini-3.7-flash -> groq-gpt-oss-120b"}}
+
+
+def test_router_chat_streams_the_model_label_and_stores_it():
+    import os
+    from modules.universe import config as C
+    from modules.universe.chat import threads
+    from api.routers import universe_chat
+    _temp_db()
+    os.environ["UNIVERSE_CHAT_USERS"] = "faiz"
+    C.reload_chat_users()
+    universe_chat.MODEL_FN = _fake_model(["Hello."])
+    body = {"id": "new", "trigger": "submit-message",
+            "messages": [{"id": "u1", "role": "user", "parts": [{"type": "text", "text": "hello"}]}]}
+    r = _client("faiz").post("/api/universe/chat", json=body)
+    chunks = [json.loads(l[6:]) for l in r.text.split("\n\n") if l.startswith("data: {")]
+    assert any(c["type"] == "data-model" and c["data"]["label"] for c in chunks), [c["type"] for c in chunks]
+    saved = threads.list_for("faiz")[0]
+    msg = threads.get(saved["id"], "faiz")["messages"][1]
+    assert msg["parts"][-1]["type"] == "data-model" and msg["parts"][-1]["data"]["label"] == msg["model"]
+
+
+def test_chain_status_reports_usage_against_known_limits_and_resets_daily():
+    """Each slot: calls and tokens today, the free tier's daily limits where known,
+    a usage percent, and when the count resets. A new UTC day zeroes the counters."""
+    from modules.universe.eval import chain
+    s = chain.Slot("groq-gpt-oss-120b", "http://x", None, "openai/gpt-oss-120b", rpd=1000, tpd=200_000)
+    s.calls, s.tokens = 10, 50_000
+    old = chain.SLOTS
+    chain.SLOTS = [s]
+    try:
+        row = chain.status()[0]
+        assert row["limits"] == {"rpd": 1000, "tpd": 200_000}
+        assert row["usage_pct"] == 25                          # tokens 50k/200k beats calls 10/1000
+        assert row["resets_at"].endswith("+00:00") and "T00:00:00" in row["resets_at"]
+        chain._day = "2000-01-01"                             # pretend the counters are from yesterday
+        row = chain.status()[0]
+        assert row["calls"] == 0 and row["tokens"] == 0 and row["usage_pct"] == 0
+    finally:
+        chain.SLOTS = old
+    assert all(isinstance(x.rpd, (int, type(None))) for x in chain.SLOTS)
+
+
+def test_router_models_panel_lists_every_slot():
+    import os
+    from modules.universe import config as C
+    _temp_db()
+    os.environ["UNIVERSE_CHAT_USERS"] = "faiz"
+    C.reload_chat_users()
+    r = _client("faiz").get("/api/universe/chat/models")
+    assert r.status_code == 200
+    rows = r.json()["models"]
+    assert len(rows) >= 10 and {"slot", "model", "key", "calls", "tokens", "limits", "usage_pct", "cooldown_s", "resets_at"} <= set(rows[0])
+    assert r.json()["note"]
+    assert _client("stranger").get("/api/universe/chat/models").status_code == 403
 
 
 def main() -> int:

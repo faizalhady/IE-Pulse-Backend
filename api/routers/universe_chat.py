@@ -105,6 +105,18 @@ def feedback(body: Feedback, ntid: str = Depends(pilot)):
     return {"ok": True}
 
 
+# ─── the models panel ────────────────────────────────────────────────────────
+
+@router.get("/chat/models")
+def models(ntid: str = Depends(pilot)):
+    """Every slot of the free-model chain: what it is, what this server used today, the
+    free tier's limits where known, when the count resets. Counted here, not by the provider."""
+    from modules.universe.eval import chain
+    return {"models": chain.status(),
+            "note": "Usage is what this server sent today (UTC); the providers count separately. "
+                    "Daily limits reset at midnight UTC (08:00 MYT). Mistral's free tier is per month."}
+
+
 # ─── chat ────────────────────────────────────────────────────────────────────
 
 def _text_of(message: dict) -> str:
@@ -141,17 +153,22 @@ def chat(body: dict, ntid: str = Depends(pilot)):
 
     def gen():
         events: list[tuple] = []
+        label = {"value": None}
 
         def tee():
             for ev in loop.run(history, model_fn):
                 events.append(ev)
                 yield ev
+            label["value"] = _model_label()            # known only once the loop is done
+            ev = ("model", label["value"])
+            events.append(ev)
+            yield ev
         try:
             yield from stream.sse(tee(), message_id=message_id)
         finally:
             parts = stream.parts(events)
             if parts:
-                threads.add_message(thread["id"], "assistant", parts, model=_model_label(), message_id=message_id)
+                threads.add_message(thread["id"], "assistant", parts, model=label["value"] or _model_label(), message_id=message_id)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={**stream.HEADERS, "x-thread-id": thread["id"]})
