@@ -101,9 +101,15 @@ IE-Pulse-Backend/
 │   │       ├── ingest.py           # parse data/raw/ppqt/*.xlsx (visible sheets only) → marts
 │   │       └── refresh.py
 │   │
-│   └── ipk/                        🔲 stubbed
-│       ├── config.py
-│       └── pipeline/refresh.py
+│   ├── ipk/                        🔲 stubbed
+│   │   ├── config.py
+│   │   └── pipeline/refresh.py
+│   │
+│   └── universe/                   ✅ Phase 1 — the Jabil Universe (dims, facts, semantic views)
+│       ├── config.py               # paths, plant + completion vocabulary, thresholds
+│       ├── registry.py             # resolve(name) -> workcell_id — the one place a name becomes an id
+│       ├── views.py                # v_workcell · v_units_out_daily · v_ole_weekly, every column commented
+│       └── pipeline/build.py       # promote the August registry -> tested parquet (tests first)
 │
 ├── data/
 │   ├── raw/                        # SMH files, uploaded Excel inputs
@@ -131,6 +137,7 @@ IE-Pulse-Backend/
 | PPQT | ✅ Live — Excel-first (LAMRES 8.0 workbook); mart integration pending | docs/PPQT_BUILD.md (+ FE docs/PPQT_LAMRES_DIFF.md for the formula diff) |
 | IPK | 🔲 Stubbed — full pipeline pending | docs/IPK_BUILD.md |
 | LBR | 🔲 Stubbed — full pipeline pending | — (BE spec to be created when built) |
+| **Universe** | ✅ Phase 1 — dims + fact_scan + OLE proof, branch `universe/phase-1`, not merged | docs/UNIVERSE_BUILD.md · rules in the `jabil-universe` skill |
 
 For module-specific business logic, formulas, API endpoints, and parquet
 schemas — always read `docs/<MODULE>_BUILD.md`. The root CLAUDE.md only carries
