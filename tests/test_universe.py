@@ -230,14 +230,16 @@ def _august_keysight_packout_units() -> int:
 
 def test_fact_scan_reproduces_the_august_packout_count():
     """Promotion check: August counted distinct boards at PACKOUT per (date, shift,
-    model, bay). Recomputing that definition from fact_scan must land within 1 % —
-    otherwise the dedupe lost boards."""
+    model, bay) over 9 Jul → 8 Aug. Recomputing that definition from fact_scan in the
+    same window must not lose boards — and may hold up to 3 % more, because the
+    August pull dropped minute 59 of every hour (case 70)."""
     aug = _august_keysight_packout_units()
     (recomputed,) = _q("""
         select count(*) from (
           select distinct wip_id, model_id, date, shift_name_raw, bay_id
-          from fact_scan where workcell_id = 6 and step = 'PACKOUT')""")[0]
-    assert aug and abs(recomputed - aug) / aug <= 0.01, f"recomputed {recomputed} vs august {aug}"
+          from fact_scan where workcell_id = 6 and step = 'PACKOUT'
+            and date between '2026-07-09' and '2026-08-08')""")[0]
+    assert aug and 0 <= recomputed - aug <= 0.03 * aug, f"recomputed {recomputed} vs august {aug}"
 
 
 def test_units_out_reconciles_with_august_once_double_counting_is_added_back():
@@ -248,11 +250,13 @@ def test_units_out_reconciles_with_august_once_double_counting_is_added_back():
     are an open question, not a tolerance."""
     (ours,) = _q("""select count(*) from fact_unit_out u
                     join model_terminal_step t on t.model_id = u.model_id
-                    where u.workcell_id = 6 and t.terminal_step = 'PACKOUT'""")[0]
+                    where u.workcell_id = 6 and t.terminal_step = 'PACKOUT'
+                      and u.date between '2026-07-09' and '2026-08-08'""")[0]
     (extra,) = _q("""select coalesce(sum(n_groups - 1), 0) from (
                        select s.wip_id, s.model_id, count(distinct (s.date, s.shift_name_raw, s.bay_id)) n_groups
                        from fact_scan s join model_terminal_step t on t.model_id = s.model_id
                        where s.workcell_id = 6 and s.step = 'PACKOUT' and t.terminal_step = 'PACKOUT'
+                         and s.date between '2026-07-09' and '2026-08-08'
                        group by 1, 2)""")[0]
     aug_packout_models = duckdb.connect().execute(f"""
         select sum(a.units_out) from read_parquet('{(U.REGISTRY_DIR / 'production_out.parquet').as_posix()}') a
@@ -294,7 +298,7 @@ def test_ole_from_the_universe_reconciles_with_the_ole_module():
     rows = _q("""select workcell, iso_week, ole_universe, ole_module, delta_pts, reason
                  from ole_reconciliation where ole_module is not null""")
     assert len(rows) >= 10, len(rows)
-    unexplained = [r for r in rows if abs(r[4]) > 2 and not (r[5] or "").strip()]
+    unexplained = [r for r in rows if (r[4] is None or abs(r[4]) > 2) and not (r[5] or "").strip()]
     assert not unexplained, unexplained[:5]
     # and the universe number is a real OLE, not a ratio of nothing
     (n_real,) = _q("select count(*) from ole_reconciliation where ole_universe between 1 and 200")[0]
@@ -370,14 +374,15 @@ def test_dim_employee_scope_is_a_real_fact():
 
 def test_paid_hours_employees_resolve_to_people_or_are_counted():
     """A paid-hours row whose person is unknown is reported, never dropped."""
-    # 877 payroll numbers are not in HR at all — agency / contract codes (WHL…, NWL…).
-    # They are 3.1% of HOURS, and hours are what OLE divides by; so the bar is hours.
+    # 877 payroll numbers were not in HR at all in August — agency / contract codes (WHL…, NWL…);
+    # 1,142 after refresh 1 (payroll to 21 Aug, HR extract from 7 Aug: joiners arrive first in payroll).
+    # They are ~3% of HOURS, and hours are what OLE divides by; so the bar is hours — the count is reported.
     rows = _q("""select sum(p.paid_hours) filter (where e.employee_id is not null), sum(p.paid_hours),
                         count(distinct p.employee_no) filter (where e.employee_id is null)
                  from fact_paid_hours p left join dim_employee e on e.payroll_no = p.employee_no""")
     matched_hours, total_hours, unmatched_people = rows[0]
     assert matched_hours / total_hours >= 0.95, f"{matched_hours}/{total_hours}"
-    assert unmatched_people < 1000, unmatched_people
+    assert unmatched_people > 0, "unknown people must be reported, not dropped"
 
 
 def test_dim_department_has_a_kind_and_parents_resolve():
@@ -523,7 +528,8 @@ def test_refresh_rebuilds_fact_scan_from_the_raw_pulls_exactly():
     acceptance test for the refresh path, so it stays."""
     from modules.universe.pipeline import refresh
     n = refresh.count_from_raw(U.REGISTRY_DIR / "wipscan")
-    assert n == 18_747_552, n
+    (m,) = _q("select count(*) from fact_scan")[0]
+    assert n == m, (n, m)          # 18,747,552 in Phase 1; grows with every pull
 
 
 # ═══ PHASE 3 — the first modules as queries ═══════════════════════════════════

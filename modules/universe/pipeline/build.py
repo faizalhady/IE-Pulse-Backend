@@ -223,12 +223,15 @@ def build_dim_model() -> dict:
 # ─── fact_scan ───────────────────────────────────────────────────────────────
 
 def build_fact_scan() -> dict:
-    """One row per board × step — MES WipScanData as pulled in August (hourly
-    windows, 9 Jul → 8 Aug 2026). The raw parquet holds ~1.1M duplicated keys
-    from overlapping windows; one survives. Shift and shift_date follow the
+    """One row per board × step — MES WipScanData from the raw hourly pulls in
+    RAW_WIPSCAN_DIR (pipeline/refresh.py), or the August registry parquet when no
+    pulls are on disk. Overlapping windows duplicate keys; one survives. Shift and shift_date follow the
     LOCAL clock (case 49): 07:00–19:00 → 2, else 3; a scan before 07:00 belongs
     to the previous date's night shift. Unknown workcells land on row 0."""
-    src = (C.REGISTRY_DIR / "production_scan.parquet").as_posix()
+    from modules.universe.pipeline import refresh
+    files = refresh.raw_files()
+    src = (f"select * exclude (plant_raw, shift_name_raw), plant_raw as plant, shift_name_raw as shift_name from ({refresh._raw_sql(files)})"
+           if files else f"select * from read_parquet('{(C.REGISTRY_DIR / 'production_scan.parquet').as_posix()}')")
     wc = C.UNIVERSE_MART["dim_workcell"].as_posix()
     dst = C.UNIVERSE_MART["fact_scan"].as_posix()
     con = duckdb.connect()
@@ -247,7 +250,7 @@ def build_fact_scan() -> dict:
                 s.process_loop, s.test_loop, s.test_status,
                 s.workcell_raw, s.part_number_raw, s.revision_raw, s.route_raw,
                 s.area_raw, s.equipment_raw, s.plant as plant_raw, s.shift_name as shift_name_raw
-              from read_parquet('{src}') s
+              from ({src}) s
               left join read_parquet('{wc}') w on w.workcell_id = try_cast(s.workcell_id as bigint)
               qualify row_number() over (
                 partition by s.wip_id, s.step, s.step_instance, s.completed_at_utc
@@ -255,7 +258,7 @@ def build_fact_scan() -> dict:
               order by s.completed_at_utc
             ) to '{dst}' (format parquet, row_group_size 1000000)
         """)
-        (n_src,) = con.execute(f"select count(*) from read_parquet('{src}')").fetchone()
+        (n_src,) = con.execute(f"select count(*) from ({src})").fetchone()
         (n,) = con.execute(f"select count(*) from read_parquet('{dst}')").fetchone()
         (n_unknown,) = con.execute(f"select count(*) from read_parquet('{dst}') where workcell_id = 0").fetchone()
         lo, hi = con.execute(f"select min(date), max(date) from read_parquet('{dst}')").fetchone()
@@ -263,7 +266,7 @@ def build_fact_scan() -> dict:
         con.close()
     log.info("fact_scan: %d rows (%d duplicates removed), %s → %s, %d on UNKNOWN", n, n_src - n, lo, hi, n_unknown)
     return {"fact_scan": n, "fact_scan_duplicates_removed": n_src - n, "fact_scan_unknown_workcell": n_unknown,
-            "fact_scan_range": f"{lo} → {hi}"}
+            "fact_scan_range": f"{lo} -> {hi}"}   # ascii: the console is cp1252
 
 
 # ─── model_terminal_step + fact_unit_out ─────────────────────────────────────
@@ -349,23 +352,48 @@ def build_terminal_step_and_units() -> dict:
 # ─── fact_paid_hours + dim_smh (wave 2, pulled forward for the proof) ─────────
 
 def build_paid_hours_and_smh() -> dict:
-    """Paid hours: one row per (employee, date, shift, workcell, sub-workcell).
-    The share files are rolling 16-day windows (case 43), so the registry holds
-    exact duplicates — dropped; same-key rows that differ are summed and flagged.
-    SMH: one standard per (workcell, model, scan_stage), latest update wins."""
+    """Paid hours: one row per (employee, date, shift, workcell, sub-workcell), every
+    entity payroll knows (71 — the OLE module keeps 14). Source: the local UTF-8 copies
+    of the share's rolling 16-day files (case 43), date-stitched — the newest file
+    holding a date wins it; the August registry parquet fills dates the share has
+    already rotated away. Same-key rows that differ are summed and flagged.
+    SMH: the live SQLite table, one standard per (workcell, model, scan_stage),
+    latest update wins."""
+    from modules.universe import registry
     src_p = (C.REGISTRY_DIR / "paid_hours.parquet").as_posix()
-    src_s = (C.REGISTRY_DIR / "smh.parquet").as_posix()
     wc = C.UNIVERSE_MART["dim_workcell"].as_posix()
+    dm = C.UNIVERSE_MART["dim_model"].as_posix()
     dst_p = C.UNIVERSE_MART["fact_paid_hours"].as_posix()
     dst_s = C.UNIVERSE_MART["dim_smh"].as_posix()
     con = duckdb.connect()
     try:
+        files = sorted(C.RAW_PAID_HOURS_DIR.glob("*.csv"))
+        registry_rows = f"""select employee_no_raw, employee_name_raw, date, shift, try_cast(workcell_id as bigint) as workcell_id,
+                                    workcell_raw, sub_workcell_raw, cost_center, position, category, paid_hours
+                             from read_parquet('{src_p}')"""
+        if files:
+            share = f"""select THCDirect as employee_no_raw, Name as employee_name_raw,
+                              try_strptime(Startdate, '%m/%d/%Y %H:%M:%S')::date as date, try_cast(Shift as bigint) as shift,
+                              WorkCell as workcell_raw, SubWorkCell as sub_workcell_raw, CostCenter as cost_center,
+                              Position as position, Category as category, try_cast(TPHDirect as double) as paid_hours, filename
+                       from read_csv('{C.RAW_PAID_HOURS_DIR.as_posix()}/*.csv', header = true, all_varchar = true, filename = true, union_by_name = true)
+                       qualify dense_rank() over (partition by date order by filename desc) = 1"""
+            names = [r[0] for r in con.execute(f"select distinct workcell_raw from ({share}) where workcell_raw is not null").fetchall()]
+            wc_values = ", ".join(f"('{n.replace(chr(39), chr(39) * 2)}', {registry.resolve(n) or 0})" for n in names) or "('', 0)"
+            (lo,) = con.execute(f"select min(date) from ({share})").fetchone()
+            registry_rows = f"""{registry_rows} where date < '{lo}'
+                                 union all by name
+                                 select s.* exclude (filename), wcm.workcell_id
+                                 from ({share}) s left join (values {wc_values}) wcm(workcell_raw, workcell_id) on wcm.workcell_raw = s.workcell_raw"""
+        smh_names = [r[0] for r in con.execute(f"select distinct workcell from sqlite_scan('{C.OPERATIONAL_DB.as_posix()}', 'smh') where workcell is not null").fetchall()]
+        smh_wc = ", ".join(f"('{n.replace(chr(39), chr(39) * 2)}', {registry.resolve(n) or 0})" for n in smh_names) or "('', 0)"
         con.execute(f"""
             copy (
               with rows as (
                 select distinct employee_no_raw, employee_name_raw, date, shift, workcell_id, workcell_raw,
                        sub_workcell_raw, cost_center, position, category, paid_hours
-                from read_parquet('{src_p}')
+                from ({registry_rows})
+                where date is not null
               )
               select r.employee_no_raw as employee_no, any_value(r.employee_name_raw) as employee_name,
                      cast(r.date as date) as date, r.shift,
@@ -374,18 +402,27 @@ def build_paid_hours_and_smh() -> dict:
                      any_value(r.position) as position, any_value(r.category) as category,
                      sum(r.paid_hours) as paid_hours, count(*) as n_source_rows
               from rows r
-              left join read_parquet('{wc}') w on w.workcell_id = try_cast(r.workcell_id as bigint)
+              left join read_parquet('{wc}') w on w.workcell_id = r.workcell_id
               group by r.employee_no_raw, r.date, r.shift, coalesce(w.workcell_id, 0), r.sub_workcell_raw
             ) to '{dst_p}' (format parquet)
         """)
         con.execute(f"""
             copy (
-              select try_cast(s.workcell_id as bigint) as workcell_id, s.model_id, s.part_number_raw,
-                     s.scan_stage, s.stage_label, s.smh_per_unit, s.source, s.updated_by, s.updated_at
-              from read_parquet('{src_s}') s
-              where s.smh_per_unit > 0
-              qualify row_number() over (partition by s.workcell_id, s.model_id, s.scan_stage
-                                         order by s.updated_at desc nulls last) = 1
+              with matched as (
+                -- the model: same workcell first, any workcell second (case 66) — the SMH sheet
+                -- names the payroll entity (KEYSIGHT HLA) while models hang off the customer (KEYSIGHT)
+                select wcm.workcell_id, m.model_id, s.assembly as part_number_raw,
+                       s.scan_stage, s.stage_label, s.smh_value as smh_per_unit, s.source, s.updated_by, s.updated_at
+                from sqlite_scan('{C.OPERATIONAL_DB.as_posix()}', 'smh') s
+                left join (values {smh_wc}) wcm(workcell_raw, workcell_id) on wcm.workcell_raw = s.workcell
+                left join read_parquet('{dm}') m on m.match_key = regexp_replace(upper(s.assembly), '[^A-Z0-9]', '', 'g')
+                where s.smh_value > 0
+                qualify row_number() over (partition by s.workcell, s.assembly, s.scan_stage
+                                           order by (m.workcell_id = wcm.workcell_id) desc nulls last, m.model_id) = 1
+              )
+              select * from matched
+              qualify row_number() over (partition by workcell_id, model_id, scan_stage
+                                         order by updated_at desc nulls last) = 1
             ) to '{dst_s}' (format parquet)
         """)
         (n_p,) = con.execute(f"select count(*) from read_parquet('{dst_p}')").fetchone()
@@ -667,17 +704,29 @@ def build_route() -> dict:
 
 
 def build_demand() -> dict:
-    """fact_demand — the planner, keyed on the model (part number normalised by the
-    registry), workcell through the registry, never a raw name (case 18)."""
-    R = C.REGISTRY_DIR.as_posix()
+    """fact_demand — the planner snapshot the Cycle Time module parses from the
+    planners' OneDrive folder (PLANNER_DEMAND_PARQUET; the registry copy was a 29 Jun
+    snapshot, case 68). Keyed on the model (part number normalised by the registry),
+    workcell through the registry, never a raw name (case 18). as_of is per source."""
+    from modules.universe import registry
+    src = C.PLANNER_DEMAND_PARQUET.as_posix()
     con = duckdb.connect()
     try:
+        names = [r[0] for r in con.execute(f"select distinct workcell from read_parquet('{src}') where workcell is not null").fetchall()]
+        wc_values = ", ".join(f"('{n.replace(chr(39), chr(39) * 2)}', {registry.resolve(n) or 0})" for n in names) or "('', 0)"
         con.execute(f"""
             copy (
-              select d.id as demand_id, d.period_start, d.period_type,
-                     {_wc_int("d.workcell_id")} as workcell_id, d.workcell_raw,
-                     d.model_id, d.part_number_raw, d.qty, d.source, try_cast(d.as_of as date) as as_of
-              from read_parquet('{R}/demand.parquet') d
+              with wc(workcell, workcell_id) as (values {wc_values})
+              select row_number() over (order by d.as_of, d.workcell, d.model, d.period_start) as demand_id,
+                     d.period_start, d.period_type,
+                     coalesce(wc.workcell_id, 0) as workcell_id, d.workcell as workcell_raw,
+                     m.model_id, d.model as part_number_raw, d.qty, d.source, d.as_of
+              from (select workcell, model, period_start, period_type, source, as_of, sum(qty) as qty
+                    from read_parquet('{src}') group by all) d
+              left join wc on wc.workcell = d.workcell
+              left join read_parquet('{C.UNIVERSE_MART["dim_model"].as_posix()}') m
+                on m.workcell_id = wc.workcell_id and m.match_key = regexp_replace(upper(d.model), '[^A-Z0-9]', '', 'g')
+              qualify row_number() over (partition by wc.workcell_id, m.model_id, d.period_start, d.period_type, d.source, d.as_of) = 1
             ) to '{C.UNIVERSE_MART["fact_demand"].as_posix()}' (format parquet)
         """)
         (n,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['fact_demand'].as_posix()}')").fetchone()

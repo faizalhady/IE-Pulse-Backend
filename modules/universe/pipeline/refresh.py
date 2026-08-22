@@ -7,19 +7,30 @@ Two halves. The PARSE half (raw CSV -> fact_scan rows, keyed through the
 registry, deduped on the scan key) works offline and is tested against the 30
 hourly-pull CSVs already on disk: rebuilding from them must reproduce Phase 1's
 fact_scan to the row. The PULL half (MES over HTTPS, hourly windows — case 42)
-needs the plant network and is wired but not exercised until the VPN is back.
+needs the plant network (ported from HUB/MES pull-wipscan.ts, 2026-08-23).
 
+    python -m modules.universe.pipeline.refresh pull 2026-08-08 2026-08-22 [--force]   # UTC days [start, end) -> one CSV each
+    python -m modules.universe.pipeline.refresh pull-paid-hours                        # copy new payroll files from the share, as UTF-8
     python -m modules.universe.pipeline.refresh count      # rows the raw CSVs hold, deduped
     python -m modules.universe.pipeline.refresh append     # fold every raw CSV into fact_scan (idempotent)
+
+Case 70: the original puller ended every window at hh:59:00 and silently dropped
+minute 59 of every hour (~1.2% of scans). Windows here end at hh:59:59 — the API
+rejects hh:59:59.999 as 'more than 1 hour apart'.
 """
 
 from __future__ import annotations
 
+import csv
 import logging
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, timedelta
 from pathlib import Path
 
 import duckdb
+import requests
 
 from modules.universe import config as C
 
@@ -41,10 +52,12 @@ def _raw_sql(files: list[Path]) -> str:
         ),
         parsed as (
           select
-            coalesce(try_strptime(completion_time, '%Y-%m-%dT%H:%M:%S'),
+            -- to the second: the API now returns milliseconds, the August pulls did not,
+            -- and the scan key must match across both
+            date_trunc('second', coalesce(try_strptime(completion_time, '%Y-%m-%dT%H:%M:%S'),
                      try_strptime(completion_time, '%Y-%m-%d %H:%M:%S'),
                      try_strptime(completion_time, '%m/%d/%Y %H:%M:%S'),
-                     try_cast(completion_time as timestamp)) as completed_at_utc,
+                     try_cast(completion_time as timestamp))) as completed_at_utc,
             wip_id, customer, division, assembly, revision, site, building,
             manufacturing_area, route, step, step_instance, equipment, equipment_id,
             try_cast(process_loop as integer) as process_loop,
@@ -131,11 +144,87 @@ def append(files: list[Path]) -> dict:
     return report
 
 
-def pull(start, end) -> list[Path]:
-    """MES WipScanData over HTTPS in hourly windows (case 42) -> raw CSVs in
-    RAW_WIPSCAN_DIR. Needs the plant network. Ported from HUB/MES pull-wipscan.ts
-    when the VPN is back; until then this raises so nothing pretends to refresh."""
-    raise NotImplementedError("MES pull needs the plant network — port pull-wipscan.ts here when the VPN is back")
+RAW_COLS = ["completion_time", "wip_id", "customer", "division", "assembly", "revision", "site", "building",
+            "manufacturing_area", "manufacturing_area_id", "route", "route_id", "step", "step_id",
+            "step_instance", "step_instance_id", "equipment", "equipment_id", "process_loop", "test_loop", "test_status"]
+_API_COLS = ["CompletionTime", "WipId", "Customer", "Division", "Assembly", "Revision", "Site", "Building",
+             "ManufacturingArea", "ManufacturingAreaId", "Route", "RouteId", "Step", "StepId",
+             "StepInstance", "StepInstanceId", "Equipment", "EquipmentId", "ProcessLoop", "TestLoop", "TestStatus"]
+_session = requests.Session()   # one TLS handshake per run, not per call
+
+
+def _mes_hour(day: str, h: int, tries: int = 3) -> list[dict]:
+    """One window, strictly under an hour (case 42): hh:00:00 -> hh:59:59 UTC.
+    A dead hour raises — it must never look like an empty hour (silent gap)."""
+    body = {"RouteStep": [], "StepInstance": [], "LangId": 0,
+            "StartDateTime": f"{day}T{h:02d}:00:00.000Z", "EndDateTime": f"{day}T{h:02d}:59:59.000Z"}
+    err = None
+    for t in range(tries):
+        try:
+            r = _session.post(f"{C.MES_WEBAPI_BASE}/Wip/WipScanData", json=body,
+                              headers={"APIKey": C.MES_WEBAPI_KEY}, timeout=180)
+            r.raise_for_status()
+            rows = r.json()
+            if isinstance(rows, dict):                      # MES sometimes wraps the array
+                rows = next((v for v in rows.values() if isinstance(v, list)), [])
+            return [x for x in rows if x and x.get("WipId") is not None]
+        except Exception as e:                              # 404/5xx/timeouts are intermittent on this SP
+            err = e
+            time.sleep(2 * (t + 1))
+    raise RuntimeError(f"MES {day} hour {h:02d} failed after {tries} tries: {err}")
+
+
+def pull_paid_hours() -> list[Path]:
+    """Copy payroll files the share has and we do not into RAW_PAID_HOURS_DIR as UTF-8.
+    The share keeps ~60 rolling files and rotates the oldest away, so the local copy
+    is the only place the history accumulates. Six of 61 files were cp1252 (case 71)."""
+    C.RAW_PAID_HOURS_DIR.mkdir(parents=True, exist_ok=True)
+    new = []
+    for src in sorted(C.PAID_HOURS_SHARE.glob(f"{C.PAID_HOURS_PREFIX}*.csv")):
+        dst = C.RAW_PAID_HOURS_DIR / src.name
+        if dst.exists():
+            continue
+        b = src.read_bytes()
+        try:
+            text = b.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = b.decode("cp1252")
+        dst.write_text(text, encoding="utf-8", newline="")
+        new.append(dst)
+    log.info("paid hours: %d new files copied", len(new))
+    return new
+
+
+def pull(start: date, end: date, force: bool = False, workers: int = 4) -> list[Path]:
+    """MES WipScanData for the UTC days [start, end) -> one CSV per day in
+    RAW_WIPSCAN_DIR, RAW_COLS shape. A day's file appears only once all 24 hours
+    came back, so a crash leaves nothing half-true; days already on disk are
+    skipped unless force. Needs the plant network and MES_WEBAPI_KEY."""
+    if not C.MES_WEBAPI_KEY:
+        raise RuntimeError("MES_WEBAPI_KEY not set in .env")
+    C.RAW_WIPSCAN_DIR.mkdir(parents=True, exist_ok=True)
+    out = []
+    for i in range((end - start).days):
+        day = (start + timedelta(days=i)).isoformat()
+        dst = C.RAW_WIPSCAN_DIR / f"wipscan_{day}.csv"
+        if dst.exists() and not force:
+            out.append(dst)
+            continue
+        with ThreadPoolExecutor(workers) as ex:
+            hours = list(ex.map(lambda h: _mes_hour(day, h), range(24)))
+        tmp = dst.with_suffix(".part")
+        n = 0
+        with tmp.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, lineterminator="\n")
+            w.writerow(RAW_COLS)
+            for rows in hours:
+                for r in rows:
+                    w.writerow(["" if r.get(k) is None else r.get(k) for k in _API_COLS])
+                    n += 1
+        tmp.replace(dst)
+        out.append(dst)
+        log.info("%s  %9d scans", day, n)
+    return out
 
 
 if __name__ == "__main__":
@@ -145,5 +234,10 @@ if __name__ == "__main__":
         print(count_from_raw())
     elif cmd == "append":
         print(append(raw_files()))
+    elif cmd == "pull-paid-hours":
+        print(len(pull_paid_hours()), "new files")
+    elif cmd == "pull":
+        files = pull(date.fromisoformat(sys.argv[2]), date.fromisoformat(sys.argv[3]), force="--force" in sys.argv)
+        print(len(files), "files")
     else:
         raise SystemExit(f"unknown command {cmd}")

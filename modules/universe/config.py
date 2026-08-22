@@ -10,6 +10,10 @@ skill; reasoning: the vault, Universe/Jabil Universe - Foundational Document.
 from pathlib import Path
 
 from core.paths import DATA_MART_DIR, PROJECT_ROOT
+import os
+from dotenv import load_dotenv
+
+load_dotenv(PROJECT_ROOT / ".env")     # MES_WEBAPI_KEY — the same file every module reads
 
 # ─── Sources ──────────────────────────────────────────────────────────────────
 # The August draft registry — one-off generator scripts and their outputs. Read
@@ -120,6 +124,13 @@ OLE_WEEKLY_PARQUET = DATA_MART_DIR / "ole" / "ole_weekly.parquet"
 RECON_DELTA_PTS = 2.0          # a delta above this must carry a computed reason
 
 # ─── Phase 2 sources ──────────────────────────────────────────────────────────
+MES_WEBAPI_BASE = os.getenv("MES_WEBAPI_BASE", "https://mypenm0soap03.corp.jabil.org/meswebapi")
+MES_WEBAPI_KEY  = os.getenv("MES_WEBAPI_KEY", "")
+PLANNER_DEMAND_PARQUET = DATA_MART_DIR / "demand" / "planner_demand.parquet"   # the Cycle Time module's planner parse; the registry copy was a 29 Jun snapshot (case 68)
+PAID_HOURS_SHARE = Path("//penhomev10/OLE/RawData")            # eTMS payroll export, rolling 16-day files (case 43)
+PAID_HOURS_PREFIX = "PEN_PaidHours_Raw_"
+RAW_PAID_HOURS_DIR = REGISTRY_DIR / "paid_hours_raw"            # local UTF-8 copies: the share rotates and mixes cp1252 (case 71)
+OPERATIONAL_DB = PROJECT_ROOT / "data" / "operational.db"       # the SMH table people maintain (core/database.py)
 RAW_WIPSCAN_DIR = REGISTRY_DIR / "wipscan"                      # the 30 raw hourly pulls (3.3 GB)
 OLE_RAW_PRODUCTION = DATA_MART_DIR / "ole" / "raw_production.parquet"  # the share, W12–W31 — compared with, never merged
 

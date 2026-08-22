@@ -108,7 +108,7 @@ Every delta has a reason in the table. Nothing was tuned to agree.
 | `auth_equipment_capacity` · `auth_playbook` · `auth_process_group` · `auth_trolley_type` | authored seeds | 2,913 · 4,043 · 1,025 · 37 | `authored = true`, provenance on every row (case 54) |
 | views | `v_employee` · `v_process` · `v_cycle_time` · `v_route` · `v_demand` · `v_fpy_daily` · `v_output_daily` · `v_ole_daily` | — | every column commented; `v_output_daily` names its source on every row |
 
-**Refresh:** `pipeline/refresh.py` — `count` reproduces `fact_scan` from the 30 raw CSVs (quote char is explicit: `"BECTON, DICKINSON AND COMPANY"` — case 65); `append` folds new pulls in idempotently; `pull` raises until the VPN is back.
+**Refresh:** `pipeline/refresh.py` — `pull START END [--force]` pulls MES WipScanData in hourly windows (`hh:00:00` → `hh:59:59`, case 70) into one CSV per UTC day; `pull-paid-hours` copies the share's payroll files as UTF-8 (case 71); `count` reproduces `fact_scan` from the raw CSVs (quote char explicit — case 65); `append` folds new pulls in idempotently. `build_fact_scan` reads the raw pulls directly, so `build_all` after a pull is the whole refresh.
 
 **Case 62, corrected by its own test:** the OLE module has an SMH-estimate switch (`OLE_SMH_FALLBACK=avg`) but runs with it **off**. Turning the estimate on in the universe makes ASP (FORTIVE) *further* from the module (W29: 297% vs 52% vs 45%) — the units without a standard are low-SMH models, so a workcell average is not a safe proxy. `SMH_MISSING_POLICY = 'zero'` stays the default; `v_ole_daily.smh_policy` says which is in force.
 
@@ -117,7 +117,7 @@ Every delta has a reason in the table. Nothing was tuned to agree.
 - Bay identity (case 9) — `fact_scan.bay_id` carries MES's scheme; no `dim_bay` yet.
 - Which of shift 2 / 3 is "morning" (`shift_name_raw` holds the August guess).
 - Terminal step for thin-history models — 2,339 models default to PACKOUT.
-- MES refresh pipeline — the pull stops 8 Aug 2026 (Phase 2).
+- Payroll cost-centre codes (case 72): 26 codes, 46% of paid hours, on UNKNOWN until finance names them.
 - `dim_process`, `dim_bay`, `dim_employee`, `dim_asset` — waves 3–5.
 
 ## Commands
@@ -125,9 +125,22 @@ Every delta has a reason in the table. Nothing was tuned to agree.
 ```
 python -m modules.universe.pipeline.build     rebuild every table from the sources (~3 min)
 python tests/test_universe.py                 the 46 assertions (one rebuilds fact_scan from the raw CSVs — slow)
+python -m modules.universe.pipeline.refresh pull 2026-08-23 2026-08-30   MES scans, UTC days [start, end)
+python -m modules.universe.pipeline.refresh pull-paid-hours             new payroll files from the share
 python -m modules.universe.pipeline.refresh count   distinct scan keys across the raw pulls
 python -m modules.universe.views              print every view's columns and comments
 python -m modules.universe.registry           resolve a few names
 ```
 
 Branch: `universe/phase-1`. Not merged. Nothing on 02.
+
+## Refresh 1 (2026-08-23) — every source brought forward
+
+| Source | Now | Via |
+|---|---|---|
+| MES scans | 9 Jul → 22 Aug, **27,722,129** rows (3.25M duplicate keys dropped) | `refresh.py pull`; the 30 August days re-pulled — the old window lost minute 59 (case 70, +189,515 scans) |
+| Payroll | 23 May → 21 Aug, 388,347 person-shifts, 71 entities | share files → `docs/registry/paid_hours_raw/` (UTF-8), date-stitched; registry parquet fills 23 May → 5 Jun (case 71) |
+| SMH | live `data/operational.db` | model matched same-workcell first, any workcell second; 30,728 standards |
+| Planner | as_of 3 Aug | `data/mart/demand/planner_demand.parquet` (the Cycle Time module's parse) — case 68 closed |
+
+OLE reconciliation W31–W33: LAM RESEARCH −7.7 / −3.3 / +2.4 pts (case 63 revised → case 72); COLLINS 1.9 / −2.4 / 0.0. 51/51 tests.
