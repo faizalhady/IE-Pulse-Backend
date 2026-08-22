@@ -1,0 +1,76 @@
+{
+ "id": 4,
+ "question": "what are all the steps this model has to go through and where. sort them end to end. model: the KEYSIGHT model with the most units out in the data",
+ "tool_calls": [
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_units_out_daily"
+   },
+   "ok": true,
+   "result_text": "v_units_out_daily\n  workcell (VARCHAR): Workcell = customer the board was built for. Resolved through the registry, never a raw MES string.\n  workcell_id (BIGINT): Join key to v_workcell.\n  assembly (VARCHAR): The part number = model = assembly \u2014 one thing, three words. A model is (workcell, assembly) together.\n  model_id (BIGINT): Join key to dim_model (assembly \u00d7 revision lives beneath it).\n  date (DATE): Local (Asia/Singapore) date of the completing scan. MES timestamps were UTC; converted first.\n  shift (INTEGER): 2 = 07:00\u201319:00, 3 = 19:00\u201307:00. Production runs only on these two; a scan before 07:00 belongs to the previous date's shift 3 \u2014 see shift_date in fact_scan.\n  iso_year (BIGINT): ISO year of the date \u2014 it LAGS the calendar year at year end (1 Jan 2027 is still 2026-W53).\n  iso_week (BIGINT): ISO week 1\u201353. 2026 has a week 53.\n  fiscal_year (BIGINT): Jabil fiscal year \u2014 starts in SEPTEMBER. Sep 2026 is Q1 of FY2027.\n  fiscal_quarter (BIGINT): Q1 Sep\u2013Nov \u00b7 Q2 Dec\u2013Feb \u00b7 Q3 Mar\u2013May \u00b7 Q4 Jun\u2013Aug.\n  units_out (BIGINT): Boards completed, each counted ONCE, at the model's terminal step. Not scan rows: rework loops re-scan a step and would double count.\n  terminal_step (VARCHAR): The step this model's boards finish at \u2014 learned from the boards themselves (PACKOUT for most; some routes end earlier). LINK is a logistics scan after completion and is never the terminal step unless nothing else was seen.\n  terminal_learned (BOOLEAN): true = learned from >= 5 boards with a >= 50% majority \u00b7 false = too little history, PACKOUT assumed.",
+   "rows": null
+  },
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_route"
+   },
+   "ok": true,
+   "result_text": "v_route\n  workcell (VARCHAR): Workcell = customer.\n  workcell_id (BIGINT): Join key to v_workcell.\n  assembly (VARCHAR): Part number = model = assembly.\n  model_id (BIGINT): Join key to dim_model.\n  line_id (VARCHAR): The line this route variant runs on.\n  step_order (INTEGER): Order of the step on the route \u2014 sort on this for 'end to end'. It restarts per line_id: a model with two lines has two routes; group or filter by line_id first.\n  step_group (INTEGER): Steps that belong together (a buffer point) when known.\n  alias (VARCHAR): Process alias at this step.\n  process_kind (VARCHAR): Kind of work at this step.\n  process_id (BIGINT): Join key to v_process. NULL = the step is not mapped to an IEDB process yet (cases 23\u201325).\n  workcenter (VARCHAR): SMT \u00b7 TH \u00b7 BE stage.\n  station (VARCHAR): The station / scan point name where this step is done.\n  cycle_time_sec (DOUBLE): Standard time at this step, seconds (from the study).\n  headcount (DOUBLE): Operators at the step.\n  is_operator_step (BOOLEAN): true = an operator does it; false = machine.",
+   "rows": null
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT assembly, SUM(units_out) AS total_units FROM v_units_out_daily WHERE workcell='KEYSIGHT' GROUP BY assembly ORDER BY total_units DESC LIMIT 1"
+   },
+   "ok": true,
+   "result_text": "{\"columns\":[\"assembly\",\"total_units\"],\"rows\":[{\"assembly\":\"N1092-63016\",\"total_units\":4314}],\"row_count\":1,\"truncated\":false,\"sql\":\"select * from (SELECT assembly, SUM(units_out) AS total_units FROM v_units_out_daily WHERE workcell='KEYSIGHT' GROUP BY assembly ORDER BY total_units DESC LIMIT 1) as q limit 40\"}",
+   "rows": 1
+  }
+ ],
+ "sqls": [
+  "select * from (SELECT assembly, SUM(units_out) AS total_units FROM v_units_out_daily WHERE workcell='KEYSIGHT' GROUP BY assembly ORDER BY total_units DESC LIMIT 1) as q limit 40"
+ ],
+ "rounds": 4,
+ "stopped": "error: HTTP 429: {\"error\":{\"message\":\"Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01m0fg9m4aem0ag4ry4ex8xtrb` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199044, Requested 2630. Please try again in 12m3.168s. Need more tokens? Upgrade to Dev Tier today a",
+ "answer": "",
+ "usage": {
+  "prompt_tokens": 3722,
+  "completion_tokens": 242
+ },
+ "started": "2026-08-22T18:54:52",
+ "elapsed_s": 39.5,
+ "model": "openai/gpt-oss-120b",
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": false
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "read v_route",
+    "passed": false
+   },
+   {
+    "name": "found the top model first",
+    "passed": true
+   },
+   {
+    "name": "ordered by step",
+    "passed": false
+   },
+   {
+    "name": "says where is blocked (bay ids)",
+    "passed": false
+   }
+  ],
+  "passed": 2,
+  "total": 6
+ }
+}

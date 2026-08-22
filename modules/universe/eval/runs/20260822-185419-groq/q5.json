@@ -1,0 +1,38 @@
+{
+ "id": 5,
+ "question": "show me the trend of the top KEYSIGHT model's output for the data we have. and generally what is the workcell's output trend",
+ "tool_calls": [],
+ "sqls": [],
+ "rounds": 1,
+ "stopped": "error: HTTP 429: {\"error\":{\"message\":\"Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01m0fg9m4aem0ag4ry4ex8xtrb` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199001, Requested 1386. Please try again in 2m47.184s. Need more tokens? Upgrade to Dev Tier today a",
+ "answer": "",
+ "usage": {
+  "prompt_tokens": 0,
+  "completion_tokens": 0
+ },
+ "started": "2026-08-22T18:55:32",
+ "elapsed_s": 18.4,
+ "model": "openai/gpt-oss-120b",
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": false
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "read units out",
+    "passed": false
+   },
+   {
+    "name": "trend words",
+    "passed": false
+   }
+  ],
+  "passed": 1,
+  "total": 4
+ }
+}

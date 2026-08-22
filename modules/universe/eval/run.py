@@ -202,7 +202,10 @@ def openai_compatible(base: str, key: str, model: str, temperature: float = 0.0)
 
 
 def provider(name: str):
+    override = os.environ.get("CHAT_MODEL")
     _load_env()
+    if override:
+        os.environ["CHAT_MODEL"] = override
     if name == "groq":
         base = os.getenv("CHAT_API_BASE", "https://api.groq.com/openai/v1")
         return openai_compatible(base, os.getenv("CHAT_API_KEY", ""), os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")), os.getenv("CHAT_MODEL", "openai/gpt-oss-120b")
@@ -220,9 +223,13 @@ def main() -> None:
     ap.add_argument("--provider", default="groq")
     ap.add_argument("--only", nargs="*", type=int)
     ap.add_argument("--rounds", type=int, default=8)
+    ap.add_argument("--model", help="override the provider's model (e.g. openai/gpt-oss-20b when the 120b daily cap is spent)")
     a = ap.parse_args()
+    if a.model:
+        os.environ["CHAT_MODEL"] = a.model
+        os.environ["OLLAMA_MODEL"] = a.model
     model_fn, model_name = provider(a.provider)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{a.provider}"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S") + f"-{a.provider}-{model_name.split('/')[-1]}"
     out = RUNS / stamp
     out.mkdir(parents=True, exist_ok=True)
     summary = []
