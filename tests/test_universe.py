@@ -350,6 +350,242 @@ def test_pool_q5_output_trend_for_one_model_from_the_view_only():
         con.close()
 
 
+# ═══ PHASE 2 — waves 2 and 3, from disk ══════════════════════════════════════
+
+# ─── Wave 2 · people ─────────────────────────────────────────────────────────
+
+def test_dim_employee_scope_is_a_real_fact():
+    """Case 31: department ≠ workcell; a site-scope engineer is not missing data."""
+    assert U.UNIVERSE_MART["dim_employee"].exists(), "dim_employee.parquet not built"
+    dups = _q("select employee_id, count(*) c from dim_employee group by 1 having c > 1")
+    assert not dups, dups[:5]
+    scopes = {r[0] for r in _q("select distinct scope from dim_employee")}
+    assert scopes <= {"workcell", "site"}, scopes
+    (n_site,) = _q("select count(*) from dim_employee where scope = 'site'")[0]
+    assert n_site > 0
+    orphans = _q("""select count(*) from dim_employee e left join dim_workcell w on w.workcell_id = e.workcell_id
+                    where e.workcell_id is not null and w.workcell_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+def test_paid_hours_employees_resolve_to_people_or_are_counted():
+    """A paid-hours row whose person is unknown is reported, never dropped."""
+    # 877 payroll numbers are not in HR at all — agency / contract codes (WHL…, NWL…).
+    # They are 3.1% of HOURS, and hours are what OLE divides by; so the bar is hours.
+    rows = _q("""select sum(p.paid_hours) filter (where e.employee_id is not null), sum(p.paid_hours),
+                        count(distinct p.employee_no) filter (where e.employee_id is null)
+                 from fact_paid_hours p left join dim_employee e on e.payroll_no = p.employee_no""")
+    matched_hours, total_hours, unmatched_people = rows[0]
+    assert matched_hours / total_hours >= 0.95, f"{matched_hours}/{total_hours}"
+    assert unmatched_people < 1000, unmatched_people
+
+
+def test_dim_department_has_a_kind_and_parents_resolve():
+    assert U.UNIVERSE_MART["dim_department"].exists()
+    dups = _q("select department_id, count(*) c from dim_department group by 1 having c > 1")
+    assert not dups, dups
+    orphans = _q("""select count(*) from dim_department d left join dim_department p on p.department_id = d.parent_id
+                    where d.parent_id is not null and p.department_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+# ─── Wave 3 · process, studies, routes, demand ───────────────────────────────
+
+def test_dim_process_has_three_levels_and_aliases():
+    """Case 21: kind → alias (the identity) → MES step. The alias is the row."""
+    assert U.UNIVERSE_MART["dim_process"].exists(), "dim_process.parquet not built"
+    dups = _q("select process_id, count(*) c from dim_process group by 1 having c > 1")
+    assert not dups, dups[:5]
+    (n,) = _q("select count(*) from dim_process")[0]
+    assert n >= 1_000, n
+    (n_kind,) = _q("select count(distinct process_kind) from dim_process where process_kind is not null")[0]
+    assert n_kind >= 100, n_kind
+    dups = _q("select system, value, count(*) c from process_alias group by 1, 2 having c > 1")
+    assert not dups, dups[:5]
+    orphans = _q("""select count(*) from process_alias a left join dim_process p on p.process_id = a.process_id
+                    where p.process_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+def test_cycle_time_studies_are_append_only_rows_with_a_status():
+    """§8.1 #7: a study is an event with a status; absence is a value (case 41)."""
+    assert U.UNIVERSE_MART["fact_cycle_time_study"].exists(), "fact_cycle_time_study.parquet not built"
+    dups = _q("select study_id, count(*) c from fact_cycle_time_study group by 1 having c > 1")
+    assert not dups, dups[:3]
+    (n,) = _q("select count(*) from fact_cycle_time_study")[0]
+    assert n >= 4_400_000, n
+    statuses = {r[0] for r in _q("select distinct ct_status from fact_cycle_time_study")}
+    assert statuses <= {"measured", "inherited", "estimated", "missing", "disputed"}, statuses
+    cols = {r[0] for r in _q("select column_name from (describe fact_cycle_time_study)")}
+    assert "quote" not in cols, "case 17: the dead quote column must not be promoted"
+    orphans = _q("""select count(*) from fact_cycle_time_study s left join dim_model m on m.model_id = s.model_id
+                    where s.model_id is not null and m.model_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+def test_measured_cycle_time_is_a_separate_table_never_a_study():
+    """Case 51: MES scan deltas are elapsed time. Separate table, provenance on every row."""
+    assert U.UNIVERSE_MART["fact_cycle_time_measured"].exists()
+    (bad,) = _q("select count(*) from fact_cycle_time_measured where provenance <> 'mes_scan_delta'")[0]
+    assert bad == 0, bad
+    (n,) = _q("select count(*) from fact_cycle_time_measured")[0]
+    assert n >= 80_000, n
+
+
+def test_route_steps_are_ordered_per_model_and_line():
+    """Pool Q4: every step this model goes through, in order."""
+    assert U.UNIVERSE_MART["fact_route"].exists(), "fact_route.parquet not built"
+    dups = _q("select model_id, line_id, step_order, count(*) c from fact_route group by 1, 2, 3 having c > 1")
+    assert not dups, dups[:5]
+    rows = _q("""select step_order, process_alias from fact_route
+                 where model_id = (select model_id from fact_route group by 1 order by count(*) desc limit 1)
+                   and line_id = (select line_id from fact_route where model_id = (select model_id from fact_route group by 1 order by count(*) desc limit 1) limit 1)
+                 order by step_order""")
+    assert len(rows) >= 3 and [r[0] for r in rows] == sorted(r[0] for r in rows), rows[:5]
+    (unmapped,) = _q("select count(*) from fact_route where process_id is null")[0]
+    (total,) = _q("select count(*) from fact_route")[0]
+    assert unmapped / total < 0.5, f"{unmapped}/{total} route steps map to no process"
+
+
+def test_demand_joins_on_the_part_number_never_the_workcell_name():
+    """Case 18: joining on workcell silently dropped ~1.9M units. The universe
+    joins on the model key; workcell comes through the registry."""
+    assert U.UNIVERSE_MART["fact_demand"].exists(), "fact_demand.parquet not built"
+    dups = _q("""select count(*) from (select workcell_id, model_id, period_start, period_type, source, as_of, count(*) c
+                 from fact_demand group by all having c > 1)""")
+    assert dups == [(0,)], dups
+    (resolved, total) = _q("""select sum(qty) filter (where m.model_id is not null), sum(qty)
+                              from fact_demand d left join dim_model m on m.model_id = d.model_id""")[0]
+    assert resolved / total >= 0.95, f"{resolved}/{total}"
+    (no_wc,) = _q("select count(*) from fact_demand where workcell_id is null")[0]
+    assert no_wc == 0, no_wc
+
+
+# ─── Views and the temporary history ─────────────────────────────────────────
+
+def test_fpy_view_is_loop_one_pass_over_tested():
+    """Pool Q7, the 'where': FPY = P ÷ (P + F) at test steps, first loop only (case 48)."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        (bad,) = con.execute("select count(*) from v_fpy_daily where fpy < 0 or fpy > 1").fetchone()
+        assert bad == 0, bad
+        (n,) = con.execute("select count(*) from v_fpy_daily").fetchone()
+        assert n > 1000, n
+        (bad,) = con.execute("select count(*) from v_fpy_daily where boards_tested < boards_passed").fetchone()
+        assert bad == 0, bad
+    finally:
+        con.close()
+
+
+def test_share_production_is_kept_separate_and_labelled():
+    """Case 48: share quantities and boards count differently. A second opinion,
+    never merged; the view names the source on every row."""
+    assert U.UNIVERSE_MART["fact_production_share"].exists()
+    (bad,) = _q("select count(*) from fact_production_share where source <> 'share' or source is null")[0]
+    assert bad == 0, bad
+    (resolved, total) = _q("select count(*) filter (where workcell_id <> 0), count(*) from fact_production_share")[0]
+    assert resolved / total >= 0.95, f"{resolved}/{total}"
+    from modules.universe import views
+    con = views.connect()
+    try:
+        sources = {r[0] for r in con.execute("select distinct source from v_output_daily").fetchall()}
+        assert sources == {"boards", "share"}, sources
+        lo, hi = con.execute("select min(date), max(date) from v_output_daily where source = 'share'").fetchone()
+        assert str(lo) < "2026-07-01", lo                      # the share history reaches further back than the scans
+    finally:
+        con.close()
+
+
+def test_every_view_has_every_column_commented():
+    from modules.universe import views
+    con = views.connect()
+    try:
+        for v in views.VIEWS:
+            cols = con.execute(f"select column_name, comment from duckdb_columns() where table_name = '{v}'").fetchall()
+            assert cols, f"{v} missing"
+            missing = [c for c, cm in cols if not (cm or "").strip()]
+            assert not missing, f"{v}: {missing}"
+    finally:
+        con.close()
+
+
+# ─── The refresh — built now, run when the VPN is back ──────────────────────
+
+def test_refresh_rebuilds_fact_scan_from_the_raw_pulls_exactly():
+    """The 30 raw hourly-pull CSVs already on disk must reproduce Phase 1's
+    fact_scan to the row — same parse, same dedupe. Slow (3.3 GB); it is the
+    acceptance test for the refresh path, so it stays."""
+    from modules.universe.pipeline import refresh
+    n = refresh.count_from_raw(U.REGISTRY_DIR / "wipscan")
+    assert n == 18_747_552, n
+
+
+# ═══ PHASE 3 — the first modules as queries ═══════════════════════════════════
+
+def test_ole_daily_view_computes_from_universe_tables_only():
+    """P3.1: OLE per (workcell, date, shift) from boards × SMH ÷ paid hours."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        (n,) = con.execute("select count(*) from v_ole_daily where ole is not null").fetchone()
+        assert n >= 200, n
+        (bad,) = con.execute("select count(*) from v_ole_daily where ole < 0").fetchone()
+        assert bad == 0, bad
+        cols = {r[0] for r in con.execute("select column_name from duckdb_columns() where table_name = 'v_ole_daily'").fetchall()}
+        assert {"workcell", "date", "shift", "units", "earned_smh", "paid_hours", "ole", "smh_policy"} <= cols, cols
+    finally:
+        con.close()
+
+
+def test_smh_estimation_policy_explains_the_module_gap():
+    """Case 62, corrected by this very test. The OLE module HAS an estimate switch
+    (OLE_SMH_FALLBACK=avg) but runs with it OFF — its estimated_output_smh is 0.
+    And the estimate is not a safe proxy: under policy = 'estimate' ASP (FORTIVE)
+    lands FURTHER from the module than under 'zero' on every full week (W29:
+    297% vs 52% vs module 45%), because the units without a standard are
+    low-SMH models. So 'zero' stays the default, and the register says why."""
+    import duckdb as _d
+    from modules.universe.pipeline import build
+    rows = build.ole_policy_comparison(workcell="ASP (FORTIVE)", weeks=(29, 30, 31))
+    assert len(rows) == 3, rows
+    worse = [r for r in rows if abs(r["delta_estimate"]) > abs(r["delta_zero"])]
+    assert len(worse) == 3, rows
+    (est,) = _d.connect().execute(
+        "select coalesce(sum(estimated_output_smh), 0) from read_parquet('data/mart/ole/ole_computed.parquet')").fetchone()
+    assert est == 0, f"the module's estimate switch is on ({est} SMH estimated) — the register must say so"
+
+
+def test_model_completion_reconciles_with_the_cycle_time_module():
+    """P3.2: completion per (workcell, model) from fact_route + studies, beside the
+    Cycle Time module's completion_status_v2. Every coverage gap > 10 points carries
+    a computed reason."""
+    assert U.UNIVERSE_MART["completion_reconciliation"].exists(), "completion_reconciliation.parquet not built"
+    # The comparable population is the models the module actually GRADED
+    # (complete + incomplete, ~6.3k). Its 33k not_in_mes rows carry no coverage;
+    # they appear here with a reason, not a number.
+    rows = _q("""select workcell, assembly, coverage_universe, coverage_module, delta, reason
+                 from completion_reconciliation where coverage_module is not null""")
+    assert len(rows) >= 5_000, len(rows)
+    (n_not_in_mes,) = _q("select count(*) from completion_reconciliation where status_module = 'not_in_mes' and reason like 'module: not_in_mes%'")[0]
+    assert n_not_in_mes > 10_000, n_not_in_mes
+    unexplained = [r for r in rows if r[4] is not None and abs(r[4]) > 0.10 and not (r[5] or "").strip()]
+    assert not unexplained, unexplained[:5]
+    (agree,) = _q("select count(*) from completion_reconciliation where abs(delta) <= 0.05")[0]
+    assert agree >= 0.5 * len(rows), f"only {agree} of {len(rows)} within 5 points"
+
+
+def test_authored_seeds_carry_provenance_and_are_marked_authored():
+    """Case 54: some entities must be CREATED, not extracted. Every row says where
+    it came from; every table says it is authored."""
+    for t in ("auth_equipment_capacity", "auth_playbook", "auth_process_group", "auth_trolley_type"):
+        assert U.UNIVERSE_MART[t].exists(), f"{t} not built"
+        (bad,) = _q(f"select count(*) from {t} where provenance is null or provenance = '' or not authored")[0]
+        assert bad == 0, (t, bad)
+        (n,) = _q(f"select count(*) from {t}")[0]
+        assert n > 0, t
+
+
 # ─── T3 · dim_calendar + dim_shift ───────────────────────────────────────────
 
 def test_fiscal_year_starts_in_september():

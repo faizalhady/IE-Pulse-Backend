@@ -92,6 +92,26 @@ Every delta has a reason in the table. Nothing was tuned to agree.
    the whole LAM family's. Until roots/subs are a fact, the universe's OLE for
    multi-sub families is not comparable with the module's.
 
+## Phase 2 + 3 (2026-08-23) — grown from disk, no VPN
+
+| Table | One row per | Rows | Notes |
+|---|---|---|---|
+| `dim_department` | department | 28 | what you do; the governance table stays deferred (case 33) |
+| `dim_employee` | person | 12,016 | `scope = workcell \| site` (2,909 site); `payroll_no` = eTMS id — 877 payroll numbers are agency codes not in HR, 3.1% of hours (case 64) |
+| `dim_process` · `process_alias` · `dim_scan_point` | process (alias level) · (process, system, value) · (workcell, MES step) | 1,924 · 4,522 · 1,022 | kind above (266), MES steps below; the alias is the identity |
+| `fact_cycle_time_study` | IEDB study row (model × revision × line × alias) | 4,459,698 | `ct_status` measured / missing (11,976 missing); `quote` never read |
+| `fact_cycle_time_measured` | observed (model, step → step) scan delta | 80,479 | `provenance = mes_scan_delta`, never a study (case 51) |
+| `fact_route` | (model, line, step_order) | 1,912,132 | 1,202 duplicate keys collapsed; 4,797 steps map to no process (a status) |
+| `fact_demand` | (workcell, model, period, source, as_of) | 28,407 | 8,625,881 units; joined on the part number, workcell via the registry |
+| `fact_production_share` | (workcell, sub-workcell, assembly, date, shift) from the OLE share | 110,292 | 15 Mar → 3 Aug 2026, `source = 'share'`, **never merged** with boards; model linked for 95% (part-number fallback, case 66) |
+| `completion_reconciliation` | (workcell, model) | 38,664 | 6,308 graded by the Cycle Time module; **90% within 5 points**; every larger gap has a reason |
+| `auth_equipment_capacity` · `auth_playbook` · `auth_process_group` · `auth_trolley_type` | authored seeds | 2,913 · 4,043 · 1,025 · 37 | `authored = true`, provenance on every row (case 54) |
+| views | `v_employee` · `v_process` · `v_cycle_time` · `v_route` · `v_demand` · `v_fpy_daily` · `v_output_daily` · `v_ole_daily` | — | every column commented; `v_output_daily` names its source on every row |
+
+**Refresh:** `pipeline/refresh.py` — `count` reproduces `fact_scan` from the 30 raw CSVs (quote char is explicit: `"BECTON, DICKINSON AND COMPANY"` — case 65); `append` folds new pulls in idempotently; `pull` raises until the VPN is back.
+
+**Case 62, corrected by its own test:** the OLE module has an SMH-estimate switch (`OLE_SMH_FALLBACK=avg`) but runs with it **off**. Turning the estimate on in the universe makes ASP (FORTIVE) *further* from the module (W29: 297% vs 52% vs 45%) — the units without a standard are low-SMH models, so a workcell average is not a safe proxy. `SMH_MISSING_POLICY = 'zero'` stays the default; `v_ole_daily.smh_policy` says which is in force.
+
 ## Open — decided later, on purpose
 
 - Bay identity (case 9) — `fact_scan.bay_id` carries MES's scheme; no `dim_bay` yet.
@@ -104,7 +124,8 @@ Every delta has a reason in the table. Nothing was tuned to agree.
 
 ```
 python -m modules.universe.pipeline.build     rebuild every table from the sources (~3 min)
-python tests/test_universe.py                 the 30 assertions
+python tests/test_universe.py                 the 46 assertions (one rebuilds fact_scan from the raw CSVs — slow)
+python -m modules.universe.pipeline.refresh count   distinct scan keys across the raw pulls
 python -m modules.universe.views              print every view's columns and comments
 python -m modules.universe.registry           resolve a few names
 ```

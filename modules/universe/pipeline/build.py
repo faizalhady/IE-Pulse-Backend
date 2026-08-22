@@ -511,6 +511,393 @@ def build_ole_reconciliation() -> dict:
     return {"ole_reconciliation": n, "recon_with_module": n_both, "recon_within_2pts": n_close}
 
 
+# ═══ PHASE 2 ═════════════════════════════════════════════════════════════════
+
+def _wc_int(expr: str) -> str:
+    """SQL: a registry workcell id text -> int, validated against dim_workcell, else 0 (UNKNOWN)."""
+    return f"coalesce((select w.workcell_id from read_parquet('{C.UNIVERSE_MART['dim_workcell'].as_posix()}') w where w.workcell_id = try_cast({expr} as bigint)), 0)"
+
+
+def build_people() -> dict:
+    """dim_department + dim_employee. Department = what you do; workcell = who you
+    do it for. scope = workcell | site is a real fact (case 31). A person whose
+    workcell does not resolve keeps NULL and link_status says so."""
+    R = C.REGISTRY_DIR.as_posix()
+    wc = C.UNIVERSE_MART["dim_workcell"].as_posix()
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              select id as department_id, code, name, kind, try_cast(parent_id as bigint) as parent_id,
+                     people, dl, il, other, workcells_covered, cost_centers, job_family_groups, review
+              from read_csv_auto('{R}/department.csv', header=true)
+            ) to '{C.UNIVERSE_MART["dim_department"].as_posix()}' (format parquet)
+        """)
+        con.execute(f"""
+            copy (
+              select e.employee_id, e.etms_id as payroll_no, e.sap_id, e.name, e.ntid, e.email,
+                     e.hire_date, e.worker_type, e.employee_type, e.job_category, e.job_family,
+                     e.job_family_group, e.business_title,
+                     e.department_id, e.department_code,
+                     w.workcell_id, e.workcell as workcell_raw, e.scope, e.link_status,
+                     e.cost_center, e.cost_center_name, e.profit_center, e.location,
+                     e.manager_employee_id, e.org_level, e.direct_reports,
+                     e.source_sheet, e.as_of, e.valid_from, e.valid_to
+              from read_csv_auto('{R}/employee.csv', header=true) e
+              left join read_parquet('{wc}') w on w.workcell_id = try_cast(e.workcell_id as bigint)
+              qualify row_number() over (partition by e.employee_id order by e.as_of desc nulls last, e.id desc) = 1
+            ) to '{C.UNIVERSE_MART["dim_employee"].as_posix()}' (format parquet)
+        """)
+        (n_d,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['dim_department'].as_posix()}')").fetchone()
+        (n_e,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['dim_employee'].as_posix()}')").fetchone()
+        (n_site,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['dim_employee'].as_posix()}') where scope = 'site'").fetchone()
+    finally:
+        con.close()
+    return {"dim_department": n_d, "dim_employee": n_e, "employees_site_scope": n_site}
+
+
+def build_process() -> dict:
+    """dim_process (the alias level, with the kind above and the MES steps below),
+    process_alias, dim_scan_point. The alias is the identity (case 16); three
+    levels exist, none invented (case 21)."""
+    R = C.REGISTRY_DIR.as_posix()
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              select id as process_id, name, iedb_process as process_kind, iedb_alias as alias, mes_steps,
+                     kind as work_kind, workcenter, workcenter_type,
+                     try_cast(process_group as bigint) as process_group_proposed,
+                     try_cast(scan_point_id as bigint) as scan_point_id,
+                     iedb_rows, models, lines, customers, avg_sec, mach_sec, hand_sec, imt_sec,
+                     mes_rows, mes_qty, match_key, source, review, valid_from, valid_to
+              from read_csv_auto('{R}/process_type.csv', header=true)
+            ) to '{C.UNIVERSE_MART["dim_process"].as_posix()}' (format parquet)
+        """)
+        con.execute(f"""
+            copy (
+              select a.process_type_id as process_id, a.system, a.value, a.valid_from, a.valid_to
+              from read_csv_auto('{R}/process_type_alias.csv', header=true) a
+              join read_parquet('{C.UNIVERSE_MART["dim_process"].as_posix()}') p on p.process_id = a.process_type_id
+              qualify row_number() over (partition by a.system, a.value order by a.process_type_id) = 1
+            ) to '{C.UNIVERSE_MART["process_alias"].as_posix()}' (format parquet)
+        """)
+        con.execute(f"""
+            copy (
+              select workcell_id, child_key as mes_step, parent_key, is_scan_point, method,
+                     models, models_total, agreement, alternatives, review
+              from read_csv_auto('{R}/scan_point.csv', header=true)
+              qualify row_number() over (partition by workcell_id, child_key order by agreement desc) = 1
+            ) to '{C.UNIVERSE_MART["dim_scan_point"].as_posix()}' (format parquet)
+        """)
+        out = {}
+        for k in ("dim_process", "process_alias", "dim_scan_point"):
+            (out[k],) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART[k].as_posix()}')").fetchone()
+    finally:
+        con.close()
+    return out
+
+
+def build_cycle_time() -> dict:
+    """fact_cycle_time_study — one row per IEDB study row, ct_status as a value
+    (case 41); the dead `quote` column is never read (case 17). fact_cycle_time_measured —
+    MES scan deltas, elapsed time, provenance on every row, a separate table (case 51)."""
+    R = C.REGISTRY_DIR.as_posix()
+    P = C.UNIVERSE_MART["dim_process"].as_posix()
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              select s.id as study_id, s.model_id, s.model_revision_id, s.part_number_raw, s.revision_raw,
+                     {_wc_int("s.workcell_id")} as workcell_id, s.workcell_raw,
+                     s.line_id, s.line_raw,
+                     p.process_id, s.process_alias_raw, s.process_raw,
+                     s.workcenter, s.workcenter_type, s.step_order, s.step_group, s.priority, s.playbook,
+                     s.cycle_time_sec, s.line_cycle_time_sec, s.mach_sec, s.imt_sec, s.hand_sec,
+                     s.process_balance, s.parallel_cap, s.headcount, s.observations, s.sampling, s.fpy,
+                     s.study_method, s.is_operator_step, s.comment, s.updated_on,
+                     case when s.cycle_time_sec > 0 then 'measured' else 'missing' end as ct_status,
+                     'iedb_study' as provenance
+              from read_parquet('{R}/cycle_time.parquet') s
+              left join read_parquet('{P}') p on p.process_id = try_cast(s.process_type_id as bigint)
+            ) to '{C.UNIVERSE_MART["fact_cycle_time_study"].as_posix()}' (format parquet, row_group_size 1000000)
+        """)
+        con.execute(f"""
+            copy (
+              select m.from_step, m.to_step, try_cast(m.process_type_id as bigint) as process_id,
+                     {_wc_int("m.workcell_id")} as workcell_id, m.model_id, m.part_number_raw,
+                     m.bay_id, m.area_raw, m.equipment_raw, m.observations,
+                     m.median_sec, m.p25_sec, m.p75_sec,
+                     'mes_scan_delta' as provenance
+              from read_parquet('{R}/cycle_time_measured.parquet') m
+            ) to '{C.UNIVERSE_MART["fact_cycle_time_measured"].as_posix()}' (format parquet)
+        """)
+        (n_s,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['fact_cycle_time_study'].as_posix()}')").fetchone()
+        (n_miss,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['fact_cycle_time_study'].as_posix()}') where ct_status = 'missing'").fetchone()
+        (n_m,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['fact_cycle_time_measured'].as_posix()}')").fetchone()
+    finally:
+        con.close()
+    return {"fact_cycle_time_study": n_s, "studies_missing_ct": n_miss, "fact_cycle_time_measured": n_m}
+
+
+def build_route() -> dict:
+    """fact_route — one row per (model, line, step_order). 1,202 duplicate keys in
+    the registry collapse to one; a step with no process keeps process_id NULL
+    (cases 23–25: unmapped is a status, not an error)."""
+    R = C.REGISTRY_DIR.as_posix()
+    P = C.UNIVERSE_MART["dim_process"].as_posix()
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              select r.model_id, r.line_id, r.step_order, r.step_group, r.workcenter, r.workcenter_type, r.station,
+                     p.process_id, r.process_alias, r.process,
+                     r.cycle_time_sec, r.mach_sec, r.imt_sec, r.hand_sec, r.headcount, r.parallel_cap, r.fpy,
+                     r.observations, r.is_operator_step, r.study_method, r.rows_behind
+              from read_parquet('{R}/model_route.parquet') r
+              left join read_parquet('{P}') p on p.process_id = try_cast(r.process_type_id as bigint)
+              qualify row_number() over (partition by r.model_id, r.line_id, r.step_order order by r.process_alias) = 1
+            ) to '{C.UNIVERSE_MART["fact_route"].as_posix()}' (format parquet, row_group_size 1000000)
+        """)
+        (n,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['fact_route'].as_posix()}')").fetchone()
+        (n_un,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['fact_route'].as_posix()}') where process_id is null").fetchone()
+    finally:
+        con.close()
+    return {"fact_route": n, "route_steps_unmapped": n_un}
+
+
+def build_demand() -> dict:
+    """fact_demand — the planner, keyed on the model (part number normalised by the
+    registry), workcell through the registry, never a raw name (case 18)."""
+    R = C.REGISTRY_DIR.as_posix()
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              select d.id as demand_id, d.period_start, d.period_type,
+                     {_wc_int("d.workcell_id")} as workcell_id, d.workcell_raw,
+                     d.model_id, d.part_number_raw, d.qty, d.source, try_cast(d.as_of as date) as as_of
+              from read_parquet('{R}/demand.parquet') d
+            ) to '{C.UNIVERSE_MART["fact_demand"].as_posix()}' (format parquet)
+        """)
+        (n,) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART['fact_demand'].as_posix()}')").fetchone()
+        (q,) = con.execute(f"select sum(qty) from read_parquet('{C.UNIVERSE_MART['fact_demand'].as_posix()}')").fetchone()
+    finally:
+        con.close()
+    return {"fact_demand": n, "demand_units": q}
+
+
+def build_share_production() -> dict:
+    """fact_production_share — the OLE module's share quantities (W12–W31), kept as
+    a SEPARATE fact with source = 'share'. Boards (fact_unit_out) and share
+    quantities count differently (case 48); this is a second opinion and a longer
+    history, never merged."""
+    M = {k: v.as_posix() for k, v in C.UNIVERSE_MART.items()}
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              with ole_alias as (
+                select workcell_id, upper(value) as value from read_parquet('{M["workcell_alias"]}') where system = 'ole'
+              )
+              select coalesce(a.workcell_id, 0) as workcell_id, p.workcell as workcell_raw, p.sub_workcell,
+                     coalesce(m.model_id, u.model_id) as model_id, p.assembly as assembly_raw,
+                     case when m.model_id is not null then 'workcell+part' when u.model_id is not null then 'part only' end as model_match,
+                     cast(p.date as date) as date, p.shift, p.qty, p.site,
+                     'share' as source
+              from read_parquet('{C.OLE_RAW_PRODUCTION.as_posix()}') p
+              left join ole_alias a on a.value = upper(p.workcell)
+              left join read_parquet('{M["dim_model"]}') m
+                on m.workcell_id = a.workcell_id and m.match_key = regexp_replace(upper(p.assembly), '[^A-Z0-9]', '', 'g')
+              -- the share files a model under a sub-workcell the registry keys differently;
+              -- when the part number itself is unambiguous across the plant, use it
+              left join (select match_key, any_value(model_id) as model_id
+                         from read_parquet('{M["dim_model"]}') group by 1 having count(distinct workcell_id) = 1) u
+                on u.match_key = regexp_replace(upper(p.assembly), '[^A-Z0-9]', '', 'g')
+            ) to '{M["fact_production_share"]}' (format parquet)
+        """)
+        (n,) = con.execute(f"select count(*) from read_parquet('{M['fact_production_share']}')").fetchone()
+        (n_wc,) = con.execute(f"select count(*) from read_parquet('{M['fact_production_share']}') where workcell_id = 0").fetchone()
+        (n_m,) = con.execute(f"select count(*) from read_parquet('{M['fact_production_share']}') where model_id is null").fetchone()
+    finally:
+        con.close()
+    return {"fact_production_share": n, "share_rows_unknown_workcell": n_wc, "share_rows_unknown_model": n_m}
+
+
+# ═══ PHASE 3 — the first modules as queries ═══════════════════════════════════
+
+def _ole_weekly_sql(policy: str) -> str:
+    """Weekly OLE from universe tables under an SMH policy (case 62). 'zero' earns
+    nothing for units without a standard; 'estimate' earns the workcell's
+    volume-weighted average SMH — the OLE module's OLE_SMH_FALLBACK=avg."""
+    M = {k: v.as_posix() for k, v in C.UNIVERSE_MART.items()}
+    return f"""
+        with units as (
+          select u.workcell_id, u.model_id, c.iso_year, c.iso_week
+          from read_parquet('{M["fact_unit_out"]}') u
+          join read_parquet('{M["dim_calendar"]}') c on c.date = u.date
+        ),
+        smh as (select workcell_id, model_id, max(smh_per_unit) as smh_per_unit
+                from read_parquet('{M["dim_smh"]}') group by 1, 2),
+        joined as (
+          select un.*, s.smh_per_unit from units un
+          left join smh s on s.workcell_id = un.workcell_id and s.model_id = un.model_id
+        ),
+        wc_avg as (
+          select workcell_id, sum(smh_per_unit) / count(*) as avg_smh
+          from joined where smh_per_unit is not null group by 1
+        ),
+        earned as (
+          select j.workcell_id, j.iso_year, j.iso_week, count(*) as units,
+                 count(*) filter (where j.smh_per_unit is null) as units_missing_smh,
+                 sum(case when j.smh_per_unit is not null then j.smh_per_unit
+                          when '{policy}' = 'estimate' then coalesce(a.avg_smh, 0) else 0 end) as earned_smh
+          from joined j left join wc_avg a on a.workcell_id = j.workcell_id
+          group by 1, 2, 3
+        ),
+        paid as (
+          select p.workcell_id, c.iso_year, c.iso_week, sum(p.paid_hours) as paid_hours
+          from read_parquet('{M["fact_paid_hours"]}') p
+          join read_parquet('{M["dim_calendar"]}') c on c.date = p.date
+          group by 1, 2, 3
+        )
+        select e.workcell_id, e.iso_year, e.iso_week, e.units, e.units_missing_smh, e.earned_smh, p.paid_hours,
+               case when p.paid_hours > 0 then e.earned_smh / p.paid_hours * 100 end as ole
+        from earned e join paid p using (workcell_id, iso_year, iso_week)
+    """
+
+
+def ole_policy_comparison(workcell: str, weeks: tuple[int, ...], iso_year: int = 2026) -> list[dict]:
+    """For one workcell and ISO weeks: the universe's OLE under both SMH policies
+    beside the module's number. The test for case 62 — does 'estimate' close the gap?"""
+    M = {k: v.as_posix() for k, v in C.UNIVERSE_MART.items()}
+    wk = ", ".join(str(w) for w in weeks)
+    con = duckdb.connect()
+    try:
+        (wid,) = con.execute(f"select workcell_id from read_parquet('{M['dim_workcell']}') where name = ?", [workcell]).fetchone()
+        zero = {r[0]: r[1] for r in con.execute(
+            f"select iso_week, ole from ({_ole_weekly_sql('zero')}) where workcell_id = {wid} and iso_year = {iso_year} and iso_week in ({wk})").fetchall()}
+        est = {r[0]: r[1] for r in con.execute(
+            f"select iso_week, ole from ({_ole_weekly_sql('estimate')}) where workcell_id = {wid} and iso_year = {iso_year} and iso_week in ({wk})").fetchall()}
+        mod = {r[0]: r[1] for r in con.execute(
+            f"select iso_week, ole_module from read_parquet('{M['ole_reconciliation']}') where workcell_id = {wid} and iso_year = {iso_year} and iso_week in ({wk})").fetchall()}
+    finally:
+        con.close()
+    return [{"iso_week": w, "ole_zero": zero.get(w), "ole_estimate": est.get(w), "ole_module": mod.get(w),
+             "delta_zero": (zero.get(w) or 0) - (mod.get(w) or 0),
+             "delta_estimate": (est.get(w) or 0) - (mod.get(w) or 0)} for w in weeks if w in mod]
+
+
+def build_completion_reconciliation() -> dict:
+    """Cycle Time completion per (workcell, model) from fact_route + the studies,
+    beside the module's completion_status_v2. The universe walks the IEDB route;
+    the module walks the MES route and asks whether IEDB has each step — two
+    different denominators, so every gap names which one moved."""
+    M = {k: v.as_posix() for k, v in C.UNIVERSE_MART.items()}
+    mod = (C.REGISTRY_DIR.parent.parent / "IE-Pulse-Backend" / "data" / "mart" / "cycle_time" / "completion_status_v2.parquet")
+    from core.paths import DATA_MART_DIR
+    mod = DATA_MART_DIR / "cycle_time" / "completion_status_v2.parquet"
+    d = C.COMPLETION_DELTA
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              with route as (
+                -- one row per (model, route step) across lines: a step is measured if ANY line has a time
+                select r.model_id, r.step_order, r.process_alias,
+                       max(case when r.cycle_time_sec > 0 then 1 else 0 end) as measured,
+                       max(case when r.process_id is null then 1 else 0 end) as unmapped
+                from read_parquet('{M["fact_route"]}') r
+                group by 1, 2, 3
+              ),
+              uni as (
+                select model_id, count(*) as steps_total, sum(measured) as steps_measured,
+                       count(*) - sum(measured) as steps_missing_ct, sum(unmapped) as steps_unmapped,
+                       round(sum(measured) * 1.0 / count(*), 4) as coverage_universe
+                from route group by 1
+              ),
+              modl as (
+                select m.model_id, s.customer, s.assembly, s.status, s.expected, s.present, s.no_ct,
+                       s.not_in_iedb, s.unmapped, s.non_iedb, s.coverage as coverage_module
+                from read_parquet('{mod.as_posix()}') s
+                join read_parquet('{M["workcell_alias"]}') a
+                  on regexp_replace(upper(a.value), '[^A-Z0-9]', '', 'g') = regexp_replace(upper(s.customer), '[^A-Z0-9]', '', 'g')
+                join read_parquet('{M["dim_model"]}') m
+                  on m.workcell_id = a.workcell_id and m.match_key = regexp_replace(upper(s.assembly), '[^A-Z0-9]', '', 'g')
+                qualify row_number() over (partition by m.model_id order by s.graded_on desc nulls last) = 1
+              )
+              select w.name as workcell, dm.part_number as assembly, dm.model_id,
+                     u.steps_total, u.steps_measured, u.steps_missing_ct, u.steps_unmapped, u.coverage_universe,
+                     l.status as status_module, l.expected as steps_module, l.present as present_module,
+                     l.no_ct as no_ct_module, l.not_in_iedb, l.unmapped as unmapped_module, l.coverage_module,
+                     round(u.coverage_universe - l.coverage_module, 4) as delta,
+                     concat_ws('; ',
+                       case when l.status in ('not_in_mes', 'unavailable') then 'module: ' || l.status || ' — the universe still walks the IEDB route' end,
+                       case when l.not_in_iedb > 0 then l.not_in_iedb || ' MES steps absent from IEDB (module counts them as missing; the universe cannot see them)' end,
+                       case when l.expected is not null and l.expected <> u.steps_total
+                            then 'route length: module ' || l.expected || ' MES steps vs universe ' || u.steps_total || ' IEDB steps' end,
+                       case when u.steps_unmapped > 0 then u.steps_unmapped || ' IEDB steps map to no process' end,
+                       case when l.unmapped > 0 then l.unmapped || ' MES steps unmapped in the module' end,
+                       case when l.coverage_module is not null and abs(u.coverage_universe - l.coverage_module) > {d}
+                                 and l.status not in ('not_in_mes', 'unavailable') and coalesce(l.not_in_iedb, 0) = 0
+                                 and (l.expected is null or l.expected = u.steps_total) and u.steps_unmapped = 0 and coalesce(l.unmapped, 0) = 0
+                            then 'same route length, different step-level verdicts — compare the studies' end
+                     ) as reason
+              from uni u
+              join read_parquet('{M["dim_model"]}') dm on dm.model_id = u.model_id
+              left join read_parquet('{M["dim_workcell"]}') w on w.workcell_id = dm.workcell_id
+              left join modl l on l.model_id = u.model_id
+            ) to '{M["completion_reconciliation"]}' (format parquet)
+        """)
+        (n,) = con.execute(f"select count(*) from read_parquet('{M['completion_reconciliation']}')").fetchone()
+        (n_both,) = con.execute(f"select count(*) from read_parquet('{M['completion_reconciliation']}') where coverage_module is not null").fetchone()
+        (n_agree,) = con.execute(f"select count(*) from read_parquet('{M['completion_reconciliation']}') where abs(delta) <= 0.05").fetchone()
+    finally:
+        con.close()
+    return {"completion_reconciliation": n, "completion_with_module": n_both, "completion_within_5pts": n_agree}
+
+
+def build_authored_seeds() -> dict:
+    """Case 54: entities that must be CREATED. Loaded from the August seeds with
+    provenance on every row and authored = true, so nobody mistakes them for
+    extracted facts. People correct them; the universe keeps the history."""
+    R = C.REGISTRY_DIR.as_posix()
+    wc = C.UNIVERSE_MART["dim_workcell"].as_posix()
+    seeds = {
+        "auth_equipment_capacity": ("equipment_capacity.csv", "registry seed 2026-08: machines observed in 30 days of scans (a FLOOR, not the fleet — case 55)"),
+        "auth_playbook":           ("playbook.csv",           "registry seed 2026-08: stations and boards from the MES route; operator_count unknown until an IE fills it"),
+        "auth_process_group":      ("process_group.csv",      "registry seed 2026-08: steps grouped by scan-gap (case 56); a candidate, not a decision"),
+        "auth_trolley_type":       ("trolley_type.csv",       "registry seed 2026-08"),
+    }
+    out = {}
+    con = duckdb.connect()
+    try:
+        for table, (csv, prov) in seeds.items():
+            cols = [c[0] for c in con.execute(f"describe select * from read_csv_auto('{R}/{csv}', header=true, all_varchar=true)").fetchall()]
+            has_prov = "provenance" in cols
+            con.execute(f"""
+                copy (
+                  select s.*,
+                         {"coalesce(nullif(s.provenance, ''), '" + prov + "')" if has_prov else "'" + prov + "'"} as provenance_final,
+                         true as authored,
+                         cast(null as varchar) as confirmed_by, cast(null as date) as confirmed_on
+                  from read_csv_auto('{R}/{csv}', header=true, all_varchar=true) s
+                ) to '{C.UNIVERSE_MART[table].as_posix()}' (format parquet)
+            """)
+            # rename provenance_final -> provenance (drop the seed's own column if present)
+            con.execute(f"""
+                copy (select * exclude ({"provenance, " if has_prov else ""}provenance_final), provenance_final as provenance
+                      from read_parquet('{C.UNIVERSE_MART[table].as_posix()}'))
+                to '{C.UNIVERSE_MART[table].as_posix()}.tmp' (format parquet)
+            """)
+            import os
+            os.replace(f"{C.UNIVERSE_MART[table]}.tmp", C.UNIVERSE_MART[table])
+            (out[table],) = con.execute(f"select count(*) from read_parquet('{C.UNIVERSE_MART[table].as_posix()}')").fetchone()
+    finally:
+        con.close()
+    return out
+
+
 # ─── dim_calendar + dim_shift ────────────────────────────────────────────────
 
 def build_dim_calendar() -> dict:
@@ -544,7 +931,9 @@ def build_dim_shift() -> dict:
 def build_all() -> dict:
     report = {}
     for fn in (build_dim_workcell, build_dim_calendar, build_dim_shift, build_dim_model, build_fact_scan,
-               build_terminal_step_and_units, build_paid_hours_and_smh, build_ole_reconciliation):
+               build_terminal_step_and_units, build_paid_hours_and_smh, build_ole_reconciliation,
+               build_people, build_process, build_cycle_time, build_route, build_demand, build_share_production,
+               build_completion_reconciliation, build_authored_seeds):
         report.update(fn())
         log.info("built %s", fn.__name__)
     return report

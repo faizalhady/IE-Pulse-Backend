@@ -38,6 +38,23 @@ UNIVERSE_MART = {
     "fact_paid_hours": UNIVERSE_MART_DIR / "fact_paid_hours.parquet",  # one row per (employee, date, shift, workcell, sub-workcell) — wave 2, pulled forward for the OLE proof
     "dim_smh":        UNIVERSE_MART_DIR / "dim_smh.parquet",        # one row per (workcell, model, scan_stage): standard man-hours per unit
     "ole_reconciliation": UNIVERSE_MART_DIR / "ole_reconciliation.parquet",  # one row per (workcell, ISO week): OLE from the universe beside the OLE module, delta explained
+    # ── Phase 2 ──
+    "dim_department":     UNIVERSE_MART_DIR / "dim_department.parquet",     # one row per department (what you do)
+    "dim_employee":       UNIVERSE_MART_DIR / "dim_employee.parquet",       # one row per person; scope = workcell | site
+    "dim_process":        UNIVERSE_MART_DIR / "dim_process.parquet",        # one row per process (the alias level); kind above, scan point below
+    "process_alias":      UNIVERSE_MART_DIR / "process_alias.parquet",      # one row per (process, system, value)
+    "dim_scan_point":     UNIVERSE_MART_DIR / "dim_scan_point.parquet",     # one row per (workcell, MES step): is it a scan point, what it maps to
+    "fact_cycle_time_study": UNIVERSE_MART_DIR / "fact_cycle_time_study.parquet",  # one row per IEDB study row (model × revision × line × alias), ct_status
+    "fact_cycle_time_measured": UNIVERSE_MART_DIR / "fact_cycle_time_measured.parquet",  # one row per observed (model, from_step → to_step) scan delta — ELAPSED, never a study
+    "fact_route":         UNIVERSE_MART_DIR / "fact_route.parquet",         # one row per (model, line, step_order)
+    "fact_demand":        UNIVERSE_MART_DIR / "fact_demand.parquet",        # one row per (workcell, model, period, source, as_of)
+    "fact_production_share": UNIVERSE_MART_DIR / "fact_production_share.parquet",  # one row per (workcell, sub-workcell, assembly, date, shift) from the OLE share — a second opinion, never merged with boards
+    # ── Phase 3 ──
+    "completion_reconciliation": UNIVERSE_MART_DIR / "completion_reconciliation.parquet",  # one row per (workcell, model): completion from the universe beside the Cycle Time module, delta explained
+    "auth_equipment_capacity": UNIVERSE_MART_DIR / "auth_equipment_capacity.parquet",  # AUTHORED: machines per (workcell, process) — seeded, to be corrected by people
+    "auth_playbook":          UNIVERSE_MART_DIR / "auth_playbook.parquet",           # AUTHORED: operator → station per (workcell, model, route)
+    "auth_process_group":     UNIVERSE_MART_DIR / "auth_process_group.parquet",      # AUTHORED: which steps form one buffer point (IPK)
+    "auth_trolley_type":      UNIVERSE_MART_DIR / "auth_trolley_type.parquet",       # AUTHORED: trolley cavities per workcell
 }
 
 # ─── Plant vocabulary ─────────────────────────────────────────────────────────
@@ -101,3 +118,15 @@ TERMINAL_MIN_SHARE = 0.5      # the modal end step must hold at least this share
 # (nothing reads below its own layer; this is a reconciliation, not a dependency).
 OLE_WEEKLY_PARQUET = DATA_MART_DIR / "ole" / "ole_weekly.parquet"
 RECON_DELTA_PTS = 2.0          # a delta above this must carry a computed reason
+
+# ─── Phase 2 sources ──────────────────────────────────────────────────────────
+RAW_WIPSCAN_DIR = REGISTRY_DIR / "wipscan"                      # the 30 raw hourly pulls (3.3 GB)
+OLE_RAW_PRODUCTION = DATA_MART_DIR / "ole" / "raw_production.parquet"  # the share, W12–W31 — compared with, never merged
+
+# ─── SMH policy (case 62) ─────────────────────────────────────────────────────
+# What a unit with no SMH standard earns. 'zero' = nothing, and the gap is
+# reported (the universe default — a gap looks like a gap). 'estimate' = the
+# workcell's volume-weighted average SMH, which is what the OLE module does
+# with OLE_SMH_FALLBACK=avg. A switch, never a silent choice.
+SMH_MISSING_POLICY = "zero"          # 'zero' | 'estimate'
+COMPLETION_DELTA = 0.10              # a coverage delta above this must carry a reason
