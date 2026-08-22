@@ -698,6 +698,19 @@ def main() -> None:
         raise SystemExit(1)
 
 
+def test_define_reads_the_metric_glossary():
+    """Pool Q8: formulas come from the note people edit (IE CORE/Metric Glossary), not from memory.
+    The glossary row outranks the skill's one-liner; every row is one passage."""
+    from modules.universe import tools, config as C
+    if not C.GLOSSARY_MD.exists():
+        return                                              # prod 02 has no vault; define falls back to the skill
+    hits = tools.define("OLE")
+    assert hits and hits[0]["source"] == C.GLOSSARY_MD.name, [h["source"] for h in hits[:3]]
+    assert "TPHDirect" in hits[0]["text"] and "v_ole_weekly" in hits[0]["text"], hits[0]["text"][:200]
+    assert all(len(h["text"]) <= 1200 for h in hits)
+    assert tools.define("takt")[0]["text"].startswith("| **TAKT**")
+
+
 # ─── The free-model chain ────────────────────────────────────────────────────
 
 def test_chain_walks_top_down_waits_short_cooldowns_and_reads_retry_hints():

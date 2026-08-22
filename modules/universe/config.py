@@ -130,7 +130,9 @@ PLANNER_DEMAND_PARQUET = DATA_MART_DIR / "demand" / "planner_demand.parquet"   #
 PAID_HOURS_SHARE = Path("//penhomev10/OLE/RawData")            # eTMS payroll export, rolling 16-day files (case 43)
 PAID_HOURS_PREFIX = "PEN_PaidHours_Raw_"
 RAW_PAID_HOURS_DIR = REGISTRY_DIR / "paid_hours_raw"            # local UTF-8 copies: the share rotates and mixes cp1252 (case 71)
-OPERATIONAL_DB = PROJECT_ROOT / "data" / "operational.db"       # the SMH table people maintain (core/database.py)
+OPERATIONAL_DB = PROJECT_ROOT / "data" / "operational.db"
+# the metric glossary people edit in Obsidian; define() reads it on every call. Absent (prod 02) -> skill refs only
+GLOSSARY_MD = Path(os.getenv("UNIVERSE_GLOSSARY_MD", "C:/Users/4033375/Obsidian/JABIL/IE CORE/Metric Glossary.md"))       # the SMH table people maintain (core/database.py)
 RAW_WIPSCAN_DIR = REGISTRY_DIR / "wipscan"                      # the 30 raw hourly pulls (3.3 GB)
 OLE_RAW_PRODUCTION = DATA_MART_DIR / "ole" / "raw_production.parquet"  # the share, W12–W31 — compared with, never merged
 

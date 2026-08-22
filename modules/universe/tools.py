@@ -30,6 +30,8 @@ MODEL_ROWS = 40         # what a model gets by default — enough to read, small
 TIMEOUT_S = 30
 HIDDEN_VIEWS = {"v_employee"}
 ALLOWED_VIEWS = tuple(v for v in V.VIEWS if v not in HIDDEN_VIEWS)
+from modules.universe import config as C
+
 SKILL_DIR = Path.home() / ".claude" / "skills" / "jabil-universe"
 
 _FORBIDDEN = re.compile(
@@ -158,9 +160,11 @@ def query(sql: str, max_rows: int = MAX_ROWS) -> dict:
 # ─── define ──────────────────────────────────────────────────────────────────
 
 def _passages() -> list[tuple[str, str]]:
-    """(source, passage) from the skill — table rows and paragraphs, small enough to quote."""
+    """(source, passage) from the metric glossary and the skill — table rows and
+    paragraphs, small enough to quote. The glossary comes first: it is the note people
+    edit, so its row outranks the skill's shorter copy."""
     out = []
-    for f in [SKILL_DIR / "SKILL.md", *sorted((SKILL_DIR / "references").glob("*.md"))]:
+    for f in [C.GLOSSARY_MD, SKILL_DIR / "SKILL.md", *sorted((SKILL_DIR / "references").glob("*.md"))]:
         if not f.exists():
             continue
         text = f.read_text(encoding="utf-8")
@@ -169,9 +173,9 @@ def _passages() -> list[tuple[str, str]]:
             if not block or block.startswith("---"):
                 continue
             if block.startswith("|"):
-                for line in block.splitlines():
-                    if line.startswith("|") and not re.match(r"^\|\s*-", line) and "| Word |" not in line and "| # |" not in line:
-                        out.append((f.name, line))
+                lines = [l for l in block.splitlines() if l.startswith("|")]
+                for line in lines[2:]:                      # [0] header, [1] the |---| rule
+                    out.append((f.name, line))
             else:
                 out.append((f.name, block))
     return out
