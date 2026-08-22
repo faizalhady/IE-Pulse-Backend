@@ -137,7 +137,7 @@ IE-Pulse-Backend/
 | PPQT | ✅ Live — Excel-first (LAMRES 8.0 workbook); mart integration pending | docs/PPQT_BUILD.md (+ FE docs/PPQT_LAMRES_DIFF.md for the formula diff) |
 | IPK | 🔲 Stubbed — full pipeline pending | docs/IPK_BUILD.md |
 | LBR | 🔲 Stubbed — full pipeline pending | — (BE spec to be created when built) |
-| **Universe** | ✅ Phases 1–3 — dims, facts, views, OLE + completion reconciled, refresh ready; branch `universe/phase-2`, not merged | docs/UNIVERSE_BUILD.md · rules in the `jabil-universe` skill |
+| **Universe** | ✅ Phases 1–4 — dims, facts, views, reconciliations, refresh, the access layer + MCP server, the free-model chain, **the chat client** (`modules/universe/chat/`, FE branch `universe/ask`); branch `universe/phase-4`, not merged | docs/UNIVERSE_BUILD.md · rules in the `jabil-universe` skill |
 
 For module-specific business logic, formulas, API endpoints, and parquet
 schemas — always read `docs/<MODULE>_BUILD.md`. The root CLAUDE.md only carries

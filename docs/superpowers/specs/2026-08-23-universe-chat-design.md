@@ -1,5 +1,7 @@
 # Universe Chat — design (2026-08-23)
 
+> **Built 2026-08-23.** Backend on `universe/phase-4` (`modules/universe/chat/`, `api/routers/universe_chat.py`, 13 tests), frontend on `universe/ask` (`src/components/ask/`, `src/pages/ask/`, 5 tests). Verified in the browser: a first question streams tool cards and the answer, the URL adopts the thread, a reopened chat renders as it streamed, thumbs-down stores its reason, the drawer opens on the Cycle Time page. Two things learned: never remount the chat while a stream runs (the URL change and the thread fetch must not swap the component), and AI Elements' registry no longer has `response`/`actions`/`loader` — `MessageResponse` lives in `message`, thumbs and the spinner are ours.
+
 The chatbot client for the Jabil Universe: a page and a drawer inside IE-Pulse, streaming
 answers from the engine that already exists (universe views → three tools → model chain →
 glossary). Decided with Faiz in the brainstorm of 2026-08-23.

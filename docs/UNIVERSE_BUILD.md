@@ -146,3 +146,18 @@ Branch: `universe/phase-1`. Not merged. Nothing on 02.
 | Planner | as_of 3 Aug | `data/mart/demand/planner_demand.parquet` (the Cycle Time module's parse) — case 68 closed |
 
 OLE reconciliation W31–W33: LAM RESEARCH −7.7 / −3.3 / +2.4 pts (case 63 revised → case 72); COLLINS 1.9 / −2.4 / 0.0. 51/51 tests.
+
+## The chat client (2026-08-23) — `modules/universe/chat/`
+
+```
+chat/loop.py      ONE loop: messages -> events (tool_call, tool_result, text, done, error); eval/run.py consumes it too
+chat/stream.py    events -> AI SDK UI message stream v1 (SSE) + the UIMessage parts a reopened chat renders from
+chat/threads.py   chat_thread / chat_message in data/operational.db (tables in core/database.py): per user, feedback on the message
+api/routers/universe_chat.py   POST /api/universe/chat (stream) · GET/PATCH/DELETE /threads · POST /feedback
+```
+
+- **Pilot gate:** `UNIVERSE_CHAT_USERS=4033375,…` in `.env` (NTIDs, comma list). Everyone else gets 403.
+- **Dev:** `python -m uvicorn api.main:app --port 8000`; the frontend (`npm run dev`, `http://localhost:3001/ietools/ask`) proxies `/ietools/ask/api` here. When AD_GET cannot mint a token from localhost, set `localStorage.pulse_dev_token` to a JWT signed with `PULSE_JWT_SECRET` (`sub` = NTID, `iss` = ad-get) — a DEV-only override in `useCurrentUser.ts`.
+- **Tests:** `python tests/test_universe_chat.py` (13). Frontend: `npx vitest run src/test/askChat.test.tsx` (5).
+- Design: `docs/superpowers/specs/2026-08-23-universe-chat-design.md`.
+
