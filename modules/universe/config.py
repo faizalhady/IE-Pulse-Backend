@@ -28,6 +28,8 @@ UNIVERSE_MART = {
     "dim_workcell":   UNIVERSE_MART_DIR / "dim_workcell.parquet",   # one row per workcell (= customer)
     "workcell_alias": UNIVERSE_MART_DIR / "workcell_alias.parquet", # one row per (workcell, system, value)
     "workcell_alias_conflict": UNIVERSE_MART_DIR / "workcell_alias_conflict.parquet",  # one row per spelling that points at 2+ workcells — surfaced, never resolved
+    "dim_model":          UNIVERSE_MART_DIR / "dim_model.parquet",          # one row per (workcell, assembly)
+    "dim_model_revision": UNIVERSE_MART_DIR / "dim_model_revision.parquet", # one row per (model, revision)
     "dim_calendar":   UNIVERSE_MART_DIR / "dim_calendar.parquet",   # one row per date, 2019-09-01 → 2031-12-31
     "dim_shift":      UNIVERSE_MART_DIR / "dim_shift.parquet",      # one row per shift code
 }

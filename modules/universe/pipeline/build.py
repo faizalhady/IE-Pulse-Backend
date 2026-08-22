@@ -163,6 +163,54 @@ def build_dim_workcell() -> dict:
             "sheet_aliases_added": len(new_alias), "sheet_unresolved": unresolved}
 
 
+# ─── dim_model + dim_model_revision ──────────────────────────────────────────
+
+def build_dim_model() -> dict:
+    """A model is (workcell, assembly) together; a revision hangs off the model.
+    Promoted from the registry's model.parquet / model_revision.parquet. Rows whose
+    workcell is unknown keep workcell_id NULL — an orphan is a fact to show, not
+    a row to drop (case 6 thinking)."""
+    src_m = (C.REGISTRY_DIR / "model.parquet").as_posix()
+    src_r = (C.REGISTRY_DIR / "model_revision.parquet").as_posix()
+    wc = C.UNIVERSE_MART["dim_workcell"].as_posix()
+    dst_m = C.UNIVERSE_MART["dim_model"].as_posix()
+    dst_r = C.UNIVERSE_MART["dim_model_revision"].as_posix()
+    con = duckdb.connect()
+    try:
+        con.execute(f"""
+            copy (
+              select m.id as model_id, m.match_key, m.part_number, m.name, m.family,
+                     case when w.workcell_id is not null then try_cast(m.workcell_id as bigint) end as workcell_id,
+                     m.workcell as workcell_raw, m.source_workcell_raw,
+                     m.in_mes, m.mes_active, m.mes_assembly_id, m.in_iedb
+              from read_parquet('{src_m}') m
+              left join read_parquet('{wc}') w on w.workcell_id = try_cast(m.workcell_id as bigint)
+              qualify row_number() over (partition by try_cast(m.workcell_id as bigint), m.match_key order by m.id) = 1
+            ) to '{dst_m}' (format parquet)
+        """)
+        con.execute(f"""
+            copy (
+              select r.id as revision_id, r.model_id, r.match_key, r.revision, r.version,
+                     r.mes_assembly_id, r.name, r.mes_active, r.mes_last_updated,
+                     r.has_cycle_time, r.ct_rows, r.ct_lines
+              from read_parquet('{src_r}') r
+              join read_parquet('{dst_m}') m on m.model_id = r.model_id
+              qualify row_number() over (partition by r.model_id, r.revision order by r.id) = 1
+            ) to '{dst_r}' (format parquet)
+        """)
+        (n_m,) = con.execute(f"select count(*) from read_parquet('{dst_m}')").fetchone()
+        (n_r,) = con.execute(f"select count(*) from read_parquet('{dst_r}')").fetchone()
+        (n_src_m,) = con.execute(f"select count(*) from read_parquet('{src_m}')").fetchone()
+        (n_src_r,) = con.execute(f"select count(*) from read_parquet('{src_r}')").fetchone()
+        (n_orphan,) = con.execute(f"select count(*) from read_parquet('{dst_m}') where workcell_id is null").fetchone()
+    finally:
+        con.close()
+    if n_src_m - n_m or n_src_r - n_r:
+        log.warning("dim_model: %d duplicate (workcell, assembly) rows and %d duplicate revisions collapsed",
+                    n_src_m - n_m, n_src_r - n_r)
+    return {"dim_model": n_m, "dim_model_revision": n_r, "models_without_workcell": n_orphan}
+
+
 # ─── dim_calendar + dim_shift ────────────────────────────────────────────────
 
 def build_dim_calendar() -> dict:
@@ -195,7 +243,7 @@ def build_dim_shift() -> dict:
 
 def build_all() -> dict:
     report = {}
-    for fn in (build_dim_workcell, build_dim_calendar, build_dim_shift):
+    for fn in (build_dim_workcell, build_dim_calendar, build_dim_shift, build_dim_model):
         report.update(fn())
         log.info("built %s", fn.__name__)
     return report
