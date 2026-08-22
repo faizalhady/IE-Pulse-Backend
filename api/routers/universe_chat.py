@@ -151,7 +151,7 @@ def chat(body: dict, ntid: str = Depends(pilot)):
         finally:
             parts = stream.parts(events)
             if parts:
-                threads.add_message(thread["id"], "assistant", parts, model=_model_label())
+                threads.add_message(thread["id"], "assistant", parts, model=_model_label(), message_id=message_id)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={**stream.HEADERS, "x-thread-id": thread["id"]})

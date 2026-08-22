@@ -224,6 +224,9 @@ def test_router_chat_streams_and_saves_both_messages():
     assert [m["role"] for m in saved] == ["user", "assistant"]
     assert saved[1]["parts"][0]["type"] == "tool-universe_describe" and saved[1]["parts"][-1] == {"type": "text", "text": "111 rows."}
     assert saved[1]["model"]
+    # the saved answer keeps the id the stream announced, so the page's thumbs find it
+    start = next(json.loads(l[6:]) for l in r.text.split("\n\n") if l.startswith('data: {"type":"start"'))
+    assert saved[1]["id"] == start["messageId"], (saved[1]["id"], start)
 
 
 def test_router_chat_without_a_thread_creates_one():

@@ -34,8 +34,10 @@ def create(ntid: str, first_question: str) -> dict:
     return row
 
 
-def add_message(thread_id: str, role: str, parts: list[dict], model: str | None = None) -> dict:
-    row = {"id": uuid.uuid4().hex, "thread_id": thread_id, "role": role, "parts": json.dumps(parts, default=str),
+def add_message(thread_id: str, role: str, parts: list[dict], model: str | None = None, message_id: str | None = None) -> dict:
+    """message_id: the id the stream announced in its `start` chunk, so the page's thumbs
+    find the saved answer under the same id the client already holds."""
+    row = {"id": message_id or uuid.uuid4().hex, "thread_id": thread_id, "role": role, "parts": json.dumps(parts, default=str),
            "model": model, "created_at": _now()}
     with get_conn() as conn:
         conn.execute("INSERT INTO chat_message (id, thread_id, role, parts, model, created_at) VALUES (:id, :thread_id, :role, :parts, :model, :created_at)", row)
