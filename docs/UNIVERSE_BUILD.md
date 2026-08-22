@@ -153,11 +153,12 @@ OLE reconciliation W31–W33: LAM RESEARCH −7.7 / −3.3 / +2.4 pts (case 63 r
 chat/loop.py      ONE loop: messages -> events (tool_call, tool_result, text, done, error); eval/run.py consumes it too
 chat/stream.py    events -> AI SDK UI message stream v1 (SSE) + the UIMessage parts a reopened chat renders from
 chat/threads.py   chat_thread / chat_message in data/operational.db (tables in core/database.py): per user, feedback on the message
-api/routers/universe_chat.py   POST /api/universe/chat (stream) · GET/PATCH/DELETE /threads · POST /feedback
+api/routers/universe_chat.py   POST /api/universe/chat (stream) · GET/PATCH/DELETE /threads · POST /feedback · GET /chat/models (the chain: usage today vs free-tier limits, reset time)
 ```
 
 - **Pilot gate:** `UNIVERSE_CHAT_USERS=4033375,…` in `.env` (NTIDs, comma list). Everyone else gets 403.
 - **Dev:** `python -m uvicorn api.main:app --port 8000`; the frontend (`npm run dev`, `http://localhost:3001/ietools/ask`) proxies `/ietools/ask/api` here. When AD_GET cannot mint a token from localhost, set `localStorage.pulse_dev_token` to a JWT signed with `PULSE_JWT_SECRET` (`sub` = NTID, `iss` = ad-get) — a DEV-only override in `useCurrentUser.ts`.
-- **Tests:** `python tests/test_universe_chat.py` (13). Frontend: `npx vitest run src/test/askChat.test.tsx` (5).
+- **Tests:** `python tests/test_universe_chat.py` (17). Frontend: `npx vitest run src/test/askChat.test.tsx` (5).
+- The answer ends with a `data-model` part ("chain: gemini-3.7-flash -> groq-gpt-oss-120b") — the page shows "answered by <last slot>" beside the thumbs; every tool step of an answer folds into one accordion.
 - Design: `docs/superpowers/specs/2026-08-23-universe-chat-design.md`.
 
