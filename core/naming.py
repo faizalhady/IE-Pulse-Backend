@@ -68,3 +68,23 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ─── canon ────────────────────────────────────────────────────────────────────
+# Shared by every module (core/ is the one place allowed to be). Pure
+# normalisation: uppercase alphanumerics only, so "LAM RESEARCH", "Lam-Research"
+# and "LAMRESEARCH" are one key. It does NOT fold one workcell into another —
+# that is what workcell_alias is for (case 2). Anything unknown keeps its own key:
+# an unrecognised name must show up as itself, never silently merge into a
+# neighbour. Mirrors modules/cycle_time/model_universe.norm().
+import re as _re
+from functools import lru_cache as _lru_cache
+
+_NON_ALNUM = _re.compile(r"[^A-Z0-9]")
+
+
+@_lru_cache(maxsize=8192)
+def canon(value) -> str:
+    if value is None:
+        return ""
+    return _NON_ALNUM.sub("", str(value).upper())

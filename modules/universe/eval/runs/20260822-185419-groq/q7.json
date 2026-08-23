@@ -1,0 +1,42 @@
+{
+ "id": 7,
+ "question": "what can we do to improve our yield",
+ "tool_calls": [],
+ "sqls": [],
+ "rounds": 1,
+ "stopped": "error: HTTP 429: {\"error\":{\"message\":\"Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01m0fg9m4aem0ag4ry4ex8xtrb` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198917, Requested 1365. Please try again in 2m1.824s. Need more tokens? Upgrade to Dev Tier today at",
+ "answer": "",
+ "usage": {
+  "prompt_tokens": 0,
+  "completion_tokens": 0
+ },
+ "started": "2026-08-22T18:56:09",
+ "elapsed_s": 18.3,
+ "model": "openai/gpt-oss-120b",
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": false
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "read v_fpy_daily",
+    "passed": false
+   },
+   {
+    "name": "names the worst step(s)",
+    "passed": false
+   },
+   {
+    "name": "says why is unknown (no defect codes)",
+    "passed": false
+   }
+  ],
+  "passed": 1,
+  "total": 5
+ }
+}

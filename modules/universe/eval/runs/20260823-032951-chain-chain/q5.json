@@ -1,0 +1,55 @@
+{
+ "id": 5,
+ "question": "show me the trend of the top KEYSIGHT model's output for the data we have. and generally what is the workcell's output trend",
+ "tool_calls": [
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_output_daily"
+   },
+   "ok": true,
+   "result_text": "v_output_daily\n  source (VARCHAR): boards = distinct boards at the model's terminal step, from MES scans (9 Jul \u2192 8 Aug 2026) \u00b7 share = quantities from the OLE production share (15 Mar \u2192 3 Aug 2026). They count DIFFERENTLY \u2014 never add them; compare them.\n  workcell (VARCHAR): Workcell = customer.\n  workcell_id (BIGINT): Join key to v_workcell.\n  assembly (VARCHAR): Part number as each source spells it (boards: registry; share: the share file).\n  model_id (BIGINT): Join key to dim_model \u2014 NULL when the share's spelling did not resolve.\n  date (DATE): Local date.\n  shift (BIGINT): 2 or 3 \u2014 production shifts.\n  units_out (HUGEINT): Units for that source's definition (see source).\n  iso_year (BIGINT): ISO year.\n  iso_week (BIGINT): ISO week.",
+   "rows": null
+  }
+ ],
+ "sqls": [],
+ "rounds": 2,
+ "stopped": "error: every slot is down or cooling: groq-gpt-oss-120b: 429 \u2192 1s",
+ "answer": "",
+ "usage": {
+  "prompt_tokens": 829,
+  "completion_tokens": 61
+ },
+ "started": "2026-08-23T03:30:10",
+ "elapsed_s": 1.6,
+ "model": "chain: groq-gpt-oss-120b",
+ "chain_trace": [
+  "groq-gpt-oss-120b"
+ ],
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": false
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "read units out",
+    "passed": false
+   },
+   {
+    "name": "filtered to KEYSIGHT",
+    "passed": false
+   },
+   {
+    "name": "trend words",
+    "passed": false
+   }
+  ],
+  "passed": 1,
+  "total": 5
+ }
+}

@@ -1,0 +1,135 @@
+{
+ "id": 6,
+ "question": "which process do u think can be improved for the top KEYSIGHT model based on looking at other faster models. give few suggestions.",
+ "tool_calls": [
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_workcell"
+   },
+   "ok": true,
+   "result_text": "v_workcell\n  workcell_id (BIGINT): The one id for a workcell. Every other table joins on this, never on a name.\n  workcell (VARCHAR): Workcell = CUSTOMER \u2014 the customer-dedicated production organisation (e.g. KEYSIGHT, WABTEC). Not a station, not a cell on a line.\n  entity_type (VARCHAR): customer = a normal customer workcell \u00b7 shared_line = an internal line many customers use (AOP runs SMT for others) \u00b7 support = has people, builds nothing (WAREHOUSE) \u00b7 unknown = the row scans land on when no customer resolves.\n  status (VARCHAR): active or inactive in the August 2026 registry. 'How many workcells' has several true answers \u2014 say which filter you used.\n  plant_physical (VARCHAR): Where the workcell physically sits: P1, P2 or BK (Batu Kawan). MICRON SIG, LAMGB, LAMMEC sit in BK.\n  plant_governing (VARCHAR): Which plant supervises it. Differs from plant_physical for MICRON SIG, LAMGB, LAMMEC (BK floor, Plant 1 supervision). 'In P1' is two questions \u2014 ask which.\n  region (VARCHAR): Penang Island (P1 + P2) or Batu Kawan, following the physical plant.\n  division (VARCHAR): MES division text, an attribute of the workcell, not a level above it.\n  mes_customer_id (DOUBLE): The primary MES Customer_ID. Some workcells hold two (KEYSIGHT is 7 and 114) \u2014 the full set is in workcell_alias.\n  parent_proposed (VARCHAR): The parent workcell the August registry PROPOSED (KEYSIGHT for K_CTEC \u2026). Families are not yet a confirmed fact; do not roll up on this without saying so.\n  confidence (VARCHAR): extracted = seen in source data \u00b7 guess = inferred by the August registry build \u00b7 n/a = synthetic row.",
+   "rows": null
+  },
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_process"
+   },
+   "ok": true,
+   "result_text": "v_process\n  process_id (BIGINT): The key of one process at the ALIAS level \u2014 the thing a cycle time sits on.\n  alias (VARCHAR): IEDB alias \u2014 the specific variant, e.g. 'HLA (CPU) 1'. This is the identity (case 16).\n  process_kind (VARCHAR): IEDB process \u2014 the kind of work above the alias, e.g. 'Assembly 1' (266 kinds).\n  name (VARCHAR): Display name.\n  work_kind (VARCHAR): manual \u00b7 machine \u00b7 mixed \u2014 who does the work.\n  workcenter (VARCHAR): SMT \u00b7 TH \u00b7 BE \u2014 the process STAGE (not geography; 'area' means geography elsewhere).\n  workcenter_type (VARCHAR): Finer stage label (HLA is a kind of BE).\n  mes_steps (VARCHAR): The MES step names this process scans at, when mapped.\n  models (BIGINT): How many models use this process (registry count).\n  lines (BIGINT): How many lines run it.\n  customers (BIGINT): How many workcells use it.\n  avg_sec (DOUBLE): Average study cycle time across uses, seconds \u2014 orientation only; the studies are in v_cycle_time.",
+   "rows": null
+  },
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_cycle_time"
+   },
+   "ok": true,
+   "result_text": "v_cycle_time\n  workcell (VARCHAR): Workcell = customer.\n  workcell_id (BIGINT): Join key to v_workcell.\n  assembly (VARCHAR): Part number = model = assembly.\n  model_id (BIGINT): Join key to dim_model.\n  revision (VARCHAR): The revision this study is for. Standards are per revision; a new revision does NOT automatically inherit (open question).\n  line_id (VARCHAR): The line (sub-workcenter) the route runs on \u2014 IEDB only.\n  step_order (INTEGER): Position of the step on the route.\n  alias (VARCHAR): The process alias \u2014 the identity the time sits on.\n  process_kind (VARCHAR): The kind of work (IEDB process).\n  workcenter (VARCHAR): SMT \u00b7 TH \u00b7 BE stage.\n  cycle_time_sec (DOUBLE): The STANDARD: stopwatch work content per unit, seconds, from an IE time study. Never an elapsed time \u2014 that is fact_cycle_time_measured.\n  mach_sec (DOUBLE): Machine time component.\n  imt_sec (DOUBLE): Operator-at-machine component.\n  hand_sec (DOUBLE): Pure hand time component.\n  headcount (DOUBLE): Operators at the step.\n  parallel_cap (DOUBLE): Parallel capacity within ONE study row (panel-up). NOT machines available.\n  fpy (DOUBLE): First-pass yield assumed by the study.\n  ct_status (VARCHAR): measured = a study with a time \u00b7 missing = the step exists in IEDB with no time. Absence is a value (case 41).\n  updated_on (VARCHAR): When IEDB last touched the row.\n  study_id (BIGINT): The IEDB row id \u2014 studies are append-only events.",
+   "rows": null
+  },
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_route"
+   },
+   "ok": true,
+   "result_text": "v_route\n  workcell (VARCHAR): Workcell = customer.\n  workcell_id (BIGINT): Join key to v_workcell.\n  assembly (VARCHAR): Part number = model = assembly.\n  model_id (BIGINT): Join key to dim_model.\n  line_id (VARCHAR): The line this route variant runs on.\n  step_order (INTEGER): Order of the step on the route \u2014 sort on this for 'end to end'. It restarts per line_id: a model with two lines has two routes; group or filter by line_id first.\n  step_group (INTEGER): Steps that belong together (a buffer point) when known.\n  alias (VARCHAR): Process alias at this step.\n  process_kind (VARCHAR): Kind of work at this step.\n  process_id (BIGINT): Join key to v_process. NULL = the step is not mapped to an IEDB process yet (cases 23\u201325).\n  workcenter (VARCHAR): SMT \u00b7 TH \u00b7 BE stage.\n  station (VARCHAR): The station / scan point name where this step is done.\n  cycle_time_sec (DOUBLE): Standard time at this step, seconds (from the study).\n  headcount (DOUBLE): Operators at the step.\n  is_operator_step (BOOLEAN): true = an operator does it; false = machine.",
+   "rows": null
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT assembly, workcell, line_id, COUNT(*) as step_count, SUM(cycle_time_sec) as total_cycle_time_sec FROM v_route WHERE workcell = 'KEYSIGHT' GROUP BY assembly, workcell, line_id ORDER BY total_cycle_time_sec DESC LIMIT 10"
+   },
+   "ok": true,
+   "result_text": "{\"columns\":[\"assembly\",\"workcell\",\"line_id\",\"step_count\",\"total_cycle_time_sec\"],\"rows\":[{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":9,\"total_cycle_time_sec\":1429734.0},{\"assembly\":\"E7515-61180N\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":6,\"total_cycle_time_sec\":759737.35},{\"assembly\":\"E7515-61180EV280\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":6,\"total_cycle_time_sec\":759737.35},{\"assembly\":\"E7515-61183\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":6,\"total_cycle_time_sec\":759737.35},{\"assembly\":\"M9800-66601\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":6,\"total_cycle_time_sec\":751660.78},{\"assembly\":\"M9800-66601G\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":6,\"total_cycle_time_sec\":751660.78},{\"assembly\":\"M9800-66602\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":6,\"total_cycle_time_sec\":751660.78},{\"assembly\":\"M9800-66601-025\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":6,\"total_cycle_time_sec\":751660.78},{\"assembly\":\"M9800-66603\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":6,\"total_cycle_time_sec\":751660.78},{\"assembly\":\"E7515-61174N\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_count\":6,\"total_cycle_time_sec\":747017.35}],\"row_count\":10,\"truncated\":false,\"sql\":\"select * from (SELECT assembly, workcell, line_id, COUNT(*) as step_count, SUM(cycle_time_sec) as total_cycle_time_sec FROM v_route WHERE workcell = 'KEYSIGHT' GROUP BY assembly, workcell, line_id ORDER BY total_cycle_time_sec DESC LIMIT 10) as q limit 40\"}",
+   "rows": 10
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT assembly, workcell, line_id, step_order, alias, process_kind, workcenter, station, cycle_time_sec, headcount, is_operator_step FROM v_route WHERE workcell = 'KEYSIGHT' AND assembly = 'P5000-62202' AND line_id = '32' ORDER BY step_order"
+   },
+   "ok": true,
+   "result_text": "{\"columns\":[\"assembly\",\"workcell\",\"line_id\",\"step_order\",\"alias\",\"process_kind\",\"workcenter\",\"station\",\"cycle_time_sec\",\"headcount\",\"is_operator_step\"],\"rows\":[{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_order\":303,\"alias\":\"TEST (TURN ON) 1\",\"process_kind\":\"Test 2\",\"workcenter\":\"BE\",\"station\":\"KYS HLA CAA TEST P1B-1\",\"cycle_time_sec\":4200.0,\"headcount\":1.0,\"is_operator_step\":true},{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_order\":304,\"alias\":\"BURN IN 1\",\"process_kind\":\"Burn-In 1\",\"workcenter\":\"BE\",\"station\":\"KYS HLA CAA TEST P1B-1\",\"cycle_time_sec\":688800.0,\"headcount\":1.0,\"is_operator_step\":true},{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_order\":305,\"alias\":\"TEST (ADJ) 1\",\"process_kind\":\"Test 4\",\"workcenter\":\"BE\",\"station\":\"KYS HLA CAA TEST P1B-1\",\"cycle_time_sec\":7800.0,\"headcount\":1.0,\"is_operator_step\":true},{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_order\":306,\"alias\":\"ESS 1\",\"process_kind\":\"ESS 1\",\"workcenter\":\"BE\",\"station\":\"KYS HLA CAA TEST P1B-1\",\"cycle_time_sec\":22200.0,\"headcount\":1.0,\"is_operator_step\":true},{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_order\":309,\"alias\":\"HIPOT 1\",\"process_kind\":\"Hi-Pot 1\",\"workcenter\":\"BE\",\"station\":\"KYS HLA CAA TEST P1B-1\",\"cycle_time_sec\":2469.5,\"headcount\":1.0,\"is_operator_step\":true},{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_order\":310,\"alias\":\"TEST (GHOST) 1\",\"process_kind\":\"Test 1\",\"workcenter\":\"BE\",\"station\":\"KYS HLA CAA TEST P1B-1\",\"cycle_time_sec\":3392.5,\"headcount\":1.0,\"is_operator_step\":true},{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_order\":311,\"alias\":\"TEST (TURN ON) 1\",\"process_kind\":\"Test 2\",\"workcenter\":\"BE\",\"station\":\"KYS HLA CAA TEST P1B-1\",\"cycle_time_sec\":4272.0,\"headcount\":1.0,\"is_operator_step\":true},{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_order\":436,\"alias\":\"BURN IN 1\",\"process_kind\":\"Burn-In 1\",\"workcenter\":\"BE\",\"station\":\"KYS HLA CAA TEST P1B-1\",\"cycle_time_sec\":688800.0,\"headcount\":1.0,\"is_operator_step\":true},{\"assembly\":\"P5000-62202\",\"workcell\":\"KEYSIGHT\",\"line_id\":\"32\",\"step_order\":437,\"alias\":\"TEST (ADJ) 1\",\"process_kind\":\"Test 4\",\"workcenter\":\"BE\",\"station\":\"KYS HLA CAA TEST P1B-1\",\"cycle_time_sec\":7800.0,\"headcount\":1.0,\"is_operator_step\":true}],\"row_count\":9,\"truncated\":false,\"sql\":\"select * from (SELECT assembly, workcell, line_id, step_order, alias, process_kind, workcenter, station, cycle_time_sec, headcount, is_operator_step FROM v_route WHERE workcell = 'KEYSIGHT' AND assembly = 'P5000-62202' AND line_id = '32' ORDER BY step_order) as q limit 40\"}",
+   "rows": 9
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT workcell, assembly, line_id, step_order, alias, process_kind, workcenter, station, cycle_time_sec, headcount, is_operator_step FROM v_route WHERE workcell != 'KEYSIGHT' AND process_kind IN ('Burn-In 1', 'Test 1', 'Test 2', 'Test 4', 'ESS 1', 'Hi-Pot 1') ORDER BY cycle_time_sec ASC LIMIT 20"
+   },
+   "ok": true,
+   "result_text": "{\"columns\":[\"workcell\",\"assembly\",\"line_id\",\"step_order\",\"alias\",\"process_kind\",\"workcenter\",\"station\",\"cycle_time_sec\",\"headcount\",\"is_operator_step\"],\"rows\":[{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M049009C001-C\",\"line_id\":\"219\",\"step_order\":11,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.15,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M055094C002-2\",\"line_id\":\"219\",\"step_order\":16,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.4,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M055094C002-3\",\"line_id\":\"219\",\"step_order\":16,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.4,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M055094C001-1\",\"line_id\":\"219\",\"step_order\":16,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.4,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M055094C002-1\",\"line_id\":\"219\",\"step_order\":16,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.4,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M985530A001-5\",\"line_id\":\"219\",\"step_order\":20,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M985530A001-5-R\",\"line_id\":\"219\",\"step_order\":20,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M985530A001-6\",\"line_id\":\"219\",\"step_order\":20,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M059338C002-1\",\"line_id\":\"219\",\"step_order\":12,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.6,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M059338C003-1\",\"line_id\":\"219\",\"step_order\":12,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":0.6,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"PHOTONICS\",\"assembly\":\"99ACAD\",\"line_id\":\"133\",\"step_order\":201,\"alias\":\"TEST 2\",\"process_kind\":\"Test 2\",\"workcenter\":\"BE\",\"station\":\"PHOTONICS BK_3F_B32B\",\"cycle_time_sec\":0.89082,\"headcount\":1.0,\"is_operator_step\":true},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M046927C004-1\",\"line_id\":\"219\",\"step_order\":11,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":1.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M046927C003-1\",\"line_id\":\"219\",\"step_order\":11,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":1.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M046927C001-4\",\"line_id\":\"219\",\"step_order\":11,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":1.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M046927C003-DT\",\"line_id\":\"219\",\"step_order\":11,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":1.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M046927C003-4\",\"line_id\":\"219\",\"step_order\":11,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":1.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M046927C003-2\",\"line_id\":\"219\",\"step_order\":11,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":1.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M046927C003-3\",\"line_id\":\"219\",\"step_order\":11,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":1.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M046927C002-1\",\"line_id\":\"219\",\"step_order\":11,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":1.5,\"headcount\":null,\"is_operator_step\":false},{\"workcell\":\"MEDTRONIC\",\"assembly\":\"M972496A002-9-R\",\"line_id\":\"219\",\"step_order\":21,\"alias\":\"TEST (IONIC) 1 - IONIC TEST\",\"process_kind\":\"Test 1\",\"workcenter\":\"TH\",\"station\":\"MDT TH P1A-1 B6b\",\"cycle_time_sec\":2.5,\"headcount\":null,\"is_operator_step\":false}],\"row_count\":20,\"truncated\":false,\"sql\":\"select * from (SELECT workcell, assembly, line_id, step_order, alias, process_kind, workcenter, station, cycle_time_sec, headcount, is_operator_step FROM v_route WHERE workcell != 'KEYSIGHT' AND process_kind IN ('Burn-In 1', 'Test 1', 'Test 2', 'Test 4', 'ESS 1', 'Hi-Pot 1') ORDER BY cycle_time_sec ASC LIMIT 20) as q limit 40\"}",
+   "rows": 20
+  }
+ ],
+ "sqls": [
+  "select * from (SELECT assembly, workcell, line_id, COUNT(*) as step_count, SUM(cycle_time_sec) as total_cycle_time_sec FROM v_route WHERE workcell = 'KEYSIGHT' GROUP BY assembly, workcell, line_id ORDER BY total_cycle_time_sec DESC LIMIT 10) as q limit 40",
+  "select * from (SELECT assembly, workcell, line_id, step_order, alias, process_kind, workcenter, station, cycle_time_sec, headcount, is_operator_step FROM v_route WHERE workcell = 'KEYSIGHT' AND assembly = 'P5000-62202' AND line_id = '32' ORDER BY step_order) as q limit 40",
+  "select * from (SELECT workcell, assembly, line_id, step_order, alias, process_kind, workcenter, station, cycle_time_sec, headcount, is_operator_step FROM v_route WHERE workcell != 'KEYSIGHT' AND process_kind IN ('Burn-In 1', 'Test 1', 'Test 2', 'Test 4', 'ESS 1', 'Hi-Pot 1') ORDER BY cycle_time_sec ASC LIMIT 20) as q limit 40"
+ ],
+ "rounds": 8,
+ "stopped": "answered",
+ "answer": "<thought>*   Target: Top KEYSIGHT model (based on cycle time/complexity).\n    *   Goal: Identify processes for improvement by comparing with faster models.\n    *   Data found:\n        *   Top KEYSIGHT model (by total cycle time): `P5000-62202` (Line 32).\n        *   Total cycle time for `P5000-62202`: 1,429,734 seconds.\n        *   Key bottlenecks for `P5000-62202`:\n            *   `BURN IN 1` (Process Kind: Burn-In 1): 688,800 seconds (appears twice in the route, likely a massive bottleneck).\n            *   `TEST (ADJ) 1` (Process Kind: Test 4): 7,800 seconds.\n            *   `ESS 1` (Process Kind: ESS 1): 22,200 seconds.\n            *   `TEST (TURN ON) 1` (Process Kind: Test 2): ~4,200 seconds.\n        *   Comparison data: Other workcells (e.g., MEDTRONIC, PHOTONICS) have `Test 1` and `Test 2` processes that are extremely fast (sub-second to a few seconds).\n\n    *   The `BURN IN 1` process is the overwhelming driver of the cycle time for model `P5000-62202`.\n    *   The `ESS 1` and `TEST (ADJ) 1` processes are also significantly high compared to standard test processes seen in other models.\n\n    *   *Burn-In:* 688,800 seconds is roughly 191 hours. This is a long-duration soak test. Improvement would involve parallelization or reducing the soak time if validated.\n    *   *Testing:* The `Test 2` (Turn On) for Keysight is ~4,200s, while Photonics `Test 2` is < 1s. While the products are different, the magnitude of difference suggests a potential for automation or optimization of the test sequence.\n\n    *   Lead with the answer.\n    *   Identify the model: `P5000-62202`.\n    *   Identify the process: `BURN IN 1`.\n    *   Provide suggestions based on the data.</thought>The process that requires the most improvement for the top KEYSIGHT model (**P5000-62202**) is **BURN IN 1**, which accounts for the vast majority of the total cycle time.\n\n| Model | Process | Cycle Time (sec) | Process Kind |\n| :--- | :--- | :--- | :--- |\n| **P5000-62202** | BURN IN 1 | 688,800 | Burn-In 1 |\n| **P5000-62202** | ESS 1 | 22,200 | ESS 1 |\n| **P5000-62202** | TEST (ADJ) 1 | 7,800 | Test 4 |\n| **P5000-62202** | TEST (TURN ON) 1 | 4,272 | Test 2 |\n\n**Suggestions for Improvement:**\n\n1.  **Burn-In Optimization:** The `BURN IN 1` process takes approximately 191 hours per unit. Since this is the primary bottleneck, investigate if the soak time can be reduced through reliability data or if the process can be shifted to a high-capacity parallel rack to prevent line starvation.\n2.  **Test Sequence Automation:** The `TEST (TURN ON) 1` (Test 2) takes ~4,272 seconds. In comparison, other models in the plant (e.g., PHOTONICS) execute `Test 2` processes in under 1 second. While product complexity differs, the massive delta suggests an opportunity to automate manual setup or optimize the test script.\n3.  **ESS and Adjustment Review:** `ESS 1` and `TEST (ADJ) 1` are the next largest contributors. Reviewing the \"Adjustment\" (Test 4) phase to see if calibration can be shifted upstream or automated could further reduce the lead time.\n\n*Data based on v_route for the window 9 Jul \u2192 22 Aug 2026.*",
+ "usage": {
+  "prompt_tokens": 20013,
+  "completion_tokens": 877
+ },
+ "started": "2026-08-23T18:51:01",
+ "elapsed_s": 43.0,
+ "model": "chain: groq-gpt-oss-120b -> mistral-medium -> gemini-gemma-4-31b",
+ "chain_trace": [
+  "groq-gpt-oss-120b",
+  "mistral-medium",
+  "mistral-medium",
+  "mistral-medium",
+  "mistral-medium",
+  "mistral-medium",
+  "mistral-medium",
+  "gemini-gemma-4-31b"
+ ],
+ "chain_events": [
+  "groq-gpt-oss-120b: 429 -> 4s",
+  "groq-gpt-oss-120b: 429 -> 1s",
+  "groq-gpt-oss-120b: 429 -> 6s",
+  "mistral-medium: 429 -> 60s",
+  "cerebras-gemma-4-31b: HTTP 402: {\"message\":\"Payment required to access this resour"
+ ],
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": true
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "identifiers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "read cycle time or route",
+    "passed": true
+   },
+   {
+    "name": "names a process",
+    "passed": true
+   },
+   {
+    "name": "gives suggestions",
+    "passed": true
+   }
+  ],
+  "passed": 6,
+  "total": 6
+ },
+ "notes": [
+  "all numbers grounded",
+  "all identifiers grounded"
+ ]
+}

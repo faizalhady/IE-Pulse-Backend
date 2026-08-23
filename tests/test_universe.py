@@ -1,0 +1,870 @@
+"""Jabil Universe — Phase 1 acceptance tests.
+
+Every table in the universe gets its assertions BEFORE its build script. These are
+the facts the Foundational Document and the gotchas register say must hold; if a
+build produces a table where one of them is false, the build is wrong, not the test.
+
+Run: python tests/test_universe.py          (no pytest needed)
+  or python -m pytest tests/test_universe.py (if pytest is installed)
+"""
+
+import sys
+from datetime import date
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import duckdb  # noqa: E402
+
+from modules.universe import config as U  # noqa: E402
+from modules.universe import registry as R  # noqa: E402
+
+
+def _q(sql: str):
+    con = duckdb.connect()
+    try:
+        for name, path in U.UNIVERSE_MART.items():
+            if path.exists():
+                con.execute(f"create view {name} as select * from read_parquet('{path.as_posix()}')")
+        return con.execute(sql).fetchall()
+    finally:
+        con.close()
+
+
+# ─── T1 · the module exists and answers /health ──────────────────────────────
+
+def test_health_endpoint_answers():
+    from fastapi.testclient import TestClient
+    from api.main import app
+    r = TestClient(app).get("/api/universe/health")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert "tables" in body and "dim_workcell" in body["tables"], body
+
+
+# ─── T2 · dim_workcell + workcell_alias ──────────────────────────────────────
+
+def test_dim_workcell_promoted_with_all_active_rows():
+    assert U.UNIVERSE_MART["dim_workcell"].exists(), "dim_workcell.parquet not built"
+    (n_active,) = _q("select count(*) from dim_workcell where status = 'active'")[0]
+    # 42 active rows in the August registry (37 customers + AOP + 4 support). Promote faithfully.
+    assert n_active == 42, n_active
+
+
+def test_every_configured_cycle_time_customer_resolves():
+    """Rule 5: never join on a raw workcell name — but every configured name MUST resolve."""
+    from modules.cycle_time.config import CT_CUSTOMERS
+    misses = [c["customer"] for c in CT_CUSTOMERS if R.resolve(c["customer"]) is None]
+    assert not misses, f"unresolved CT_CUSTOMERS names: {misses}"
+
+
+def test_keysight_carries_both_mes_ids():
+    """Case 3: one workcell, two MES ids — a column cannot hold two, the alias table can."""
+    rows = _q("""
+        select a.value, w.name
+        from workcell_alias a join dim_workcell w on w.workcell_id = a.workcell_id
+        where a.system = 'mes' and a.value in ('7', '114')
+    """)
+    assert {v for v, _ in rows} == {"7", "114"}, rows
+    assert {n for _, n in rows} == {"KEYSIGHT"}, rows
+
+
+def test_alias_system_value_is_unique():
+    dups = _q("select system, value, count(*) c from workcell_alias group by 1, 2 having c > 1")
+    assert not dups, dups[:5]
+
+
+def test_aop_is_a_shared_line_not_a_customer():
+    rows = _q("select entity_type from dim_workcell where name = 'AOP'")
+    assert rows == [("shared_line",)], rows
+
+
+def test_families_are_unverified_so_parent_id_is_null():
+    """§8.1 #14: roots and subs are a proposal, not a fact. Keep the proposal, do not act on it."""
+    (n_set,) = _q("select count(*) from dim_workcell where parent_id is not null")[0]
+    (n_prop,) = _q("select count(*) from dim_workcell where parent_id_proposed is not null")[0]
+    assert n_set == 0, n_set
+    assert n_prop > 0, "the August proposal should be kept as parent_id_proposed"
+
+
+def test_alias_conflicts_are_surfaced_not_resolved():
+    """The August alias table mixes two meanings: "this spelling belongs to this
+    workcell" and "this customer's cycle-time data folds into that workcell".
+    Eight spellings point at two ids. The canonical row wins for resolve(); the
+    conflict is recorded, never silently picked."""
+    assert R.resolve("Tellabs") == 44, R.resolve("Tellabs")          # the Tellabs row, not INFINERA NEW
+    # K_CTEC is a registered workcell (row 42); the cycle_time alias folds it into
+    # KEYSIGHT (6) — a family claim, and families are unverified (§8.1 #14). So the
+    # canonical row wins and the fold is recorded as a conflict, not applied.
+    assert R.resolve("K_CTEC") == 42, R.resolve("K_CTEC")
+    rows = _q("select spelling, ids from workcell_alias_conflict order by spelling")
+    assert len(rows) >= 7, rows
+    by = {r[0]: set(r[1]) for r in rows}
+    assert by.get("TELLABS") == {44, 101}, by.get("TELLABS")
+    assert by.get("KCTEC") == {6, 42}, by.get("KCTEC")
+
+
+def test_plant_is_two_facts_physical_and_governing():
+    """'Which plant' is two questions. MICRON SIG sits in BK and is run by P1."""
+    row = _q("select plant_physical, plant_governing from dim_workcell where name = 'MICRON SIG'")
+    assert row == [("BK", "P1")], row
+    row = _q("select plant_physical, plant_governing, region from dim_workcell where name = 'LAM RESEARCH'")
+    assert row == [("P1", "P1", "Penang Island")], row
+    row = _q("select plant_physical, plant_governing, region from dim_workcell where name = 'Tellabs'")
+    assert row == [("BK", "BK", "Batu Kawan")], row
+
+
+# ─── T4 · dim_model (assembly × revision) ───────────────────────────────────
+
+def test_dim_model_is_workcell_and_assembly_together():
+    """A model is (workcell, assembly) TOGETHER — an assembly alone is half an identity."""
+    assert U.UNIVERSE_MART["dim_model"].exists(), "dim_model.parquet not built"
+    dups = _q("select workcell_id, match_key, count(*) c from dim_model group by 1, 2 having c > 1")
+    assert not dups, dups[:5]
+    (n,) = _q("select count(*) from dim_model")[0]
+    assert n >= 167_000, n                                  # the August registry, promoted faithfully
+
+
+def test_every_model_points_at_a_real_workcell():
+    orphans = _q("""select count(*) from dim_model m
+                    left join dim_workcell w on w.workcell_id = m.workcell_id
+                    where m.workcell_id is not null and w.workcell_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+def test_revisions_hang_off_models():
+    """BOM and route hang off the revision, not the assembly (case 14)."""
+    assert U.UNIVERSE_MART["dim_model_revision"].exists()
+    dups = _q("select model_id, revision, count(*) c from dim_model_revision group by 1, 2 having c > 1")
+    assert not dups, dups[:5]
+    orphans = _q("""select count(*) from dim_model_revision r
+                    left join dim_model m on m.model_id = r.model_id where m.model_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+# ─── T5 · fact_scan — one row per board × step ───────────────────────────────
+
+def test_fact_scan_is_one_row_per_board_step_scan():
+    assert U.UNIVERSE_MART["fact_scan"].exists(), "fact_scan.parquet not built"
+    (n,) = _q("select count(*) from fact_scan")[0]
+    # The August pull is 19,841,768 raw rows; 1,094,216 are duplicate keys from
+    # overlapping hourly windows. The truth is the deduped count.
+    assert n >= 18_700_000, n
+    dups = _q("""select count(*) from (select wip_id, step, step_instance, completed_at_utc, count(*) c
+                 from fact_scan group by 1,2,3,4 having c > 1)""")
+    assert dups == [(0,)], dups
+
+
+def test_every_scan_points_at_a_workcell_row_even_unknown():
+    """Customer_ID = 0 is an answer (case 6): an UNKNOWN workcell row, never a NULL key."""
+    nulls = _q("select count(*) from fact_scan where workcell_id is null")
+    assert nulls == [(0,)], nulls
+    orphans = _q("""select count(*) from fact_scan f left join dim_workcell w on w.workcell_id = f.workcell_id
+                    where w.workcell_id is null""")
+    assert orphans == [(0,)], orphans
+    unknown_row = _q("select name, entity_type from dim_workcell where workcell_id = 0")
+    assert unknown_row == [("UNKNOWN", "unknown")], unknown_row    # the row exists even when nothing lands on it
+
+
+def test_every_scan_model_resolves_or_is_null():
+    orphans = _q("""select count(*) from fact_scan f left join dim_model m on m.model_id = f.model_id
+                    where f.model_id is not null and m.model_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+def test_local_time_is_utc_plus_8_and_shift_follows_it():
+    """Case 49: convert before assigning shift, or every boundary vanishes."""
+    bad_tz = _q("select count(*) from fact_scan where completed_at_local <> completed_at_utc + interval 8 hour")
+    assert bad_tz == [(0,)], bad_tz
+    bad_shift = _q("""select count(*) from fact_scan
+                      where (hour(completed_at_local) between 7 and 18 and shift <> 2)
+                         or (hour(completed_at_local) not between 7 and 18 and shift <> 3)""")
+    assert bad_shift == [(0,)], bad_shift
+
+
+def test_night_shift_after_midnight_belongs_to_the_previous_date():
+    rows = _q("""select count(*) from fact_scan
+                 where hour(completed_at_local) < 7 and shift_date <> cast(completed_at_local as date) - 1""")
+    assert rows == [(0,)], rows
+    rows = _q("""select count(*) from fact_scan
+                 where hour(completed_at_local) >= 7 and shift_date <> cast(completed_at_local as date)""")
+    assert rows == [(0,)], rows
+
+
+# ─── T6 · terminal step per model, units out ─────────────────────────────────
+
+def test_terminal_step_is_learned_per_model_from_history():
+    """§8.1 #9 (refined): the last step is learned from the boards themselves —
+    the step their final scan lands on — with the share of boards as confidence.
+    PACKOUT is only the default when nothing was learned."""
+    assert U.UNIVERSE_MART["model_terminal_step"].exists(), "model_terminal_step.parquet not built"
+    dups = _q("select model_id, count(*) c from model_terminal_step group by 1 having c > 1")
+    assert not dups, dups[:5]
+    # Learning needs history: a model with < TERMINAL_MIN_BOARDS boards in the window
+    # falls back to PACKOUT with learned = false — by design, not a failure. Among
+    # models WITH enough history, nine in ten must learn a step.
+    (n_enough,) = _q(f"select count(*) from model_terminal_step where boards >= {U.TERMINAL_MIN_BOARDS}")[0]
+    (n_learned,) = _q(f"select count(*) from model_terminal_step where learned and boards >= {U.TERMINAL_MIN_BOARDS}")[0]
+    assert n_learned / n_enough >= 0.9, f"{n_learned}/{n_enough} = {n_learned / n_enough:.3f}"
+    thin = _q(f"select count(*) from model_terminal_step where boards < {U.TERMINAL_MIN_BOARDS} and (learned or terminal_step <> '{U.DEFAULT_TERMINAL_STEP}')")
+    assert thin == [(0,)], thin
+    kinds = {k for (k,) in _q("select distinct terminal_kind from model_terminal_step")}
+    assert kinds <= {"packout", "link", "other"}, kinds
+
+
+def test_units_out_counts_a_board_once_at_its_terminal_step():
+    """Case 48: counting scan rows double-counts rework. A unit = one board, once."""
+    assert U.UNIVERSE_MART["fact_unit_out"].exists(), "fact_unit_out.parquet not built"
+    dups = _q("select wip_id, model_id, count(*) c from fact_unit_out group by 1, 2 having c > 1")
+    assert not dups, dups[:5]
+    (n_units,) = _q("select count(*) from fact_unit_out")[0]
+    (n_scans,) = _q("select count(*) from fact_scan")[0]
+    assert 0 < n_units < n_scans, (n_units, n_scans)
+
+
+def _august_keysight_packout_units() -> int:
+    return duckdb.connect().execute(
+        f"select sum(units_out) from read_parquet('{(U.REGISTRY_DIR / 'production_out.parquet').as_posix()}') "
+        "where try_cast(workcell_id as bigint) = 6").fetchone()[0]
+
+
+def test_fact_scan_reproduces_the_august_packout_count():
+    """Promotion check: August counted distinct boards at PACKOUT per (date, shift,
+    model, bay) over 9 Jul → 8 Aug. Recomputing that definition from fact_scan in the
+    same window must not lose boards — and may hold up to 3 % more, because the
+    August pull dropped minute 59 of every hour (case 70)."""
+    aug = _august_keysight_packout_units()
+    (recomputed,) = _q("""
+        select count(*) from (
+          select distinct wip_id, model_id, date, shift_name_raw, bay_id
+          from fact_scan where workcell_id = 6 and step = 'PACKOUT'
+            and date between '2026-07-09' and '2026-08-08')""")[0]
+    assert aug and 0 <= recomputed - aug <= 0.03 * aug, f"recomputed {recomputed} vs august {aug}"
+
+
+def test_units_out_reconciles_with_august_once_double_counting_is_added_back():
+    """Case 48: we count a board once. August counted it again on every (date,
+    shift, bay) it re-scanned PACKOUT. For KEYSIGHT models whose terminal step IS
+    PACKOUT: ours + August's extra counts = August's number, within 1 %. Models
+    ending at LINK or elsewhere are excluded here and reported separately — they
+    are an open question, not a tolerance."""
+    (ours,) = _q("""select count(*) from fact_unit_out u
+                    join model_terminal_step t on t.model_id = u.model_id
+                    where u.workcell_id = 6 and t.terminal_step = 'PACKOUT'
+                      and u.date between '2026-07-09' and '2026-08-08'""")[0]
+    (extra,) = _q("""select coalesce(sum(n_groups - 1), 0) from (
+                       select s.wip_id, s.model_id, count(distinct (s.date, s.shift_name_raw, s.bay_id)) n_groups
+                       from fact_scan s join model_terminal_step t on t.model_id = s.model_id
+                       where s.workcell_id = 6 and s.step = 'PACKOUT' and t.terminal_step = 'PACKOUT'
+                         and s.date between '2026-07-09' and '2026-08-08'
+                       group by 1, 2)""")[0]
+    aug_packout_models = duckdb.connect().execute(f"""
+        select sum(a.units_out) from read_parquet('{(U.REGISTRY_DIR / 'production_out.parquet').as_posix()}') a
+        join read_parquet('{U.UNIVERSE_MART['model_terminal_step'].as_posix()}') t on t.model_id = a.model_id
+        where try_cast(a.workcell_id as bigint) = 6 and t.terminal_step = 'PACKOUT'""").fetchone()[0]
+    assert abs(ours + extra - aug_packout_models) / aug_packout_models <= 0.01,         f"ours {ours} + extra {extra} = {ours + extra} vs august {aug_packout_models}"
+
+
+# ─── T7 · the OLE proof — paid hours, SMH, and a reconciliation with the OLE module ──
+
+def test_fact_paid_hours_is_one_row_per_person_shift_and_points_at_workcells():
+    assert U.UNIVERSE_MART["fact_paid_hours"].exists(), "fact_paid_hours.parquet not built"
+    dups = _q("""select count(*) from (select employee_no, date, shift, workcell_id, sub_workcell_raw, count(*) c
+                 from fact_paid_hours group by 1,2,3,4,5 having c > 1)""")
+    assert dups == [(0,)], dups
+    orphans = _q("""select count(*) from fact_paid_hours f left join dim_workcell w on w.workcell_id = f.workcell_id
+                    where w.workcell_id is null""")
+    assert orphans == [(0,)], orphans
+    (neg,) = _q("select count(*) from fact_paid_hours where paid_hours < 0")[0]
+    assert neg == 0, neg
+
+
+def test_smh_is_one_standard_per_model_and_stage():
+    """SMH — standard man-hours per unit — is the earned-hours input to OLE."""
+    assert U.UNIVERSE_MART["dim_smh"].exists(), "dim_smh.parquet not built"
+    dups = _q("select workcell_id, model_id, scan_stage, count(*) c from dim_smh group by 1,2,3 having c > 1")
+    assert not dups, dups[:5]
+    (bad,) = _q("select count(*) from dim_smh where smh_per_unit is null or smh_per_unit <= 0")[0]
+    assert bad == 0, bad
+
+
+def test_ole_from_the_universe_reconciles_with_the_ole_module():
+    """The proof. OLE = Σ(units_out × SMH) ÷ Σ paid_hours, per workcell per ISO
+    week, computed from universe tables only, set beside the OLE module's own
+    weekly number for the weeks both cover. Every delta over 2 points carries a
+    computed reason — the point is not that they agree, it is that every
+    disagreement is explained."""
+    assert U.UNIVERSE_MART["ole_reconciliation"].exists(), "ole_reconciliation.parquet not built"
+    rows = _q("""select workcell, iso_week, ole_universe, ole_module, delta_pts, reason
+                 from ole_reconciliation where ole_module is not null""")
+    assert len(rows) >= 10, len(rows)
+    unexplained = [r for r in rows if (r[4] is None or abs(r[4]) > 2) and not (r[5] or "").strip()]
+    assert not unexplained, unexplained[:5]
+    # and the universe number is a real OLE, not a ratio of nothing
+    (n_real,) = _q("select count(*) from ole_reconciliation where ole_universe between 1 and 200")[0]
+    assert n_real >= 10, n_real
+
+
+# ─── T8 · semantic views — the layer a model (or a person) reads ─────────────
+
+def test_views_carry_meaning_in_column_comments():
+    """A view without column comments is a column list; a model cannot know that
+    workcell = customer or that units are boards-once from the names alone."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        for v in ("v_workcell", "v_units_out_daily", "v_ole_weekly"):
+            cols = con.execute(f"select column_name, comment from duckdb_columns() where table_name = '{v}'").fetchall()
+            assert cols, f"{v} missing"
+            missing = [c for c, cm in cols if not (cm or "").strip()]
+            assert not missing, f"{v}: columns without a comment: {missing}"
+    finally:
+        con.close()
+
+
+def test_pool_q1_list_all_workcells_from_the_view_only():
+    """Pool Q1. The view must say WHICH count — so it exposes status and entity_type,
+    and the active-customer count equals the registry's."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        (n,) = con.execute("select count(*) from v_workcell where status = 'active' and entity_type = 'customer'").fetchone()
+        assert n == 37, n
+        row = con.execute("select plant_physical, plant_governing from v_workcell where workcell = 'MICRON SIG'").fetchone()
+        assert row == ("BK", "P1"), row
+    finally:
+        con.close()
+
+
+def test_pool_q5_output_trend_for_one_model_from_the_view_only():
+    """Pool Q5. Output trend of one model in one workcell, by day — a query over
+    v_units_out_daily alone, no parquet paths, no joins the asker must know."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        rows = con.execute("""
+            select date, units_out from v_units_out_daily
+            where workcell = 'KEYSIGHT' and assembly = (
+              select assembly from v_units_out_daily where workcell = 'KEYSIGHT'
+              group by 1 order by sum(units_out) desc limit 1)
+            order by date""").fetchall()
+        assert len(rows) >= 20, len(rows)
+        assert all(u > 0 for _, u in rows), rows[:3]
+    finally:
+        con.close()
+
+
+# ═══ PHASE 2 — waves 2 and 3, from disk ══════════════════════════════════════
+
+# ─── Wave 2 · people ─────────────────────────────────────────────────────────
+
+def test_dim_employee_scope_is_a_real_fact():
+    """Case 31: department ≠ workcell; a site-scope engineer is not missing data."""
+    assert U.UNIVERSE_MART["dim_employee"].exists(), "dim_employee.parquet not built"
+    dups = _q("select employee_id, count(*) c from dim_employee group by 1 having c > 1")
+    assert not dups, dups[:5]
+    scopes = {r[0] for r in _q("select distinct scope from dim_employee")}
+    assert scopes <= {"workcell", "site"}, scopes
+    (n_site,) = _q("select count(*) from dim_employee where scope = 'site'")[0]
+    assert n_site > 0
+    orphans = _q("""select count(*) from dim_employee e left join dim_workcell w on w.workcell_id = e.workcell_id
+                    where e.workcell_id is not null and w.workcell_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+def test_paid_hours_employees_resolve_to_people_or_are_counted():
+    """A paid-hours row whose person is unknown is reported, never dropped."""
+    # 877 payroll numbers were not in HR at all in August — agency / contract codes (WHL…, NWL…);
+    # 1,142 after refresh 1 (payroll to 21 Aug, HR extract from 7 Aug: joiners arrive first in payroll).
+    # They are ~3% of HOURS, and hours are what OLE divides by; so the bar is hours — the count is reported.
+    rows = _q("""select sum(p.paid_hours) filter (where e.employee_id is not null), sum(p.paid_hours),
+                        count(distinct p.employee_no) filter (where e.employee_id is null)
+                 from fact_paid_hours p left join dim_employee e on e.payroll_no = p.employee_no""")
+    matched_hours, total_hours, unmatched_people = rows[0]
+    assert matched_hours / total_hours >= 0.95, f"{matched_hours}/{total_hours}"
+    assert unmatched_people > 0, "unknown people must be reported, not dropped"
+
+
+def test_dim_department_has_a_kind_and_parents_resolve():
+    assert U.UNIVERSE_MART["dim_department"].exists()
+    dups = _q("select department_id, count(*) c from dim_department group by 1 having c > 1")
+    assert not dups, dups
+    orphans = _q("""select count(*) from dim_department d left join dim_department p on p.department_id = d.parent_id
+                    where d.parent_id is not null and p.department_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+# ─── Wave 3 · process, studies, routes, demand ───────────────────────────────
+
+def test_dim_process_has_three_levels_and_aliases():
+    """Case 21: kind → alias (the identity) → MES step. The alias is the row."""
+    assert U.UNIVERSE_MART["dim_process"].exists(), "dim_process.parquet not built"
+    dups = _q("select process_id, count(*) c from dim_process group by 1 having c > 1")
+    assert not dups, dups[:5]
+    (n,) = _q("select count(*) from dim_process")[0]
+    assert n >= 1_000, n
+    (n_kind,) = _q("select count(distinct process_kind) from dim_process where process_kind is not null")[0]
+    assert n_kind >= 100, n_kind
+    dups = _q("select system, value, count(*) c from process_alias group by 1, 2 having c > 1")
+    assert not dups, dups[:5]
+    orphans = _q("""select count(*) from process_alias a left join dim_process p on p.process_id = a.process_id
+                    where p.process_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+def test_cycle_time_studies_are_append_only_rows_with_a_status():
+    """§8.1 #7: a study is an event with a status; absence is a value (case 41)."""
+    assert U.UNIVERSE_MART["fact_cycle_time_study"].exists(), "fact_cycle_time_study.parquet not built"
+    dups = _q("select study_id, count(*) c from fact_cycle_time_study group by 1 having c > 1")
+    assert not dups, dups[:3]
+    (n,) = _q("select count(*) from fact_cycle_time_study")[0]
+    assert n >= 4_400_000, n
+    statuses = {r[0] for r in _q("select distinct ct_status from fact_cycle_time_study")}
+    assert statuses <= {"measured", "inherited", "estimated", "missing", "disputed"}, statuses
+    cols = {r[0] for r in _q("select column_name from (describe fact_cycle_time_study)")}
+    assert "quote" not in cols, "case 17: the dead quote column must not be promoted"
+    orphans = _q("""select count(*) from fact_cycle_time_study s left join dim_model m on m.model_id = s.model_id
+                    where s.model_id is not null and m.model_id is null""")
+    assert orphans == [(0,)], orphans
+
+
+def test_measured_cycle_time_is_a_separate_table_never_a_study():
+    """Case 51: MES scan deltas are elapsed time. Separate table, provenance on every row."""
+    assert U.UNIVERSE_MART["fact_cycle_time_measured"].exists()
+    (bad,) = _q("select count(*) from fact_cycle_time_measured where provenance <> 'mes_scan_delta'")[0]
+    assert bad == 0, bad
+    (n,) = _q("select count(*) from fact_cycle_time_measured")[0]
+    assert n >= 80_000, n
+
+
+def test_route_steps_are_ordered_per_model_and_line():
+    """Pool Q4: every step this model goes through, in order."""
+    assert U.UNIVERSE_MART["fact_route"].exists(), "fact_route.parquet not built"
+    dups = _q("select model_id, line_id, step_order, count(*) c from fact_route group by 1, 2, 3 having c > 1")
+    assert not dups, dups[:5]
+    rows = _q("""select step_order, process_alias from fact_route
+                 where model_id = (select model_id from fact_route group by 1 order by count(*) desc limit 1)
+                   and line_id = (select line_id from fact_route where model_id = (select model_id from fact_route group by 1 order by count(*) desc limit 1) limit 1)
+                 order by step_order""")
+    assert len(rows) >= 3 and [r[0] for r in rows] == sorted(r[0] for r in rows), rows[:5]
+    (unmapped,) = _q("select count(*) from fact_route where process_id is null")[0]
+    (total,) = _q("select count(*) from fact_route")[0]
+    assert unmapped / total < 0.5, f"{unmapped}/{total} route steps map to no process"
+
+
+def test_demand_joins_on_the_part_number_never_the_workcell_name():
+    """Case 18: joining on workcell silently dropped ~1.9M units. The universe
+    joins on the model key; workcell comes through the registry."""
+    assert U.UNIVERSE_MART["fact_demand"].exists(), "fact_demand.parquet not built"
+    dups = _q("""select count(*) from (select workcell_id, model_id, period_start, period_type, source, as_of, count(*) c
+                 from fact_demand group by all having c > 1)""")
+    assert dups == [(0,)], dups
+    (resolved, total) = _q("""select sum(qty) filter (where m.model_id is not null), sum(qty)
+                              from fact_demand d left join dim_model m on m.model_id = d.model_id""")[0]
+    assert resolved / total >= 0.95, f"{resolved}/{total}"
+    (no_wc,) = _q("select count(*) from fact_demand where workcell_id is null")[0]
+    assert no_wc == 0, no_wc
+
+
+# ─── Views and the temporary history ─────────────────────────────────────────
+
+def test_fpy_view_is_loop_one_pass_over_tested():
+    """Pool Q7, the 'where': FPY = P ÷ (P + F) at test steps, first loop only (case 48)."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        (bad,) = con.execute("select count(*) from v_fpy_daily where fpy < 0 or fpy > 1").fetchone()
+        assert bad == 0, bad
+        (n,) = con.execute("select count(*) from v_fpy_daily").fetchone()
+        assert n > 1000, n
+        (bad,) = con.execute("select count(*) from v_fpy_daily where boards_tested < boards_passed").fetchone()
+        assert bad == 0, bad
+        # trial 2 finding: an F at SCRAP / BIRTH / RTC is a disposition, not a test result
+        (bad,) = con.execute("select count(*) from v_fpy_daily where step ilike '%SCRAP%' or step ilike 'BIRTH%' or step ilike '%RTC%'").fetchone()
+        assert bad == 0, bad
+        (dead,) = con.execute("select count(*) from (select workcell_id, step from v_fpy_daily group by 1, 2 having sum(boards_passed) = 0)").fetchone()
+        assert dead == 0, f"{dead} (workcell, step) pairs never pass a board — not test steps"
+    finally:
+        con.close()
+
+
+def test_share_production_is_kept_separate_and_labelled():
+    """Case 48: share quantities and boards count differently. A second opinion,
+    never merged; the view names the source on every row."""
+    assert U.UNIVERSE_MART["fact_production_share"].exists()
+    (bad,) = _q("select count(*) from fact_production_share where source <> 'share' or source is null")[0]
+    assert bad == 0, bad
+    (resolved, total) = _q("select count(*) filter (where workcell_id <> 0), count(*) from fact_production_share")[0]
+    assert resolved / total >= 0.95, f"{resolved}/{total}"
+    from modules.universe import views
+    con = views.connect()
+    try:
+        sources = {r[0] for r in con.execute("select distinct source from v_output_daily").fetchall()}
+        assert sources == {"boards", "share"}, sources
+        lo, hi = con.execute("select min(date), max(date) from v_output_daily where source = 'share'").fetchone()
+        assert str(lo) < "2026-07-01", lo                      # the share history reaches further back than the scans
+    finally:
+        con.close()
+
+
+def test_every_view_has_every_column_commented():
+    from modules.universe import views
+    con = views.connect()
+    try:
+        for v in views.VIEWS:
+            cols = con.execute(f"select column_name, comment from duckdb_columns() where table_name = '{v}'").fetchall()
+            assert cols, f"{v} missing"
+            missing = [c for c, cm in cols if not (cm or "").strip()]
+            assert not missing, f"{v}: {missing}"
+    finally:
+        con.close()
+
+
+# ─── The refresh — built now, run when the VPN is back ──────────────────────
+
+def test_refresh_rebuilds_fact_scan_from_the_raw_pulls_exactly():
+    """The 30 raw hourly-pull CSVs already on disk must reproduce Phase 1's
+    fact_scan to the row — same parse, same dedupe. Slow (3.3 GB); it is the
+    acceptance test for the refresh path, so it stays."""
+    from modules.universe.pipeline import refresh
+    n = refresh.count_from_raw(U.REGISTRY_DIR / "wipscan")
+    (m,) = _q("select count(*) from fact_scan")[0]
+    assert n == m, (n, m)          # 18,747,552 in Phase 1; grows with every pull
+
+
+# ═══ PHASE 3 — the first modules as queries ═══════════════════════════════════
+
+def test_ole_daily_view_computes_from_universe_tables_only():
+    """P3.1: OLE per (workcell, date, shift) from boards × SMH ÷ paid hours."""
+    from modules.universe import views
+    con = views.connect()
+    try:
+        (n,) = con.execute("select count(*) from v_ole_daily where ole is not null").fetchone()
+        assert n >= 200, n
+        (bad,) = con.execute("select count(*) from v_ole_daily where ole < 0").fetchone()
+        assert bad == 0, bad
+        cols = {r[0] for r in con.execute("select column_name from duckdb_columns() where table_name = 'v_ole_daily'").fetchall()}
+        assert {"workcell", "date", "shift", "units", "earned_smh", "paid_hours", "ole", "smh_policy"} <= cols, cols
+    finally:
+        con.close()
+
+
+def test_smh_estimation_policy_explains_the_module_gap():
+    """Case 62, corrected by this very test. The OLE module HAS an estimate switch
+    (OLE_SMH_FALLBACK=avg) but runs with it OFF — its estimated_output_smh is 0.
+    And the estimate is not a safe proxy: under policy = 'estimate' ASP (FORTIVE)
+    lands FURTHER from the module than under 'zero' on every full week (W29:
+    297% vs 52% vs module 45%), because the units without a standard are
+    low-SMH models. So 'zero' stays the default, and the register says why."""
+    import duckdb as _d
+    from modules.universe.pipeline import build
+    rows = build.ole_policy_comparison(workcell="ASP (FORTIVE)", weeks=(29, 30, 31))
+    assert len(rows) == 3, rows
+    worse = [r for r in rows if abs(r["delta_estimate"]) > abs(r["delta_zero"])]
+    assert len(worse) == 3, rows
+    (est,) = _d.connect().execute(
+        "select coalesce(sum(estimated_output_smh), 0) from read_parquet('data/mart/ole/ole_computed.parquet')").fetchone()
+    assert est == 0, f"the module's estimate switch is on ({est} SMH estimated) — the register must say so"
+
+
+def test_model_completion_reconciles_with_the_cycle_time_module():
+    """P3.2: completion per (workcell, model) from fact_route + studies, beside the
+    Cycle Time module's completion_status_v2. Every coverage gap > 10 points carries
+    a computed reason."""
+    assert U.UNIVERSE_MART["completion_reconciliation"].exists(), "completion_reconciliation.parquet not built"
+    # The comparable population is the models the module actually GRADED
+    # (complete + incomplete, ~6.3k). Its 33k not_in_mes rows carry no coverage;
+    # they appear here with a reason, not a number.
+    rows = _q("""select workcell, assembly, coverage_universe, coverage_module, delta, reason
+                 from completion_reconciliation where coverage_module is not null""")
+    assert len(rows) >= 5_000, len(rows)
+    (n_not_in_mes,) = _q("select count(*) from completion_reconciliation where status_module = 'not_in_mes' and reason like 'module: not_in_mes%'")[0]
+    assert n_not_in_mes > 10_000, n_not_in_mes
+    unexplained = [r for r in rows if r[4] is not None and abs(r[4]) > 0.10 and not (r[5] or "").strip()]
+    assert not unexplained, unexplained[:5]
+    (agree,) = _q("select count(*) from completion_reconciliation where abs(delta) <= 0.05")[0]
+    assert agree >= 0.5 * len(rows), f"only {agree} of {len(rows)} within 5 points"
+
+
+def test_authored_seeds_carry_provenance_and_are_marked_authored():
+    """Case 54: some entities must be CREATED, not extracted. Every row says where
+    it came from; every table says it is authored."""
+    for t in ("auth_equipment_capacity", "auth_playbook", "auth_process_group", "auth_trolley_type"):
+        assert U.UNIVERSE_MART[t].exists(), f"{t} not built"
+        (bad,) = _q(f"select count(*) from {t} where provenance is null or provenance = '' or not authored")[0]
+        assert bad == 0, (t, bad)
+        (n,) = _q(f"select count(*) from {t}")[0]
+        assert n > 0, t
+
+
+# ═══ PHASE 4 — the access layer and the exam ══════════════════════════════════
+
+def test_query_tool_is_caged():
+    """v1's cage was right: one SELECT over the views, capped, no way out."""
+    from modules.universe import tools
+    for bad in ("drop table v_workcell", "select 1; select 2", "select * from fact_scan limit 1",
+                "select * from read_parquet('x.parquet')", "select * from dim_workcell",
+                "install httpfs"):
+        r = tools.query(bad)
+        assert r.get("error"), bad
+    # 2026-08-23, Faiz: names are included — every view is reachable, the cage is about
+    # HOW (one SELECT, views only, capped), not about which view.
+    r = tools.query("select name, workcell from v_employee limit 1")
+    assert not r.get("error"), r
+    r = tools.query("select workcell, status from v_workcell order by 1")
+    assert not r.get("error"), r
+    assert r["row_count"] <= tools.MAX_ROWS and r["sql"].lower().rstrip().endswith(f"limit {tools.MAX_ROWS}"), r["sql"]
+    r = tools.query("select count(*) as n from v_workcell")
+    assert r["rows"][0]["n"] == 111, r
+
+
+def test_describe_tool_returns_columns_with_meaning():
+    from modules.universe import tools
+    all_views = tools.describe()
+    assert {v["view"] for v in all_views} >= {"v_workcell", "v_units_out_daily", "v_fpy_daily"}, all_views
+    one = tools.describe("v_workcell")
+    assert one and all(c["comment"] for c in one[0]["columns"]), one
+    assert "v_employee" in {v["view"] for v in all_views}, "nothing is hidden from the model (Faiz, 2026-08-23)"
+
+
+def test_define_tool_finds_the_rules():
+    from modules.universe import tools
+    hits = tools.define("workcell")
+    assert any("customer" in h["text"].lower() for h in hits), hits[:2]
+    hits = tools.define("fiscal year")
+    assert any("september" in h["text"].lower() for h in hits), hits[:2]
+    assert tools.define("zzz-no-such-term") == []
+
+
+def test_mcp_server_registers_the_three_tools():
+    from modules.universe import mcp_server
+    names = {t.name for t in __import__("asyncio").run(mcp_server.mcp.list_tools())}
+    assert names == {"universe_describe", "universe_query", "universe_define"}, names
+
+
+def test_harness_grades_a_stub_model_and_stops_at_the_round_cap():
+    """The loop and the grader are tested on a stub — the real model costs quota."""
+    from modules.universe.eval import run as R, questions as Q
+    calls = {"n": 0}
+
+    def stub(messages, tools_spec):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            import json
+            return {"tool_calls": [{"id": "c1", "function": {"name": "universe_query",
+                                    "arguments": json.dumps({"sql": "select count(*) as n from v_workcell where status = 'active'"})}}]}
+        return {"content": "There are 42 active rows; say which count you mean."}
+
+    rec = R.answer(Q.QUESTIONS[0], stub, max_rounds=8)
+    assert rec["rounds"] == 2 and rec["tool_calls"][0]["name"] == "universe_query", rec
+    assert "42" in rec["answer"]
+    g = R.grade(rec)
+    assert g["passed"] >= 1, g
+
+    def looper(messages, tools_spec):
+        return {"tool_calls": [{"id": "x", "function": {"name": "universe_describe", "arguments": "{}"}}]}
+    rec = R.answer(Q.QUESTIONS[0], looper, max_rounds=3)
+    assert rec["rounds"] == 3 and rec["stopped"] == "round cap", rec
+
+
+# ─── T3 · dim_calendar + dim_shift ───────────────────────────────────────────
+
+def test_fiscal_year_starts_in_september():
+    row = _q("select fiscal_year, fiscal_quarter from dim_calendar where date = date '2026-09-01'")
+    assert row == [(2027, 1)], row
+    row = _q("select fiscal_year, fiscal_quarter from dim_calendar where date = date '2026-08-31'")
+    assert row == [(2026, 4)], row
+
+
+def test_iso_week_53_exists_and_lags_the_calendar_year():
+    row = _q("select iso_year, iso_week from dim_calendar where date = date '2027-01-01'")
+    assert row == [(2026, 53)], row
+
+
+def test_only_shifts_2_and_3_carry_production():
+    rows = _q("select shift, start_time, carries_production from dim_shift order by shift")
+    assert [(s, str(st)[:5], p) for s, st, p in rows] == [
+        (1, "08:00", False), (2, "07:00", True), (3, "19:00", True)], rows
+
+
+def main() -> None:
+    tests = [(n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)]
+    failed = 0
+    for name, fn in tests:
+        try:
+            fn()
+            print(f"PASS {name}")
+        except Exception as e:                     # noqa: BLE001
+            failed += 1
+            print(f"FAIL {name}: {type(e).__name__}: {str(e)[:200]}")
+    print(f"\n{len(tests) - failed}/{len(tests)} passed")
+    if failed:
+        raise SystemExit(1)
+
+
+def test_define_reads_the_metric_glossary():
+    """Pool Q8: formulas come from the note people edit (IE CORE/Metric Glossary), not from memory.
+    The glossary row outranks the skill's one-liner; every row is one passage."""
+    from modules.universe import tools, config as C
+    if not C.GLOSSARY_MD.exists():
+        return                                              # prod 02 has no vault; define falls back to the skill
+    hits = tools.define("OLE")
+    assert hits and hits[0]["source"] == C.GLOSSARY_MD.name, [h["source"] for h in hits[:3]]
+    assert "TPHDirect" in hits[0]["text"] and "v_ole_weekly" in hits[0]["text"], hits[0]["text"][:200]
+    assert all(len(h["text"]) <= 1200 for h in hits)
+    assert tools.define("takt")[0]["text"].startswith("| **TAKT**")
+
+
+# --- Wave 4: the places and the things (2026-08-23) ------------------------------
+
+def test_dim_bay_holds_both_schemes_and_every_bay_the_scans_name():
+    """Case 9: two naming schemes coexist. Both are in dim_bay, unreconciled, and every
+    manufacturing_area the scans carry has a row - so 'where' questions never dead-end."""
+    assert U.UNIVERSE_MART["dim_bay"].exists(), "dim_bay.parquet not built"
+    schemes = dict(_q("select naming_scheme, count(*) from dim_bay group by 1"))
+    assert schemes.get("layout", 0) >= 140 and schemes.get("mes", 0) >= 96, schemes
+    (missing,) = _q("""select count(*) from (select distinct upper(trim(bay_id)) b from fact_scan where bay_id is not null and trim(bay_id) <> '')
+                       where b not in (select upper(trim(name)) from dim_bay where naming_scheme = 'mes')""")[0]
+    assert missing == 0, missing
+    (with_plant,) = _q("select count(*) from dim_bay where naming_scheme = 'mes' and scans > 0 and plant is null")[0]
+    assert with_plant == 0
+
+
+def test_bay_occupancy_carries_its_evidence_and_the_scans_say_where_wabtec_builds():
+    ev = dict(_q("select evidence, count(*) from bay_occupancy group by 1"))
+    assert {"observed_production", "configured_in_mes", "declared_on_layout"} <= set(ev), ev
+    rows = _q("""select f.bay, sum(f.boards) from fact_bay_week f join dim_workcell w using (workcell_id)
+                 where w.name = 'WABTEC' group by 1 order by 2 desc limit 3""")
+    assert rows and rows[0][1] > 1000, rows
+    from modules.universe import views
+    con = views.connect()
+    try:
+        top = con.execute("select bay, boards from v_bay_activity where workcell = 'WABTEC' order by boards desc limit 1").fetchone()
+        assert top and top[1] > 0
+        obs = con.execute("select workcells_observed from v_bay where upper(trim(bay)) = upper(trim(?)) and naming_scheme = 'mes'", [top[0]]).fetchone()[0]
+        assert obs and "WABTEC" in obs, obs
+    finally:
+        con.close()
+
+
+def test_dim_line_keeps_every_line_and_how_many_parse_to_a_bay():
+    (n, parsed) = _q("select count(*), count(*) filter (where parsed) from dim_line")[0]
+    assert n == 230 and parsed == 147, (n, parsed)
+    (no_wc,) = _q("select count(*) from dim_line where workcell_id is null")[0]
+    assert no_wc < n * 0.2, no_wc
+
+
+def test_dim_asset_keeps_lifecycle_and_links_smart_torque_tools_to_workcells():
+    (n, installed, st, st_linked) = _q("""select count(*), count(*) filter (where lifecycle = 'installed'),
+                                              count(*) filter (where is_smart_torque), count(*) filter (where is_smart_torque and workcell_id is not null)
+                                       from dim_asset""")[0]
+    # 1,349 smart-torque tools (case 35); 94% carry a workcell, only ~180 a bay - the location text is the gap
+    assert n == 13943 and installed > 5000 and st == 1349 and st_linked >= 0.9 * st, (n, installed, st, st_linked)
+
+
+def test_equipment_observed_from_scans_is_a_floor_not_the_fleet():
+    (n,) = _q("select count(*) from dim_equipment")[0]
+    assert n >= 3000, n
+    (nulls,) = _q("select count(*) from dim_equipment where last_seen is null or scans = 0")[0]
+    assert nulls == 0
+    top = _q("select name, step from dim_equipment order by scans desc limit 1")[0]
+    assert top[1], top
+
+
+def test_wave4_views_are_commented_and_the_model_sees_everything():
+    """Every wave-4 view exists with a comment on every column, and nothing is hidden from
+    the model any more - Faiz's ruling of 2026-08-23: names included."""
+    from modules.universe import views, tools
+    wanted = ["v_employee", "v_headcount", "v_paid_hours_weekly", "v_department", "v_scan_point",
+              "v_bay", "v_bay_occupancy", "v_bay_activity", "v_line", "v_asset", "v_equipment"]
+    for name in wanted:
+        assert name in views.VIEWS, name
+        sql, comments = views.VIEWS[name]
+        assert name in tools.ALLOWED_VIEWS, f"{name} hidden from the model"
+        cols = [c for c, _t, _cm in views.describe(name)]
+        missing = [c for c in cols if not comments.get(c)]
+        assert not missing, (name, missing)
+    con = views.connect()
+    try:
+        (people,) = con.execute("select sum(people) from v_headcount").fetchone()
+        (emp,) = con.execute("select count(*) from v_employee").fetchone()
+        assert people == emp > 10000, (people, emp)
+        (wk,) = con.execute("select count(*) from v_paid_hours_weekly where paid_hours > 0").fetchone()
+        assert wk > 100
+        r = tools.query("select workcell, bay, boards from v_bay_activity where workcell = 'KEYSIGHT' order by boards desc limit 3", 5)
+        assert r.get("row_count") == 3, r
+    finally:
+        con.close()
+
+
+def test_describe_without_a_name_is_an_index_that_fits_the_tool_budget():
+    """21 views with every column was 4.4k chars — past the 3.5k tool-result cap, and the
+    newest views were the ones cut off. Without a name: every view listed, purposes only."""
+    from modules.universe import tools
+    from modules.universe.chat import loop
+    text = tools.describe_compact(None)
+    assert len(text) <= loop.TOOL_RESULT_CHARS, len(text)
+    assert all(v in text for v in tools.ALLOWED_VIEWS)
+    assert "columns:" not in text
+    one = tools.describe_compact("v_bay_activity")
+    assert "boards" in one and "where does X build" in one.lower() or "bay" in one.lower()
+
+
+def test_equipment_labels_are_not_machines():
+    """MES writes the step name, or nothing, in the equipment field when no machine is
+    scanned. The busiest 'machine' must be a machine, not a blank."""
+    rows = _q("select name, is_machine from dim_equipment order by boards desc limit 3")
+    assert all(not m for n, m in rows if not n.strip() or n.upper() in ("PACKOUT", "FNI")), rows
+    (top,) = _q("select name from dim_equipment where is_machine order by boards desc limit 1")[0]
+    assert top.strip() and top.upper() not in ("PACKOUT", "FNI"), top
+    (labels, machines) = _q("select count(*) filter (where not is_machine), count(*) filter (where is_machine) from dim_equipment")[0]
+    assert machines > 2000 and labels > 0, (labels, machines)
+
+
+# ─── The free-model chain ────────────────────────────────────────────────────
+
+def test_chain_walks_top_down_waits_short_cooldowns_and_reads_retry_hints():
+    """Start from the top, skip cooling slots, wait when the soonest cooldown is short,
+    and read the wait from what the provider said (header, 'try again in', 'per day')."""
+    import time
+    import httpx
+    from modules.universe.eval import chain
+    # 1. retry hints
+    def resp(status, text, headers=None):
+        return httpx.Response(status, text=text, headers=headers or {}, request=httpx.Request("POST", "http://x"))
+    assert chain._retry_seconds(resp(429, "try again in 12.5s")) == 12.5
+    assert chain._retry_seconds(resp(429, "slow", {"retry-after": "7"})) == 7.0
+    assert chain._retry_seconds(resp(429, "Rate limit reached ... tokens per day (TPD)")) > 600   # until midnight UTC
+    assert chain._retry_seconds(resp(429, "nothing useful")) == 60.0
+    # 2. the walk, with fake slots and a fake call
+    a, b = chain.Slot("a", "http://a", None, "m-a"), chain.Slot("b", "http://b", None, "m-b")
+    served, calls = [], {"n": 0}
+    def fake_call(slot, messages, tools_spec, tool_choice, max_tokens, temperature):
+        calls["n"] += 1
+        if slot.name == "a" and calls["n"] == 1:
+            raise chain.RateLimited(0.2, "a: try again in 0.2s")    # a cools briefly, b takes it
+        if slot.name == "b" and calls["n"] == 3:
+            raise chain.RateLimited(0.2, "b too")                  # both cooling -> wait, a is back
+        return {"content": slot.name, "tool_calls": None, "usage": {}, "slot": slot.name}
+    old_slots, old_call = chain.SLOTS, chain._call
+    chain.SLOTS, chain._call = [a, b], fake_call
+    try:
+        chain.trace.clear()
+        served.append(chain.chat([{"role": "user", "content": "hi"}])["slot"])   # a 429 -> b
+        time.sleep(0.3)
+        served.append(chain.chat([{"role": "user", "content": "hi"}])["slot"])   # a back -> a
+        served.append(chain.chat([{"role": "user", "content": "hi"}])["slot"])   # a, b both cool briefly -> waits -> a
+        assert served == ["b", "a", "a"], served
+        assert chain.take_trace() == ["b", "a", "a"]
+        a.blocked_until = b.blocked_until = time.time() + chain.MAX_WAIT_S + 10   # an outage, not a minute limit
+        try:
+            chain.chat([{"role": "user", "content": "hi"}])
+            assert False, "should have raised"
+        except RuntimeError as e:
+            assert "cooling" in str(e)
+    finally:
+        chain.SLOTS, chain._call = old_slots, old_call
+
+
+if __name__ == "__main__":
+    main()

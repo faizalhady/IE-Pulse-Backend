@@ -235,6 +235,28 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_process_decision_wc
                 ON process_decision (workcell);
+
+            -- The chat client (modules/universe/chat): saved chats per user, messages with
+            -- their UIMessage parts so a reopened chat renders as it streamed, feedback.
+            CREATE TABLE IF NOT EXISTS chat_thread (
+                id          TEXT PRIMARY KEY,
+                ntid        TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_chat_thread_ntid ON chat_thread (ntid, updated_at);
+            CREATE TABLE IF NOT EXISTS chat_message (
+                id              TEXT PRIMARY KEY,
+                thread_id       TEXT NOT NULL REFERENCES chat_thread(id) ON DELETE CASCADE,
+                role            TEXT NOT NULL,
+                parts           TEXT NOT NULL,           -- JSON: AI SDK UIMessage parts
+                model           TEXT,
+                created_at      TEXT NOT NULL,
+                feedback        INTEGER,                 -- 1 up, -1 down, NULL none
+                feedback_reason TEXT
+            );
+            CREATE INDEX IF NOT EXISTS ix_chat_message_thread ON chat_message (thread_id, created_at);
         """)
     _migrate_saved_reports()
 

@@ -1,0 +1,42 @@
+{
+ "id": 9,
+ "question": "what do you think: project the upcoming 3 weeks of demand and output for workcells KEYSIGHT, BECKMAN COULTER and COLLINS",
+ "tool_calls": [],
+ "sqls": [],
+ "rounds": 1,
+ "stopped": "error: HTTP 429: {\"error\":{\"message\":\"Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01m0fg9m4aem0ag4ry4ex8xtrb` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198832, Requested 1388. Please try again in 1m35.04s. Need more tokens? Upgrade to Dev Tier today at",
+ "answer": "",
+ "usage": {
+  "prompt_tokens": 0,
+  "completion_tokens": 0
+ },
+ "started": "2026-08-22T18:56:45",
+ "elapsed_s": 18.2,
+ "model": "openai/gpt-oss-120b",
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": false
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "read v_demand",
+    "passed": false
+   },
+   {
+    "name": "read output history",
+    "passed": false
+   },
+   {
+    "name": "says it is a projection with a caveat",
+    "passed": false
+   }
+  ],
+  "passed": 1,
+  "total": 5
+ }
+}
