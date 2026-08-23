@@ -217,3 +217,29 @@ MES_WEBAPI_KEY=…   UNIVERSE_CHAT_USERS=…   the four chain keys
 
 Tests: `python tests/test_universe_refresh.py` (5 — the day range, the skip, the failure path, full mode, the overridable paths).
 
+## Deployed to 02 (2026-08-24)
+
+CORE build only — `:8888`. The dedicated app builds carry no AI code (`Ask` chunks: CORE 3, others 0).
+
+```
+ssh mypenm0iesvr02                       # passwordless; use it for commands, not SMB
+D:\Application\IE-Pulse\BACKEND         # code (backup: BACKEND-CODE-BAK-20260824_ask)
+  data\mart\universe                    # 740 MB — the tables the chat queries
+  data\raw\universe\registry            # 7.31 GB — only the daily rebuild needs it
+  data\knowledge\jabil-universe          # the skill; + "Metric Glossary.md"
+CORE\dist-main                          # the frontend (backup: dist-main-bak-20260824)
+```
+
+`.env` on 02 gained: `UNIVERSE_CHAT_USERS`, `UNIVERSE_REGISTRY_DIR`, `UNIVERSE_SKILL_DIR`,
+`UNIVERSE_GLOSSARY_MD`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `CEREBRAS_API_KEY`,
+`MISTRAL_API_KEY`, `CHAT_API_KEY`. `httpx` installed into the venv. **`PULSE_DEV_NTID` must never
+be set on 02** — it is the dev sign-in bypass.
+
+nginx `ie-pulse.conf`: `location /ietools/ask/api/ → 127.0.0.1:9007/api/` inside the **:8888 server
+block only**, with `proxy_buffering off` and `proxy_read_timeout 300s` (the answer is streamed).
+Backup: `ie-pulse.conf.bak-20260824-ask`.
+
+⚠️ **Writing UNC paths**: a `\\server\share` path typed inline in a bash→PowerShell command loses its
+leading backslash and silently writes to a LOCAL folder (`C:\mypenm0iesvr02\…`). Put UNC paths in a
+`.ps1` file, or use ssh/scp. Always check robocopy's `Dest :` line in the log.
+
