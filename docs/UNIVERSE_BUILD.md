@@ -191,3 +191,29 @@ Cases added: 73 (four bays only the scans know; "where" has two honest answers),
 - The grader grounds identifiers (`grounded_identifiers`) and the loop's last round forbids filling a table from memory (case 75).
 - Atlas and question pool updated with what wave 4 unblocked.
 
+## The daily job (2026-08-23)
+
+`python -m modules.universe.pipeline.refresh` with no arguments = `run("incremental")`:
+
+1. **pull** every UTC day after the newest `wipscan_*.csv` up to yesterday (hourly windows, `hh:00:00 → hh:59:59`; one CSV per day, resumable)
+2. **pull-paid-hours** — copy new payroll files from the share as UTF-8
+3. **build_all** — every table and view rebuilt from the sources (~15 min)
+
+Never raises: the outcome is written to `data/mart/universe/refresh_state.json` and shown by
+`GET /api/universe/health` (`last_refresh`). `POST /api/universe/refresh?mode=incremental|full`
+(admin) runs it in the background. `run full` = rebuild only.
+
+First real run, 2026-08-23: ✅ 1 day pulled, 1 payroll files, 254.3 s.
+
+**On 02** (`scripts/setup_scheduled_tasks.ps1` registers `IEPulse-Universe-Refresh` at **04:00**, after
+the OLE and Cycle Time tasks) the server needs, in `.env`:
+
+```
+UNIVERSE_REGISTRY_DIR=D:\Application\IE-Pulse\BACKEND\data\raw\universe\registry   # a copy of docs\registry incl. wipscan\ and paid_hours_raw\ (~4 GB once; then it grows by itself)
+UNIVERSE_SKILL_DIR=D:\Application\IE-Pulse\BACKEND\data\knowledge\jabil-universe      # a copy of the skill folder (rules, traps, vocabulary) for define()
+UNIVERSE_GLOSSARY_MD=D:\Application\IE-Pulse\BACKEND\data\knowledge\Metric Glossary.md  # a copy of the vault note — re-copy when it changes
+MES_WEBAPI_KEY=…   UNIVERSE_CHAT_USERS=…   the four chain keys
+```
+
+Tests: `python tests/test_universe_refresh.py` (5 — the day range, the skip, the failure path, full mode, the overridable paths).
+

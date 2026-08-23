@@ -8,6 +8,7 @@
     IEPulse-OLE-Ingest-PaidHours    10:45  - 5 min after paid-hours upload (10:40)
     IEPulse-OLE-Ingest-Production   13:05  - 5 min after production upload (13:00)
     IEPulse-CycleTime-Ingest        02:00  - overnight incremental IEDB refresh
+    IEPulse-Universe-Refresh        04:00  - Jabil Universe: MES scans + payroll -> rebuild all
 
   OLE tasks read BOTH sources (paid_hours + production). The state file +
   date-stitching make it safe to run twice a day:
@@ -120,6 +121,18 @@ Register-PipelineTask `
     -Argument "-m modules.cycle_time.pipeline.refresh" `
     -Description "Daily Cycle Time incremental refresh (IEDB -> raw.parquet + transform/assembly_summary/eBuild runner)." `
     -TimeLimitMinutes 240
+
+# -- Universe ----------------------------------------------------------------
+# The Jabil Universe: new MES days (hourly windows, cases 42/70), new payroll files from
+# the share, then every table rebuilt from its sources (~15 min). After the OLE and Cycle
+# Time tasks, so the marts it reconciles against are fresh. Needs UNIVERSE_REGISTRY_DIR in
+# .env on 02 (see docs/UNIVERSE_BUILD.md).
+Register-PipelineTask `
+    -Name "IEPulse-Universe-Refresh" `
+    -Time "04:00" `
+    -Argument "-m modules.universe.pipeline.refresh" `
+    -Description "Daily Jabil Universe refresh (MES scans + payroll -> rebuild all tables and views)." `
+    -TimeLimitMinutes 120
 
 Write-Host ""
 Write-Host "Done. Useful commands:"

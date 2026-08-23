@@ -10,9 +10,12 @@ views; nothing above this layer reads the parquet directly.
 from __future__ import annotations
 
 import duckdb
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks, Depends
+
+from core.auth import require_level
 
 from modules.universe.config import UNIVERSE_MART
+from modules.universe.pipeline import refresh as R
 
 router = APIRouter(prefix="/api/universe", tags=["universe"])
 
@@ -30,4 +33,11 @@ def universe_health():
                 tables[name] = {"rows": 0, "path": str(path), "missing": True}
     finally:
         con.close()
-    return {"ok": all(not t.get("missing") for t in tables.values()), "tables": tables}
+    return {"ok": all(not t.get("missing") for t in tables.values()), "tables": tables, "last_refresh": R.last_state()}
+
+
+@router.post("/refresh", dependencies=[Depends(require_level("admin"))])
+def universe_refresh(background: BackgroundTasks, mode: str = "incremental"):
+    """Run the daily job now (same as the scheduled task). Returns at once; /health shows the outcome."""
+    background.add_task(R.run, mode)
+    return {"status": "started", "mode": mode}

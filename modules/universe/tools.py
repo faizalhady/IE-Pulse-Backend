@@ -17,6 +17,7 @@ THE CAGE (carried from chat v1 — the part that was right)
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from pathlib import Path
@@ -32,7 +33,8 @@ HIDDEN_VIEWS: set[str] = set()          # 2026-08-23, Faiz: names included - not
 ALLOWED_VIEWS = tuple(v for v in V.VIEWS if v not in HIDDEN_VIEWS)
 from modules.universe import config as C
 
-SKILL_DIR = Path.home() / ".claude" / "skills" / "jabil-universe"
+# the rules / traps / vocabulary define() quotes. On 02 set UNIVERSE_SKILL_DIR to a copy of the skill folder.
+SKILL_DIR = Path(os.getenv("UNIVERSE_SKILL_DIR") or (Path.home() / ".claude" / "skills" / "jabil-universe"))
 
 _FORBIDDEN = re.compile(
     r"\b(insert|update|delete|drop|create|alter|attach|detach|copy|pragma|install|load|export|"

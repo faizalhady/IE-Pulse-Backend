@@ -9,6 +9,8 @@ hourly-pull CSVs already on disk: rebuilding from them must reproduce Phase 1's
 fact_scan to the row. The PULL half (MES over HTTPS, hourly windows — case 42)
 needs the plant network (ported from HUB/MES pull-wipscan.ts, 2026-08-23).
 
+    python -m modules.universe.pipeline.refresh                 # THE DAILY JOB: run('incremental') — new days, new payroll files, rebuild all
+    python -m modules.universe.pipeline.refresh run full        # rebuild only
     python -m modules.universe.pipeline.refresh pull 2026-08-08 2026-08-22 [--force]   # UTC days [start, end) -> one CSV each
     python -m modules.universe.pipeline.refresh pull-paid-hours                        # copy new payroll files from the share, as UTF-8
     python -m modules.universe.pipeline.refresh count      # rows the raw CSVs hold, deduped
@@ -22,11 +24,12 @@ rejects hh:59:59.999 as 'more than 1 hour apart'.
 from __future__ import annotations
 
 import csv
+import json
 import logging
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -227,9 +230,72 @@ def pull(start: date, end: date, force: bool = False, workers: int = 4) -> list[
     return out
 
 
+STATE_NAME = "refresh_state.json"
+
+
+def state_path() -> Path:
+    return C.UNIVERSE_MART_DIR / STATE_NAME
+
+
+def last_state() -> dict | None:
+    p = state_path()
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+
+
+def newest_raw_day() -> date | None:
+    days = [f.stem.split("_", 1)[1] for f in raw_files() if f.stem.startswith("wipscan_")]
+    try:
+        return max(date.fromisoformat(d) for d in days) if days else None
+    except ValueError:
+        return None
+
+
+def run(mode: str = "incremental") -> bool:
+    """THE ENTRY POINT — the daily job (scripts/setup_scheduled_tasks.ps1) and POST /api/universe/refresh.
+
+      incremental  pull every UTC day after the newest raw CSV up to yesterday, copy new payroll
+                   files from the share, rebuild every table (build_all reads the raw pulls)
+      full         rebuild only — nothing pulled
+
+    Never raises: the outcome lands in <mart>/refresh_state.json, which /api/universe/health shows."""
+    from modules.universe.pipeline import build
+    t0 = time.time()
+    state = {"mode": mode, "started": datetime.now().isoformat(timespec="seconds"), "ok": False,
+             "days_pulled": 0, "paid_hours_files": 0, "tables": {}, "error": None}
+    try:
+        if mode == "incremental":
+            today = datetime.now(timezone.utc).date()
+            last = newest_raw_day()
+            start = (last + timedelta(days=1)) if last else today - timedelta(days=1)
+            if start < today:
+                pull(start, today)
+                state["days_pulled"] = (today - start).days
+            state["paid_hours_files"] = len(pull_paid_hours())
+        elif mode != "full":
+            raise ValueError(f"unknown mode {mode!r}")
+        state["tables"] = build.build_all()
+        state["ok"] = True
+        log.info("universe refresh (%s): %d days pulled, %d payroll files, %d tables", mode, state["days_pulled"], state["paid_hours_files"], len(state["tables"]))
+    except Exception as e:                          # noqa: BLE001 — the task must report, not die
+        state["error"] = f"{type(e).__name__}: {str(e)[:500]}"
+        log.exception("universe refresh failed")
+    state["finished"] = datetime.now().isoformat(timespec="seconds")
+    state["elapsed_s"] = round(time.time() - t0, 1)
+    C.UNIVERSE_MART_DIR.mkdir(parents=True, exist_ok=True)
+    state_path().write_text(json.dumps(state, indent=1, default=str), encoding="utf-8")
+    return state["ok"]
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "count"
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if cmd == "run":                                  # the scheduled task: no arguments
+        sys.exit(0 if run(sys.argv[2] if len(sys.argv) > 2 else "incremental") else 1)
     if cmd == "count":
         print(count_from_raw())
     elif cmd == "append":

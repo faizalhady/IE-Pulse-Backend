@@ -18,7 +18,10 @@ load_dotenv(PROJECT_ROOT / ".env")     # MES_WEBAPI_KEY — the same file every 
 # ─── Sources ──────────────────────────────────────────────────────────────────
 # The August draft registry — one-off generator scripts and their outputs. Read
 # only; the universe is the tested copy, the registry is the evidence.
-REGISTRY_DIR = Path(r"C:\Users\4033375\Projects\docs\registry")
+import os as _os
+# The August draft registry + the raw pulls that accumulate beside it (wipscan/, paid_hours_raw/).
+# On 02 set UNIVERSE_REGISTRY_DIR (e.g. D:\Application\IE-Pulse\BACKEND\data\raw\universe\registry) — see docs/UNIVERSE_BUILD.md.
+REGISTRY_DIR = Path(_os.getenv("UNIVERSE_REGISTRY_DIR", r"C:\Users\4033375\Projects\docs\registry"))
 
 # Faiz's sheet, 2026-08-06: left block = REGION (Penang Island vs Batu Kawan),
 # right block = PLANT (P1 / P2 / BK). Confirmed not to be in conflict.
