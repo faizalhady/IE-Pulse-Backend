@@ -9,6 +9,7 @@ To add a new module:
   2. Import + include_router below
 """
 
+import os
 import sys
 import threading
 import time
@@ -81,6 +82,9 @@ app.include_router(ppqt_router)
 app.include_router(ppqt_legacy_router)
 app.include_router(universe_router)
 app.include_router(universe_chat_router)
+if os.getenv("PULSE_DEV_NTID"):                       # dev laptops only — never set on 02 (api/routers/dev_auth.py)
+    from api.routers.dev_auth import router as dev_auth_router
+    app.include_router(dev_auth_router)
 app.include_router(lbr_router)
 app.include_router(ipk_router)
 app.include_router(ebuild_router)

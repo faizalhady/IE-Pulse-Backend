@@ -332,6 +332,30 @@ def test_grader_catches_invented_identifiers_not_only_numbers():
     assert ("identifiers grounded in tool results", Q.grounded_identifiers) in Q.GENERIC_CHECKS
 
 
+# ─── dev sign-in: a token for localhost when AD_GET is unreachable ──────────
+
+def test_dev_token_endpoint_exists_only_with_the_env_and_only_for_localhost():
+    """Off the Jabil network, AD_GET does not resolve and every call is a 401. In dev the
+    backend mints the token itself — only when PULSE_DEV_NTID is set (never on 02) and
+    only for a loopback caller; the token verifies like AD_GET's own."""
+    import os
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from core.auth import verified_ntid
+    import api.routers.dev_auth as dev
+    os.environ.pop("PULSE_DEV_NTID", None)
+    os.environ.setdefault("PULSE_JWT_SECRET", "test-secret-not-for-prod")   # the app loads .env; the test process does not
+    app = FastAPI(); app.include_router(dev.router)
+    assert TestClient(app).get("/api/dev/token").status_code == 404          # not configured -> as if absent
+    os.environ["PULSE_DEV_NTID"] = "4033375"
+    r = TestClient(app).get("/api/dev/token")                                # testclient is loopback
+    assert r.status_code == 200 and r.json()["ntid"] == "4033375" and r.json()["token"], r.text
+    assert verified_ntid("Bearer " + r.json()["token"]) == "4033375"
+    r = TestClient(app, base_url="http://testserver").get("/api/dev/token", headers={"X-Forwarded-For": "10.1.2.3"})
+    assert r.status_code == 200                                              # the header is not trusted; the socket is
+    os.environ.pop("PULSE_DEV_NTID", None)
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

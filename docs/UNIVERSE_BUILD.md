@@ -157,7 +157,7 @@ api/routers/universe_chat.py   POST /api/universe/chat (stream) · GET/PATCH/DEL
 ```
 
 - **Pilot gate:** `UNIVERSE_CHAT_USERS=4033375,…` in `.env` (NTIDs, comma list). Everyone else gets 403.
-- **Dev:** `python -m uvicorn api.main:app --port 8000`; the frontend (`npm run dev`, `http://localhost:3001/ietools/ask`) proxies `/ietools/ask/api` here. When AD_GET cannot mint a token from localhost, set `localStorage.pulse_dev_token` to a JWT signed with `PULSE_JWT_SECRET` (`sub` = NTID, `iss` = ad-get) — a DEV-only override in `useCurrentUser.ts`.
+- **Dev:** `python -m uvicorn api.main:app --port 8000`; the frontend (`npm run dev`, `http://localhost:3001/ietools/ask`) proxies `/ietools/ask/api` here. Off the Jabil network AD_GET does not resolve; set `PULSE_DEV_NTID=<your NTID>` in `.env` and the backend serves `GET /api/dev/token` (loopback only, `api/routers/dev_auth.py`) — the DEV frontend falls back to it after one failed login and caches the failure for a minute, so the dev tools stay clean. Never set it on 02.
 - **Tests:** `python tests/test_universe_chat.py` (17). Frontend: `npx vitest run src/test/askChat.test.tsx` (5).
 - The answer ends with a `data-model` part ("chain: gemini-3.7-flash -> groq-gpt-oss-120b") — the page shows "answered by <last slot>" beside the thumbs; every tool step of an answer folds into one accordion.
 - Design: `docs/superpowers/specs/2026-08-23-universe-chat-design.md`.
