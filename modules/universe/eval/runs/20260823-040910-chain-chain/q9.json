@@ -93,9 +93,6 @@
   "groq-qwen3.6-27b",
   "groq-gpt-oss-20b"
  ],
- "notes": [
-  "all numbers grounded"
- ],
  "grade": {
   "checks": [
    {
@@ -104,6 +101,10 @@
    },
    {
     "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "identifiers grounded in tool results",
     "passed": true
    },
    {
@@ -119,7 +120,11 @@
     "passed": false
    }
   ],
-  "passed": 4,
-  "total": 5
- }
+  "passed": 5,
+  "total": 6
+ },
+ "notes": [
+  "all numbers grounded",
+  "all identifiers grounded"
+ ]
 }

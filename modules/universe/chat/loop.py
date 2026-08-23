@@ -116,7 +116,7 @@ def run(history: list[dict], model_fn: Callable, max_rounds: int = 8) -> Iterato
         _trim(messages)
         last = rnd == max_rounds - 1
         if last:
-            messages.append({"role": "user", "content": "Your tool budget is used up. Write the final answer now from the results above. Do not call any tool."})
+            messages.append({"role": "user", "content": "Your tool budget is used up. Write the final answer now from the results above. Do not call any tool. If something was never fetched, say so in one line — never fill a table or a list from memory."})
         try:
             # the last round keeps the tool schema (some models emit a call anyway and
             # the API rejects a call with no schema) but forbids choosing one

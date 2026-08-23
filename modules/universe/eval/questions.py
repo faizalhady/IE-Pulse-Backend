@@ -57,7 +57,7 @@ def grounded_numbers(rec) -> bool:
         v = int(n)
         return n.endswith("0") and any(abs(v - int(t)) <= 0.1 * int(t) for t in tool_nums if t.isdigit())
     # a ratio of two tool numbers (101,559 s ÷ 5 units = 20,312 s/unit) is arithmetic, not invention
-    ints = sorted({int(t) for t in tool_nums if t.isdigit()} | {int(t) for t in re.findall(r"\d{1,2}", blob)})
+    ints = sorted({int(t) for t in tool_nums if t.isdigit()} | {int(t) for t in re.findall(r"\b\d{1,2}\b", blob)})
     def ratio_hit(n: str) -> bool:
         v = int(n)
         return any(b and abs(a / b - v) <= max(1.0, 0.005 * v) for a in ints if a >= v for b in ints if 0 < b <= a // max(v, 1) + 1)
@@ -115,4 +115,29 @@ QUESTIONS = [
                 ("says it is a projection with a caveat", lambda r: _mentions(r, "assum", "caveat", "only", "limited", "13-week", "planner", "projection", "estimate"))]},
 ]
 
-GENERIC_CHECKS = [("answered", answered), ("numbers grounded in tool results", grounded_numbers)]
+def grounded_identifiers(rec) -> bool:
+    """Every identifier-looking token in the answer (L-K1, SCAN_IN, ST_7, 75014-66403EV3 — letters
+    and digits or underscores together) appears in some tool result. Run 184304 Q4 passed every
+    number check with a route table it never fetched: the names were invented, the one number
+    was real. Names are grounded too."""
+    text = rec["answer"].replace("‑", "-").replace("–", "-")
+    toks = set(re.findall(r"\b(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z_])[A-Za-z0-9][A-Za-z0-9_-]{2,}\b", text))
+    toks |= set(re.findall(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b", text))          # SCAN_IN, ST_7
+    # view and column names are vocabulary the model may use freely
+    prose = re.compile(r"^\d+[a-z]{1,3}$"                                   # 200s, 15kb
+                       r"|^(?:week|wk|w|q|fy|day|d|line|step|bay|p|plant|shift|v)-?\d+$"  # week-34, W33, P1, shift-2
+                       r"|^[a-z]+-\d+$"                                      # low-15, top-5 (prose, lowercase)
+                       r"|^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)-?\d+$", re.I)
+    toks = {t for t in toks if not t.lower().startswith("v_") and not re.fullmatch(r"\d{4}-\d{2}(-\d{2})?", t)
+            and not prose.match(t)}
+    if not toks:
+        return True
+    blob = (" ".join(str(c.get("result_text", "")) for c in rec["tool_calls"]) + " "
+            + " ".join(str(c.get("args", "")) for c in rec["tool_calls"])).replace("‑", "-").lower()
+    missing = sorted(t for t in toks if t.lower() not in blob)
+    rec.setdefault("notes", []).append(f"identifiers not found in tool results: {missing}" if missing else "all identifiers grounded")
+    return not missing
+
+
+GENERIC_CHECKS = [("answered", answered), ("numbers grounded in tool results", grounded_numbers),
+                  ("identifiers grounded in tool results", grounded_identifiers)]

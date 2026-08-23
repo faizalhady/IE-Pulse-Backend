@@ -120,9 +120,6 @@
   "gemini-3.5-flash-lite",
   "gemini-3.5-flash-lite"
  ],
- "notes": [
-  "all numbers grounded"
- ],
  "grade": {
   "checks": [
    {
@@ -131,6 +128,10 @@
    },
    {
     "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "identifiers grounded in tool results",
     "passed": true
    },
    {
@@ -146,7 +147,10 @@
     "passed": true
    }
   ],
-  "passed": 5,
-  "total": 5
- }
+  "passed": 6,
+  "total": 6
+ },
+ "notes": [
+  "all numbers grounded"
+ ]
 }

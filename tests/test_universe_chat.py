@@ -317,6 +317,21 @@ def test_router_models_panel_lists_every_slot():
     assert _client("stranger").get("/api/universe/chat/models").status_code == 403
 
 
+def test_grader_catches_invented_identifiers_not_only_numbers():
+    """Run 20260823-184304, Q4: a route table with line 'L-K1' and stations 'SCAN_…' that no
+    tool result held passed every check because its one number was real. Names are grounded too."""
+    from modules.universe.eval import questions as Q
+    rec = {"answer": "Route for 75014-66403EV3 on line L-K1: step 1 SCAN_IN at station ST_7 then PACKOUT.",
+           "tool_calls": [{"name": "universe_query", "args": {"sql": "select assembly, step from v_route"},
+                           "result_text": '{"rows":[{"assembly":"75014-66403EV3","step":"PACKOUT","line_id":"1"}]}'}],
+           "stopped": "answered"}
+    assert Q.grounded_identifiers(rec) is False
+    assert "L-K1" in rec["notes"][-1] and "SCAN_IN" in rec["notes"][-1], rec["notes"]
+    ok = {"answer": "Route for 75014-66403EV3: PACKOUT on line 1.", "tool_calls": rec["tool_calls"], "stopped": "answered"}
+    assert Q.grounded_identifiers(ok) is True
+    assert ("identifiers grounded in tool results", Q.grounded_identifiers) in Q.GENERIC_CHECKS
+
+
 def main() -> int:
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

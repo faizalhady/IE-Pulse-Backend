@@ -103,6 +103,10 @@
     "passed": true
    },
    {
+    "name": "identifiers grounded in tool results",
+    "passed": true
+   },
+   {
     "name": "read demand",
     "passed": true
    },
@@ -115,8 +119,8 @@
     "passed": true
    }
   ],
-  "passed": 4,
-  "total": 5
+  "passed": 5,
+  "total": 6
  },
  "notes": [
   "all numbers grounded"

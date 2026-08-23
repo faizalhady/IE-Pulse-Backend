@@ -1,0 +1,97 @@
+{
+ "id": 7,
+ "question": "what can we do to improve our yield",
+ "tool_calls": [
+  {
+   "name": "universe_define",
+   "args": {
+    "term": "yield"
+   },
+   "ok": true,
+   "result_text": "[{\"source\":\"Metric Glossary.md\",\"text\":\"| **FPY** \\u2014 First Pass Yield | FPY = boards passed \\u00f7 boards tested at a test step, first loop only | `v_fpy_daily.fpy` \\u00b7 `boards_passed` \\u00b7 `boards_tested` per (workcell, assembly, step, date) | An F at SCRAP, BIRTH, RTC, MRB, RTV is a disposition, not a test (case 67). A test step is one that passes boards sometimes. Loop 1 only \\u2014 rework is a different question | case 48, case 67 |\"},{\"source\":\"vocabulary.md\",\"text\":\"| **FPY** | First-pass yield = P \\u00f7 (P + F) at test steps, loop 1 | `TestStatus` on the scan |\"}]",
+   "rows": null
+  },
+  {
+   "name": "universe_describe",
+   "args": {
+    "view": "v_fpy_daily"
+   },
+   "ok": true,
+   "result_text": "v_fpy_daily\n  workcell (VARCHAR): Workcell = customer.\n  workcell_id (BIGINT): Join key to v_workcell.\n  assembly (VARCHAR): Part number = model = assembly.\n  model_id (BIGINT): Join key to dim_model.\n  step (VARCHAR): The MES test step (ICT, FVT \u2026) where the result was recorded. Only steps that pass boards count as test steps \u2014 SCRAP, RTC and BIRTH are dispositions, never tests.\n  date (DATE): Local date of the test scan.\n  boards_passed (BIGINT): Distinct boards whose FIRST test at this step passed.\n  boards_tested (BIGINT): Distinct boards tested at this step, first loop only (test_loop = 1). Retests are excluded \u2014 FPY is first pass.\n  fpy (DOUBLE): First-pass yield = boards_passed \u00f7 boards_tested. 'A' (aborted) results are excluded from both.",
+   "rows": null
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT workcell, AVG(fpy) AS avg_fpy FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-22' GROUP BY workcell ORDER BY avg_fpy ASC LIMIT 10"
+   },
+   "ok": true,
+   "result_text": "{\"columns\":[\"workcell\",\"avg_fpy\"],\"rows\":[{\"workcell\":\"ELENION TECHNOLOGIES\",\"avg_fpy\":0.8571428571428571},{\"workcell\":\"GOPRO\",\"avg_fpy\":0.894949193548387},{\"workcell\":\"LIFE360\",\"avg_fpy\":0.9465942731277533},{\"workcell\":\"Nokia Optics\",\"avg_fpy\":0.9492316875871688},{\"workcell\":\"INFINERA\",\"avg_fpy\":0.954477767796991},{\"workcell\":\"BEDFORD\",\"avg_fpy\":0.9576148148148148},{\"workcell\":\"ARISTA NETWORKS\",\"avg_fpy\":0.9576810658987915},{\"workcell\":\"INTEL OPTICS\",\"avg_fpy\":0.9577165158371038},{\"workcell\":\"TED\",\"avg_fpy\":0.9609769574944071},{\"workcell\":\"LAM RESEARCH\",\"avg_fpy\":0.9618752491611157}],\"row_count\":10,\"truncated\":false,\"sql\":\"select * from (SELECT workcell, AVG(fpy) AS avg_fpy FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-22' GROUP BY workcell ORDER BY avg_fpy ASC LIMIT 10) as q limit 40\"}",
+   "rows": 10
+  },
+  {
+   "name": "universe_query",
+   "args": {
+    "sql": "SELECT AVG(fpy) AS overall_fpy FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-22'"
+   },
+   "ok": true,
+   "result_text": "{\"columns\":[\"overall_fpy\"],\"rows\":[{\"overall_fpy\":0.9707394818441447}],\"row_count\":1,\"truncated\":false,\"sql\":\"select * from (SELECT AVG(fpy) AS overall_fpy FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-22') as q limit 40\"}",
+   "rows": 1
+  }
+ ],
+ "sqls": [
+  "select * from (SELECT workcell, AVG(fpy) AS avg_fpy FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-22' GROUP BY workcell ORDER BY avg_fpy ASC LIMIT 10) as q limit 40",
+  "select * from (SELECT AVG(fpy) AS overall_fpy FROM v_fpy_daily WHERE date BETWEEN '2026-07-09' AND '2026-08-22') as q limit 40"
+ ],
+ "rounds": 5,
+ "stopped": "answered",
+ "answer": "**Overall First\u2011Pass Yield (FPY)\u202f\u2248\u202f97.1\u202f%** for the period\u202f9\u202fJul\u202f\u2013\u202f22\u202fAug\u202f2026 (average across all workcells).\n\n**Workcells with the lowest average FPY**\n\n| Workcell                | Avg\u202fFPY |\n|------------------------|--------|\n| ELENION\u202fTECHNOLOGIES   | 85.7\u202f% |\n| GOPRO                  | 89.5\u202f% |\n| LIFE360                | 94.7\u202f% |\n| Nokia\u202fOptics           | 94.9\u202f% |\n| INFINERA               | 95.4\u202f% |\n\n**Actionable levers to lift yield**\n\n| Lever | Why it matters | Typical steps |\n|------|----------------|---------------|\n| **Target low\u2011performing workcells** | They pull the plant average down (e.g., ELENION at\u202f85\u202f%). | \u2022 Run a detailed FPY root\u2011cause analysis (defect types, test step failures).<br>\u2022 Verify test equipment calibration and MES scan delta times for those cells.<br>\u2022 Align standard cycle\u2011time study (v_cycle_time) with actual scan\u2011based elapsed times to spot bottlenecks. |\n| **Standard\u2011time alignment** | Two cycle\u2011time definitions exist \u2013 study (standard work content) vs. MES scan delta (elapsed). Mis\u2011alignment can hide rework loops that hurt FPY. | \u2022 Compare v_cycle_time.standard_time to v_scan_point.elapsed_time for the same workcell/step.<br>\u2022 Adjust work instructions or equipment settings where elapsed\u202f>\u202fstandard\u202f+\u202f10\u202f%. |\n| **Equipment health checks** | Faulty or under\u2011performing machines increase defect rates. | \u2022 Cross\u2011reference v_equipment scan logs with low\u2011FPY workcells.<br>\u2022 Schedule preventive maintenance on any equipment showing high scan\u2011delta variance. |\n| **Operator training & staffing** | Human error is a common FPY driver. | \u2022 Use v_employee and v_headcount to ensure staffing levels meet the standard SMH (standard minutes per hour) for each workcell.<br>\u2022 Conduct refresher training on critical test steps identified in v_fpy_daily. |\n| **Process step optimization** | Certain test steps have higher failure rates. | \u2022 Drill into v_fpy_daily by step (group by workcell, step) to pinpoint \u201chot\u201d steps.<br>\u2022 Apply DOE (design of experiments) to tweak parameters (e.g., test voltage, timing). |\n| **Feedback loop to demand planning** | Sudden demand spikes can pressure cells, raising defect rates. | \u2022 Align demand (v_demand) with capacity (v_units_out_daily) to avoid over\u2011loading any workcell.<br>\u2022 If demand exceeds capacity, consider temporary load\u2011balancing to higher\u2011FPY cells. |\n\n**Next step** \u2013 run a focused FPY drill\u2011down for the three lowest workcells (ELENION, GOPRO, LIFE360) by test step and equipment to prioritize corrective actions.",
+ "usage": {
+  "prompt_tokens": 8150,
+  "completion_tokens": 916
+ },
+ "started": "2026-08-23T18:51:44",
+ "elapsed_s": 17.6,
+ "model": "chain: groq-gpt-oss-120b",
+ "chain_trace": [
+  "groq-gpt-oss-120b",
+  "groq-gpt-oss-120b",
+  "groq-gpt-oss-120b",
+  "groq-gpt-oss-120b",
+  "groq-gpt-oss-120b"
+ ],
+ "chain_events": [],
+ "grade": {
+  "checks": [
+   {
+    "name": "answered",
+    "passed": true
+   },
+   {
+    "name": "numbers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "identifiers grounded in tool results",
+    "passed": true
+   },
+   {
+    "name": "read v_fpy_daily",
+    "passed": true
+   },
+   {
+    "name": "names the worst step(s)",
+    "passed": true
+   },
+   {
+    "name": "says why is unknown (no defect codes)",
+    "passed": true
+   }
+  ],
+  "passed": 6,
+  "total": 6
+ },
+ "notes": [
+  "all identifiers grounded"
+ ]
+}

@@ -53,9 +53,6 @@
  "chain_events": [
   "gemini-3.7-flash: HTTP 503: [{\n  \"error\": {\n    \"code\": 503,\n    \"message\": \"T"
  ],
- "notes": [
-  "numbers not found in tool results: ['103']"
- ],
  "grade": {
   "checks": [
    {
@@ -67,6 +64,10 @@
     "passed": false
    },
    {
+    "name": "identifiers grounded in tool results",
+    "passed": true
+   },
+   {
     "name": "read v_workcell",
     "passed": true
    },
@@ -75,7 +76,10 @@
     "passed": true
    }
   ],
-  "passed": 3,
-  "total": 4
- }
+  "passed": 4,
+  "total": 5
+ },
+ "notes": [
+  "numbers not found in tool results: ['103']"
+ ]
 }

@@ -31,7 +31,11 @@
    },
    {
     "name": "numbers grounded in tool results",
-    "passed": false
+    "passed": true
+   },
+   {
+    "name": "identifiers grounded in tool results",
+    "passed": true
    },
    {
     "name": "used define",
@@ -46,10 +50,7 @@
     "passed": true
    }
   ],
-  "passed": 3,
-  "total": 5
- },
- "notes": [
-  "numbers not found in tool results: ['100']"
- ]
+  "passed": 5,
+  "total": 6
+ }
 }

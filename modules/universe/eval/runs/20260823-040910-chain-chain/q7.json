@@ -39,9 +39,6 @@
   "groq-gpt-oss-20b",
   "groq-gpt-oss-20b"
  ],
- "notes": [
-  "numbers not found in tool results: ['1050', '1100', '800', '900', '950']"
- ],
  "grade": {
   "checks": [
    {
@@ -51,6 +48,10 @@
    {
     "name": "numbers grounded in tool results",
     "passed": false
+   },
+   {
+    "name": "identifiers grounded in tool results",
+    "passed": true
    },
    {
     "name": "read v_fpy_daily",
@@ -65,7 +66,11 @@
     "passed": true
    }
   ],
-  "passed": 4,
-  "total": 5
- }
+  "passed": 5,
+  "total": 6
+ },
+ "notes": [
+  "numbers not found in tool results: ['1050', '800', '900', '950']",
+  "all identifiers grounded"
+ ]
 }

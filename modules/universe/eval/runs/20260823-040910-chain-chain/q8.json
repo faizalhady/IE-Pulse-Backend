@@ -58,6 +58,10 @@
     "passed": true
    },
    {
+    "name": "identifiers grounded in tool results",
+    "passed": true
+   },
+   {
     "name": "used define",
     "passed": true
    },
@@ -70,7 +74,7 @@
     "passed": true
    }
   ],
-  "passed": 5,
-  "total": 5
+  "passed": 6,
+  "total": 6
  }
 }

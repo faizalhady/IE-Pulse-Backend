@@ -1,18 +1,18 @@
 # Universe LLM trial — chain: or-nemotron-3-ultra
 
-Run: `20260823-033949-chain-chain` · 9 questions · 44/45 checks passed
+Run: `20260823-033949-chain-chain` · 9 questions · 53/54 checks passed
 
 | Q | question | stopped | rounds | s | prompt tok | grade | failed checks |
 |---|---|---|---|---|---|---|---|
-| 1 | list all workcells | answered | 4 | 65.1 | 7890 | 4/4 |  |
-| 2 | how many workcells are in p1 | answered | 3 | 69.8 | 4405 | 4/4 |  |
-| 3 | is the current number of bays for workcell KEYSIGHT enough?  | answered | 8 | 42.1 | 18140 | 4/5 | read output or cycle time |
-| 4 | what are all the steps this model has to go through and wher | answered | 8 | 51.0 | 17486 | 7/7 |  |
-| 5 | show me the trend of the top KEYSIGHT model's output for the | answered | 5 | 9.6 | 8187 | 5/5 |  |
-| 6 | which process do u think can be improved for the top KEYSIGH | answered | 8 | 12.1 | 15494 | 5/5 |  |
-| 7 | what can we do to improve our yield | answered | 3 | 12.6 | 3759 | 5/5 |  |
-| 8 | knowledge questions: what is uph, what is cycle time, how do | answered | 8 | 15.6 | 21901 | 5/5 |  |
-| 9 | what do you think: project the upcoming 3 weeks of demand an | answered | 8 | 18.8 | 13687 | 5/5 |  |
+| 1 | list all workcells | answered | 4 | 65.1 | 7890 | 5/5 |  |
+| 2 | how many workcells are in p1 | answered | 3 | 69.8 | 4405 | 5/5 |  |
+| 3 | is the current number of bays for workcell KEYSIGHT enough?  | answered | 8 | 42.1 | 18140 | 5/6 | read output or cycle time |
+| 4 | what are all the steps this model has to go through and wher | answered | 8 | 51.0 | 17486 | 8/8 |  |
+| 5 | show me the trend of the top KEYSIGHT model's output for the | answered | 5 | 9.6 | 8187 | 6/6 |  |
+| 6 | which process do u think can be improved for the top KEYSIGH | answered | 8 | 12.1 | 15494 | 6/6 |  |
+| 7 | what can we do to improve our yield | answered | 3 | 12.6 | 3759 | 6/6 |  |
+| 8 | knowledge questions: what is uph, what is cycle time, how do | answered | 8 | 15.6 | 21901 | 6/6 |  |
+| 9 | what do you think: project the upcoming 3 weeks of demand an | answered | 8 | 18.8 | 13687 | 6/6 |  |
 
 ## Q1 — list all workcells
 
@@ -81,7 +81,7 @@ UNKNOWN
 
 **Notes:** all numbers grounded
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_workcell · ✅ says which count it is (active / customer / support)
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_workcell · ✅ says which count it is (active / customer / support)
 
 
 ## Q2 — how many workcells are in p1
@@ -124,7 +124,7 @@ SELECT 'governing' AS plant_type, COUNT(*) AS workcell_count
 FROM v_workcell WHERE plant_governing = 'P1';
 ```
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_workcell · ✅ distinguishes physical from governing plant
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_workcell · ✅ distinguishes physical from governing plant
 
 
 ## Q3 — is the current number of bays for workcell KEYSIGHT enough? simulate how many demands would actually make the workcell struggle or break and not meet demand.
@@ -210,7 +210,7 @@ Supply the bay count and per-bay capacity (or shift/hours/OLE assumptions), and 
 
 **Notes:** all numbers grounded
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read demand · ❌ read output or cycle time · ✅ names what it cannot know (bays / capacity authored)
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read demand · ❌ read output or cycle time · ✅ names what it cannot know (bays / capacity authored)
 
 
 ## Q4 — what are all the steps this model has to go through and where. sort them end to end. model: the KEYSIGHT model with the most units out in the data
@@ -279,9 +279,9 @@ ORDER BY step_order;
 | 1 | 260 | DRYER 1 | Oven 1 | TH | KYS TH P1A-1 B15 | 240.23 |
 | 1 | 266 | PACKING 1 | Packing 1 | TH | KYS TH P1A-1 B15 | 60.12 |
 
-**Notes:** all numbers grounded
+**Notes:** all numbers grounded · all identifiers grounded
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_route · ✅ found the top model first · ✅ kept the KEYSIGHT filter when picking the model · ✅ ordered by step · ✅ says where is blocked (bay ids)
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_route · ✅ found the top model first · ✅ kept the KEYSIGHT filter when picking the model · ✅ ordered by step · ✅ says where is blocked (bay ids)
 
 
 ## Q5 — show me the trend of the top KEYSIGHT model's output for the data we have. and generally what is the workcell's output trend
@@ -375,9 +375,9 @@ SELECT date, sum(units_out) as daily_output FROM v_output_daily WHERE workcell =
 | 2026-07-23 | 2071 | | 2026-08-08 | 1051 |
 | 2026-07-24 | 1900 | | 2026-08-09 | 899 |
 
-**Notes:** all numbers grounded
+**Notes:** all numbers grounded · all identifiers grounded
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read units out · ✅ filtered to KEYSIGHT · ✅ trend words
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read units out · ✅ filtered to KEYSIGHT · ✅ trend words
 
 
 ## Q6 — which process do u think can be improved for the top KEYSIGHT model based on looking at other faster models. give few suggestions.
@@ -415,7 +415,9 @@ FROM v_cycle_time WHERE workcell = 'KEYSIGHT' GROUP BY alias ORDER BY avg_ct DES
 
 *Note: Equipment capacity and specific defect codes are not authored in the model data, so hardware capital investments should be verified against actual shop floor footprint limits.*
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read cycle time or route · ✅ names a process · ✅ gives suggestions
+**Notes:** all identifiers grounded
+
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read cycle time or route · ✅ names a process · ✅ gives suggestions
 
 
 ## Q7 — what can we do to improve our yield
@@ -487,9 +489,9 @@ All ten rows have **0 % first‑pass yield** – the boards never passed the f
 
 The current FPY data shows a systemic 0 % first‑pass yield across multiple customers and test steps. Prioritizing test‑step validation, equipment calibration, routing verification, and scan‑tag completeness will address the most likely causes and should lift FPY quickly. Once the above actions are taken, re‑run the FPY query to measure improvement.
 
-**Notes:** all numbers grounded
+**Notes:** all numbers grounded · all identifiers grounded
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_fpy_daily · ✅ names the worst step(s) · ✅ says why is unknown (no defect codes)
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_fpy_daily · ✅ names the worst step(s) · ✅ says why is unknown (no defect codes)
 
 
 ## Q8 — knowledge questions: what is uph, what is cycle time, how do you calculate ole, what variables are related to each other
@@ -523,7 +525,7 @@ The current FPY data shows a systemic 0 % first‑pass yield across multiple c
 - cycle_time_study ↔ route / process (standard)
 - cycle_time_measured ↔ scan pairs (elapsed)
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ used define · ✅ OLE formula · ✅ two cycle times
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ used define · ✅ OLE formula · ✅ two cycle times
 
 
 ## Q9 — what do you think: project the upcoming 3 weeks of demand and output for workcells KEYSIGHT, BECKMAN COULTER and COLLINS
@@ -611,4 +613,4 @@ weekly_output AS (
   FROM v_output_daily
   WHERE work
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_demand · ✅ read output history · ✅ says it is a projection with a caveat
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_demand · ✅ read output history · ✅ says it is a projection with a caveat

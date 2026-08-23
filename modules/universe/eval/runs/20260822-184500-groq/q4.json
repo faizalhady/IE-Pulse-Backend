@@ -74,6 +74,10 @@
     "passed": true
    },
    {
+    "name": "identifiers grounded in tool results",
+    "passed": true
+   },
+   {
     "name": "read v_route",
     "passed": true
    },
@@ -94,10 +98,11 @@
     "passed": true
    }
   ],
-  "passed": 7,
-  "total": 7
+  "passed": 8,
+  "total": 8
  },
  "notes": [
-  "all numbers grounded"
+  "all numbers grounded",
+  "all identifiers grounded"
  ]
 }

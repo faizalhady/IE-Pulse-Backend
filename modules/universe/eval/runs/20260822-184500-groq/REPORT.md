@@ -1,18 +1,18 @@
 # Universe LLM trial — openai/gpt-oss-120b
 
-Run: `20260822-184500-groq` · 9 questions · 40/45 checks passed
+Run: `20260822-184500-groq` · 9 questions · 51/54 checks passed
 
 | Q | question | stopped | rounds | s | prompt tok | grade | failed checks |
 |---|---|---|---|---|---|---|---|
-| 1 | list all workcells | answered | 4 | 5.3 | 4648 | 4/4 |  |
-| 2 | how many workcells are in p1 | answered | 3 | 3.3 | 3063 | 4/4 |  |
-| 3 | is the current number of bays for workcell KEYSIGHT enough?  | answered | 3 | 34.2 | 4867 | 2/5 | numbers grounded in tool results; read demand; read output or cycle time |
-| 4 | what are all the steps this model has to go through and wher | answered | 6 | 80.8 | 9968 | 7/7 |  |
-| 5 | show me the trend of the top KEYSIGHT model's output for the | answered | 5 | 53.3 | 6125 | 5/5 |  |
-| 6 | which process do u think can be improved for the top KEYSIGH | answered | 8 | 95.7 | 10959 | 5/5 |  |
-| 7 | what can we do to improve our yield | answered | 4 | 36.5 | 5037 | 5/5 |  |
-| 8 | knowledge questions: what is uph, what is cycle time, how do | answered | 2 | 26.7 | 1738 | 3/5 | numbers grounded in tool results; OLE formula |
-| 9 | what do you think: project the upcoming 3 weeks of demand an | answered | 5 | 57.7 | 6436 | 5/5 |  |
+| 1 | list all workcells | answered | 4 | 5.3 | 4648 | 5/5 |  |
+| 2 | how many workcells are in p1 | answered | 3 | 3.3 | 3063 | 5/5 |  |
+| 3 | is the current number of bays for workcell KEYSIGHT enough?  | answered | 3 | 34.2 | 4867 | 4/6 | read demand; read output or cycle time |
+| 4 | what are all the steps this model has to go through and wher | answered | 6 | 80.8 | 9968 | 8/8 |  |
+| 5 | show me the trend of the top KEYSIGHT model's output for the | answered | 5 | 53.3 | 6125 | 6/6 |  |
+| 6 | which process do u think can be improved for the top KEYSIGH | answered | 8 | 95.7 | 10959 | 6/6 |  |
+| 7 | what can we do to improve our yield | answered | 4 | 36.5 | 5037 | 6/6 |  |
+| 8 | knowledge questions: what is uph, what is cycle time, how do | answered | 2 | 26.7 | 1738 | 5/6 | OLE formula |
+| 9 | what do you think: project the upcoming 3 weeks of demand an | answered | 5 | 57.7 | 6436 | 6/6 |  |
 
 ## Q1 — list all workcells
 
@@ -48,7 +48,7 @@ FROM v_workcell;
 
 **Notes:** all numbers grounded
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_workcell · ✅ says which count it is (active / customer / support)
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_workcell · ✅ says which count it is (active / customer / support)
 
 
 ## Q2 — how many workcells are in p1
@@ -80,7 +80,7 @@ WHERE plant_physical = 'P1'
 
 *What could not be known*: The total number of inactive workcells in P1 (or a breakdown by `entity_type`) was not requested, so those figures are omitted.
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_workcell · ✅ distinguishes physical from governing plant
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_workcell · ✅ distinguishes physical from governing plant
 
 
 ## Q3 — is the current number of bays for workcell KEYSIGHT enough? simulate how many demands would actually make the workcell struggle or break and not meet demand.
@@ -134,9 +134,9 @@ WHERE  workcell = 'KEYSIGHT'
 
 The model tells us that KEYSIGHT is an active customer workcell in plant P1, but it does **not contain the bay‑occupancy information needed to assess whether the current number of bays is sufficient**. Therefore a demand‑vs‑capacity simulation cannot be performed with the available views. If the bay‑occupancy table were exposed, the steps outlined above would enable the requested analysis.
 
-**Notes:** numbers not found in tool results: ['480']
+**Notes:** all numbers grounded
 
-**Checks:** ✅ answered · ❌ numbers grounded in tool results · ❌ read demand · ❌ read output or cycle time · ✅ names what it cannot know (bays / capacity authored)
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ❌ read demand · ❌ read output or cycle time · ✅ names what it cannot know (bays / capacity authored)
 
 
 ## Q4 — what are all the steps this model has to go through and where. sort them end to end. model: the KEYSIGHT model with the most units out in the data
@@ -228,9 +228,9 @@ ORDER BY step_order;
 
 The query returned 40 distinct step‑order/alias pairs (the view caps at 40 rows, so the
 
-**Notes:** all numbers grounded
+**Notes:** all numbers grounded · all identifiers grounded
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_route · ✅ found the top model first · ✅ kept the KEYSIGHT filter when picking the model · ✅ ordered by step · ✅ says where is blocked (bay ids)
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_route · ✅ found the top model first · ✅ kept the KEYSIGHT filter when picking the model · ✅ ordered by step · ✅ says where is blocked (bay ids)
 
 
 ## Q5 — show me the trend of the top KEYSIGHT model's output for the data we have. and generally what is the workcell's output trend
@@ -350,9 +350,9 @@ ORDER BY date;
 * No OLE‑share data is merged here because the view’s comment warns that OLE quantities are counted differently; mixing them would inflate the totals.  
 * No capacity or bay‑level detail is available in the model, so we cannot relate the output trend to equipment utilization.
 
-**Notes:** all numbers grounded
+**Notes:** all numbers grounded · all identifiers grounded
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read units out · ✅ filtered to KEYSIGHT · ✅ trend words
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read units out · ✅ filtered to KEYSIGHT · ✅ trend words
 
 
 ## Q6 — which process do u think can be improved for the top KEYSIGHT model based on looking at other faster models. give few suggestions.
@@ -438,9 +438,9 @@ ORDER BY avg_cycle_time_sec;
 
 **Bottom line** – Target the hand‑time heavy SMT/TH steps, rebalance BE test staffing, and fine‑tune the reflow oven profile. These three low‑cost, data‑backed actions together could bring the `N1092-63016` average cycle time down from ~15.8 s to the low‑15 s range, narrowing the gap with the faster KEYSIGHT models.
 
-**Notes:** all numbers grounded
+**Notes:** all numbers grounded · all identifiers grounded
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read cycle time or route · ✅ names a process · ✅ gives suggestions
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read cycle time or route · ✅ names a process · ✅ gives suggestions
 
 
 ## Q7 — what can we do to improve our yield
@@ -531,7 +531,9 @@ WHERE date BETWEEN '2026-07-09' AND '2026-08-08'
 GROUP BY workcell
 HAVING COUNT(*) >= 10
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_fpy_daily · ✅ names the worst step(s) · ✅ says why is unknown (no defect codes)
+**Notes:** all identifiers grounded
+
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_fpy_daily · ✅ names the worst step(s) · ✅ says why is unknown (no defect codes)
 
 
 ## Q8 — knowledge questions: what is uph, what is cycle time, how do you calculate ole, what variables are related to each other
@@ -588,9 +590,7 @@ HAVING COUNT(*) >= 10
 
 *What we could not know*: The model does not store explicit “downtime” or “idle” codes, so OLE is derived only from the two cycle‑time measures and the unit count; any additional labor‑non‑value‑added categories would need to be added to the data model.
 
-**Notes:** numbers not found in tool results: ['100']
-
-**Checks:** ✅ answered · ❌ numbers grounded in tool results · ✅ used define · ❌ OLE formula · ✅ two cycle times
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ used define · ❌ OLE formula · ✅ two cycle times
 
 
 ## Q9 — what do you think: project the upcoming 3 weeks of demand and output for workcells KEYSIGHT, BECKMAN COULTER and COLLINS
@@ -714,4 +714,6 @@ ORDER BY d.workcell, d.period_start;
 - If demand exists in a future planning file that has not yet been loaded into `v_demand`, the model cannot surface it.  
 - No alternative source (e.g., a longer‑range forecast view) is available in the current universe, so we must report the absence of data rather than estimate.
 
-**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ read v_demand · ✅ read output history · ✅ says it is a projection with a caveat
+**Notes:** all identifiers grounded
+
+**Checks:** ✅ answered · ✅ numbers grounded in tool results · ✅ identifiers grounded in tool results · ✅ read v_demand · ✅ read output history · ✅ says it is a projection with a caveat

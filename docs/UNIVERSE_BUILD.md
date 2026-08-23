@@ -184,3 +184,10 @@ New views: `v_bay`, `v_bay_occupancy`, `v_bay_activity`, `v_line`, `v_asset`, `v
 Cases added: 73 (four bays only the scans know; "where" has two honest answers),
 74 (tools link to workcells well, to places badly). 59/59 assertions.
 
+### Review fixes (2026-08-23, evening)
+
+- `tools.describe_compact(None)` is an index — 21 views with purposes only (1,990 chars). With columns it was 4,371, past `TOOL_RESULT_CHARS`, and the newest views were truncated away. Columns come per view.
+- `dim_equipment.is_machine`: false for a blank name, a step name, or a station shared by more than 3 workcells (PACKOUT, FNI, OQA, LINK 1). 3,373 of 3,571 are machines. Shared-line (AOP) machines land on false — said in the column comment.
+- The grader grounds identifiers (`grounded_identifiers`) and the loop's last round forbids filling a table from memory (case 75).
+- Atlas and question pool updated with what wave 4 unblocked.
+
