@@ -243,3 +243,10 @@ Backup: `ie-pulse.conf.bak-20260824-ask`.
 leading backslash and silently writes to a LOCAL folder (`C:\mypenm0iesvr02\…`). Put UNC paths in a
 `.ps1` file, or use ssh/scp. Always check robocopy's `Dest :` line in the log.
 
+### nginx on 02 — which API paths are proxied (2026-08-24)
+
+`:8888` (core) and `:443` (dedicated apps) each need a location per module API base. After
+today: `ole`, `cycle-time`, `ppqt`, `ppqt-legacy` on both; `ask` on **:8888 only** (that is the
+CORE-only rule). An API path with no location falls through to the SPA and returns `index.html`
+— the browser then reports "Unexpected token '<'". See gotchas case 76.
+
