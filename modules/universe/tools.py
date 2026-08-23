@@ -98,13 +98,22 @@ def describe_compact(view: str | None = None) -> str:
         "v_route": "ordered route steps per (model, line): step_order, alias, station, standard seconds",
         "v_demand": "planner demand per (workcell, assembly, period)",
         "v_fpy_daily": "first-pass yield per (workcell, assembly, test step, date)",
+        "v_employee": "one row per person (HR): name, workcell, department, title, scope",
+        "v_headcount": "people per (workcell, department, scope, job category) — HR headcount, agency not included",
+        "v_paid_hours_weekly": "people and paid hours per (workcell, ISO week) from payroll — the OLE denominator",
+        "v_department": "one row per department: headcount, DL/IL, workcells covered",
+        "v_scan_point": "which MES steps are scan points, per workcell, and what observes the others",
+        "v_bay": "one row per bay under BOTH naming schemes (layout / MES), unreconciled; who was observed building there",
+        "v_bay_occupancy": "who occupies which bay, with the evidence (observed, configured, declared)",
+        "v_bay_activity": "workcell × MES bay × ISO week from the scans — 'where does X build'",
+        "v_line": "IEDB lines (sub_workcenter) per workcell: type, plant, area, parsed bay code",
+        "v_asset": "tools and machines from EST1C + SAP: lifecycle, workcell, bay text, smart-torque",
+        "v_equipment": "machines as the scans saw them: step, bay, first/last seen, boards — a floor, not the fleet",
     }
-    con = _connection()
-    lines = []
-    for v in ALLOWED_VIEWS:
-        cols = [r[0] for r in con.execute("select column_name from duckdb_columns() where table_name = ? order by column_index", [v]).fetchall()]
-        lines.append(f"{v}: {purpose.get(v, '')}\n  columns: {', '.join(cols)}")
-    return "\n".join(lines) + "\nOnly these columns exist. Call universe_describe with a view name for what each column means."
+    # an index only: 21 views with columns was ~4.4k chars, past the tool-result cap, and the
+    # views at the end (the newest) were the ones truncated away
+    lines = [f"{v}: {purpose.get(v, '')}" for v in ALLOWED_VIEWS]
+    return "\n".join(lines) + "\nCall universe_describe with ONE view name to see its columns and what each means."
 
 
 # ─── query ───────────────────────────────────────────────────────────────────

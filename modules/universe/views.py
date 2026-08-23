@@ -592,7 +592,7 @@ VIEWS.update({
     ),
     "v_equipment": (
         """
-        select e.equipment_id, e.name as equipment, w.name as workcell, e.workcell_id, e.workcells, e.step, e.steps,
+        select e.equipment_id, e.name as equipment, e.is_machine, w.name as workcell, e.workcell_id, e.workcells, e.step, e.steps,
                e.bay, e.plant, e.first_seen, e.last_seen, e.scans, e.boards
         from dim_equipment e
         left join dim_workcell w on w.workcell_id = e.workcell_id
@@ -600,6 +600,7 @@ VIEWS.update({
         {
             "equipment_id": "MES equipment id.",
             "equipment": "Equipment name as MES scans carry it (MYPENWAB0107_FT1, PACKOUT ...). A machine, a test station or a generic label.",
+            "is_machine": "true = a named machine or test station dedicated to 1-3 workcells. false = a label: blank, a step name, or a generic station shared by many workcells (PACKOUT, FNI, OQA, LINK 1) - shared-line machines (AOP) also land here. Filter is_machine for 'which machine' questions.",
             "workcell": "The workcell it scanned most for.",
             "workcell_id": "Join key to v_workcell.",
             "workcells": "Distinct workcells it scanned for.",

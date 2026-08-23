@@ -797,6 +797,30 @@ def test_wave4_views_are_commented_and_the_model_sees_everything():
         con.close()
 
 
+def test_describe_without_a_name_is_an_index_that_fits_the_tool_budget():
+    """21 views with every column was 4.4k chars — past the 3.5k tool-result cap, and the
+    newest views were the ones cut off. Without a name: every view listed, purposes only."""
+    from modules.universe import tools
+    from modules.universe.chat import loop
+    text = tools.describe_compact(None)
+    assert len(text) <= loop.TOOL_RESULT_CHARS, len(text)
+    assert all(v in text for v in tools.ALLOWED_VIEWS)
+    assert "columns:" not in text
+    one = tools.describe_compact("v_bay_activity")
+    assert "boards" in one and "where does X build" in one.lower() or "bay" in one.lower()
+
+
+def test_equipment_labels_are_not_machines():
+    """MES writes the step name, or nothing, in the equipment field when no machine is
+    scanned. The busiest 'machine' must be a machine, not a blank."""
+    rows = _q("select name, is_machine from dim_equipment order by boards desc limit 3")
+    assert all(not m for n, m in rows if not n.strip() or n.upper() in ("PACKOUT", "FNI")), rows
+    (top,) = _q("select name from dim_equipment where is_machine order by boards desc limit 1")[0]
+    assert top.strip() and top.upper() not in ("PACKOUT", "FNI"), top
+    (labels, machines) = _q("select count(*) filter (where not is_machine), count(*) filter (where is_machine) from dim_equipment")[0]
+    assert machines > 2000 and labels > 0, (labels, machines)
+
+
 # ─── The free-model chain ────────────────────────────────────────────────────
 
 def test_chain_walks_top_down_waits_short_cooldowns_and_reads_retry_hints():

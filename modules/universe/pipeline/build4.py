@@ -153,22 +153,32 @@ def build_equipment() -> dict:
     try:
         con.execute(f"""
             copy (
-              select equipment_id, mode(equipment_raw) as name,
-                     mode(workcell_id) as workcell_id, count(distinct workcell_id) as workcells,
-                     mode(step) as step, count(distinct step) as steps,
-                     mode(bay_id) as bay, mode(plant_raw) as plant,
-                     min(date) as first_seen, max(date) as last_seen,
-                     count(*) as scans, count(distinct wip_id) as boards
-              from read_parquet('{_m("fact_scan")}')
-              where equipment_id is not null and trim(equipment_id) <> ''
-              group by equipment_id
+              with e as (
+                select equipment_id, mode(equipment_raw) as name,
+                       mode(workcell_id) as workcell_id, count(distinct workcell_id) as workcells,
+                       mode(step) as step, count(distinct step) as steps,
+                       mode(bay_id) as bay, mode(plant_raw) as plant,
+                       min(date) as first_seen, max(date) as last_seen,
+                       count(*) as scans, count(distinct wip_id) as boards
+                from read_parquet('{_m("fact_scan")}')
+                where equipment_id is not null and trim(equipment_id) <> ''
+                group by equipment_id
+              ),
+              step_names as (select distinct upper(trim(step)) as s from read_parquet('{_m("fact_scan")}') where step is not null)
+              -- MES writes the step name (or nothing) in the equipment field when no machine is scanned,
+              -- and generic station labels (PACKOUT, FNI, OQA, LINK 1) serve 10-36 workcells; a real
+              -- machine or test station belongs to 1-3. Blank, a step name, or > 3 workcells = a label.
+              select e.*, (trim(coalesce(e.name, '')) <> '' and upper(trim(e.name)) not in (select s from step_names)
+                           and e.workcells <= 3) as is_machine
+              from e
               order by scans desc
             ) to '{_m("dim_equipment")}' (format parquet)
         """)
         (n,) = con.execute(f"select count(*) from read_parquet('{_m('dim_equipment')}')").fetchone()
+        (n_m,) = con.execute(f"select count(*) from read_parquet('{_m('dim_equipment')}') where is_machine").fetchone()
     finally:
         con.close()
-    return {"dim_equipment": n}
+    return {"dim_equipment": n, "dim_equipment_machines": n_m}
 
 
 def build_wave4() -> dict:
