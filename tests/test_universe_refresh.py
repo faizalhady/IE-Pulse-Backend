@@ -12,7 +12,7 @@ import json
 import sys
 import tempfile
 import traceback
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,8 +37,14 @@ def _sandbox(raw_days: list[str]):
     return R, calls, mart
 
 
+def _utc_today() -> date:
+    """The job works in UTC (MES windows are UTC). In Malaysia (UTC+8) the local date is a
+    day ahead after 08:00 — a test built on date.today() fails every evening."""
+    return datetime.now(timezone.utc).date()
+
+
 def test_incremental_pulls_from_the_day_after_the_newest_file_to_yesterday_then_rebuilds():
-    today = date.today()
+    today = _utc_today()
     R, calls, mart = _sandbox([(today - timedelta(days=5)).isoformat(), (today - timedelta(days=4)).isoformat()])
     assert R.run("incremental") is True
     kinds = [c[0] for c in calls]
@@ -51,7 +57,7 @@ def test_incremental_pulls_from_the_day_after_the_newest_file_to_yesterday_then_
 
 
 def test_incremental_with_nothing_new_skips_the_pull_but_still_rebuilds():
-    today = date.today()
+    today = _utc_today()
     R, calls, mart = _sandbox([(today - timedelta(days=1)).isoformat()])
     assert R.run("incremental") is True
     assert [c[0] for c in calls] == ["paid", "build"], calls
@@ -59,7 +65,7 @@ def test_incremental_with_nothing_new_skips_the_pull_but_still_rebuilds():
 
 
 def test_a_failure_is_recorded_not_raised():
-    R, calls, mart = _sandbox([date.today().isoformat()])
+    R, calls, mart = _sandbox([_utc_today().isoformat()])
     import modules.universe.pipeline.build as B
     B.build_all = lambda: (_ for _ in ()).throw(RuntimeError("duckdb exploded"))
     assert R.run("incremental") is False
@@ -68,7 +74,7 @@ def test_a_failure_is_recorded_not_raised():
 
 
 def test_full_mode_rebuilds_without_pulling():
-    R, calls, mart = _sandbox([date.today().isoformat()])
+    R, calls, mart = _sandbox([_utc_today().isoformat()])
     assert R.run("full") is True
     assert [c[0] for c in calls] == ["build"], calls
 
