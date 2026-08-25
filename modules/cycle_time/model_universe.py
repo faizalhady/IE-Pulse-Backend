@@ -521,6 +521,18 @@ def summary(mart: Path | None = None) -> pd.DataFrame:
     u["active_has_ct"]     = act & u["in_iedb_ct"]
     u["active_no_ct"]      = act & u["in_iedb_catalog"] & ~u["in_iedb_ct"]
     u["active_not_iedb"]   = act & ~u["in_iedb_catalog"] & ~u["in_iedb_ct"]
+
+    # PLANNED — the forward list on its own, the narrowest of the three scopes
+    # the coverage table can show. Same partition, same verdict split, so the
+    # page can swap prefixes instead of computing a second shape.
+    pln = u["in_demand"].fillna(False) if "in_demand" in u else pd.Series(False, index=u.index)
+    u["planned"]            = pln
+    u["planned_has_ct"]     = pln & u["in_iedb_ct"]
+    u["planned_no_ct"]      = pln & u["in_iedb_catalog"] & ~u["in_iedb_ct"]
+    u["planned_not_iedb"]   = pln & ~u["in_iedb_catalog"] & ~u["in_iedb_ct"]
+    u["planned_complete"]   = u["planned_has_ct"] & (vd == "complete")
+    u["planned_incomplete"] = u["planned_has_ct"] & (vd == "incomplete")
+    u["planned_not_built"]  = u["planned_has_ct"] & (vd == "not_built")
     u["active_complete"]   = u["active_has_ct"] & (vd == "complete")
     u["active_incomplete"] = u["active_has_ct"] & (vd == "incomplete")
     u["active_not_built"]  = u["active_has_ct"] & (vd == "not_built")
@@ -534,6 +546,13 @@ def summary(mart: Path | None = None) -> pd.DataFrame:
         active_complete=("active_complete", "sum"),
         active_incomplete=("active_incomplete", "sum"),
         active_not_built=("active_not_built", "sum"),
+        planned=("planned", "sum"),
+        planned_has_ct=("planned_has_ct", "sum"),
+        planned_no_ct=("planned_no_ct", "sum"),
+        planned_not_iedb=("planned_not_iedb", "sum"),
+        planned_complete=("planned_complete", "sum"),
+        planned_incomplete=("planned_incomplete", "sum"),
+        planned_not_built=("planned_not_built", "sum"),
         in_iedb=("in_iedb", "sum"),
         has_ct=("has_ct", "sum"),
         no_ct=("no_ct", "sum"),
@@ -547,6 +566,8 @@ def summary(mart: Path | None = None) -> pd.DataFrame:
     assert (g["has_ct"] + g["no_ct"] + g["not_iedb"] == g["models"]).all(),         "the three buckets do not sum to models - they are not a partition"
     assert (g["active_has_ct"] + g["active_no_ct"] + g["active_not_iedb"]
             == g["active"]).all(),         "the active buckets do not sum to active - they are not a partition"
+    assert (g["planned_has_ct"] + g["planned_no_ct"] + g["planned_not_iedb"]
+            == g["planned"]).all(),         "the planned buckets do not sum to planned - they are not a partition"
     g["pct_has_ct"] = (g["has_ct"] / g["models"] * 100).round(1)
 
     # One column per answer. reindex(): a workcell with nobody in a bucket must

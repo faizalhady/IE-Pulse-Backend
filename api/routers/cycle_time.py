@@ -2440,6 +2440,8 @@ def _universe_summary(_key):
                     # models stay in `models` so "show all" needs no second call.
                     "active", "active_has_ct", "active_no_ct", "active_not_iedb",
                     "active_complete", "active_incomplete", "active_not_built",
+                    "planned", "planned_has_ct", "planned_no_ct", "planned_not_iedb",
+                    "planned_complete", "planned_incomplete", "planned_not_built",
                     *STATUSES] if c in df},
         # The line between active and dormant, so the page can label its own
         # scope instead of hardcoding a date that later drifts from the backend.
