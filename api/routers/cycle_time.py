@@ -1609,6 +1609,7 @@ def ct_completion(
 # One definition, in modules/cycle_time/config.py — see the note there. Aliased
 # rather than re-declared so this file and the BOM pipeline cannot drift apart.
 from modules.cycle_time.config import DEMAND_MARTS as _DEMAND_MARTS
+from modules.cycle_time.config import CT_ACTIVE_SINCE
 
 # MES plant codes -> the grouping the floor actually uses.
 _PLANT_REGION = {"JBK": "Batu Kawan", "Plant 1": "Penang Island", "JPE": "Penang Island",
@@ -1869,6 +1870,52 @@ def _completion_demand(_key) -> dict:
     # the statuses themselves showed it, because a stale verdict looks exactly
     # like a fresh one. Imported from completion_report so there is ONE list of
     # what feeds a verdict, not one per renderer.
+    # ── ACTIVE + what MES actually saw ─────────────────────────────────────
+    # This table is the workcell page's only source, so the scope switch on it
+    # lives or dies here. Adding it to /universe/workcell alone left the toggle
+    # rendering a count it could not filter by, which is worse than not having
+    # it: the label claimed a scope the rows did not honour.
+    #
+    # `active` comes from the universe (one definition, shared with the cards);
+    # the dates come from model_runs, the same day cache the verdicts use.
+    # REUSE `uni` from above - it is the same frame, already loaded. Building it
+    # a second time here cost ~15s on every cold call and bought nothing.
+    try:
+        _u = uni
+        if len(_u) and "_uk" in _u:
+            _uk = _u["_uk"]
+            if "active" in _u:
+                _ak = dict(zip(_uk, _u["active"].fillna(False)))
+                out["active"] = out["_ck"].map(_ak).fillna(False).astype(bool)
+        # has_cycle_time / in_iedb were never on this payload, so anything that
+        # asked for them got null - the workcell cards read 0 "with cycle time"
+        # for a workcell that has 4,387. The table already renders in_iedb, so
+        # it was drawing a dash for every row too.
+            for _src, _dst in (("in_iedb_ct", "has_cycle_time"),
+                               ("in_iedb_catalog", "in_iedb")):
+                if _src in _u:
+                    _m = dict(zip(_uk, _u[_src].fillna(False)))
+                    out[_dst] = out["_ck"].map(_m).fillna(False).astype(bool)
+    except Exception as ex:                                        # noqa: BLE001
+        log.warning("active flag unavailable on /completion/demand: %s", ex)
+    if "active" not in out:
+        out["active"] = False
+    # Planned but never yet run IS active - the scan cannot know a model ordered
+    # for next month. Without this the toggle drops every new introduction.
+    out["active"] = out["active"] | out["has_demand"].fillna(False).astype(bool)
+
+    _mr = CT_MART.get("model_runs")
+    if _mr is not None and _mr.exists():
+        _r = pd.read_parquet(_mr, columns=["assembly", "first_seen", "last_seen",
+                                           "days_seen", "units"])
+        _r["_k"] = _r["assembly"].map(_norm_a)
+        _r = _r.sort_values("last_seen").drop_duplicates("_k", keep="last").set_index("_k")
+        _ka = out["assembly"].map(_norm_a)
+        for _c, _o in (("first_seen", "first_run"), ("last_seen", "last_run")):
+            out[_o] = pd.to_datetime(_ka.map(_r[_c]), errors="coerce").dt.strftime("%Y-%m-%d")
+        out["days_run"] = _ka.map(_r["days_seen"])
+        out["units_built"] = _ka.map(_r["units"])
+
     from modules.cycle_time.completion_report import freshness
     return {
         "scope": {
@@ -1920,6 +1967,12 @@ def ct_completion_demand(
     workcells: Optional[str] = Query(None, description="Comma-separated workcells. Takes precedence over `plants`."),
     status:    Optional[str] = Query(None, description="Comma-separated statuses to keep."),
     limit:     int = Query(0, ge=0, le=5000, description="Top N by demand units. 0 = all."),
+    scope: str = Query("all", pattern="^(planned|active|all)$",
+                       description="planned = on the forward list only (smallest, what the "
+                       "workcell page renders first). active = ran since CT_ACTIVE_SINCE OR "
+                       "planned. all = every model incl. dormant. Every response carries the "
+                       "count for all three, so a page can label its scope switch from "
+                       "whichever one it happens to hold."),
 ):
     """Completion status for the models we are actually building and planning.
 
@@ -1945,7 +1998,7 @@ def ct_completion_demand(
     #
     # Filtered calls fall through to the normal path — they are rare, small, and
     # not worth a cache key each.
-    if not (workcells or plants or status or limit):
+    if not (workcells or plants or status or limit) and scope == "all":
         return Response(content=_completion_demand_json(_completion_demand_key()),
                         media_type="application/json")
 
@@ -1968,6 +2021,18 @@ def ct_completion_demand(
     if status:
         want = {s.strip() for s in status.split(",") if s.strip()}
         rows = [r for r in rows if r.get("status") in want]
+
+    # All three counted BEFORE the scope trims, so ANY response can label the
+    # whole scope switch. The workcell page loads `planned` first (fastest paint),
+    # then fetches active and all in the background - it needs the other two
+    # counts on that first small response or the buttons render blank.
+    total_all = len(rows)
+    total_active = sum(1 for r in rows if r.get("active"))
+    total_planned = sum(1 for r in rows if r.get("has_demand"))
+    if scope == "planned":
+        rows = [r for r in rows if r.get("has_demand")]
+    elif scope == "active":
+        rows = [r for r in rows if r.get("active")]
     if limit:
         rows = rows[:limit]
 
@@ -1980,6 +2045,14 @@ def ct_completion_demand(
     return {
         "as_of": as_of,
         "total": total,
+        "total_all": total_all,
+        "total_active": total_active,
+        "total_planned": total_planned,
+        # NOT "scope" - that key is already the plant/workcell picker payload
+        # below, and a duplicate literal key silently wins, which would have
+        # replaced the picker with the string "planned".
+        "scope_applied": scope,
+        "active_since": CT_ACTIVE_SINCE,
         "count": len(rows),
         "counts": pd.Series([r["status"] for r in rows]).value_counts().to_dict() if rows else {},
         "unchecked": data["unchecked"],
@@ -2300,7 +2373,15 @@ def _universe_summary(_key):
         # the landing page rendered empty dashes.
         "totals": {c: int(df[c].sum()) for c in
                    ["models", "in_iedb", "has_ct", "no_ct", "not_iedb", "built_24mo",
-                    "in_demand", "graded", "ungraded", *STATUSES] if c in df},
+                    "in_demand", "graded", "ungraded",
+                    # the ACTIVE slice - what the page now leads with. Dormant
+                    # models stay in `models` so "show all" needs no second call.
+                    "active", "active_has_ct", "active_no_ct", "active_not_iedb",
+                    "active_complete", "active_incomplete", "active_not_built",
+                    *STATUSES] if c in df},
+        # The line between active and dormant, so the page can label its own
+        # scope instead of hardcoding a date that later drifts from the backend.
+        "active_since": CT_ACTIVE_SINCE,
         # What was NOT counted, so the total can be reconciled instead of trusted.
         "excluded": {"rows": int(len(ex)),
                      "why": ex["why"].value_counts().to_dict() if len(ex) else {}},
@@ -2332,6 +2413,7 @@ def ct_universe_summary():
         return _universe_summary(mart_key(
             ct / "assembly_catalog.parquet", ct / "raw.parquet",
             ct / "completion_status_v2.parquet", eb / "runners.parquet",
+            ct / "model_runs.parquet",          # drives `active` - must bust the cache
             *(eb / n for n in _DEMAND_MARTS)))
     except FileNotFoundError as e:
         raise HTTPException(status_code=503, detail=f"mart not ready: {e}")
@@ -2361,6 +2443,30 @@ def _workcell_models(workcell: str, _key):
                          ("last_build", "last_build")):
             if col in d1:
                 u[out] = u["a"].map(d1[col])
+    # WHEN MES last saw it run. Straight from model_runs.parquet - the same day
+    # cache the verdicts come from, so a row can never say "active" here and
+    # "no production" in its verdict. `in_mes_history` is the ebuild build-PLAN
+    # and disagreed with the scan on 1,083 models; it is kept only as a column,
+    # never as the thing that decides scope.
+    mr = CT_MART.get("model_runs")
+    if mr is not None and mr.exists():
+        r = pd.read_parquet(mr, columns=["customer", "assembly", "first_seen",
+                                         "last_seen", "days_seen", "units"])
+        r["_k"] = r["assembly"].map(lambda x: re.sub(r"[^A-Z0-9]", "", str(x).upper()))
+        r = r.sort_values("last_seen").drop_duplicates("_k", keep="last").set_index("_k")
+        for col, out in (("first_seen", "first_run"), ("last_seen", "last_run"),
+                         ("days_seen", "days_run"), ("units", "units_built")):
+            v = u["a"].map(r[col])
+            u[out] = (v.dt.strftime("%Y-%m-%d") if out.endswith("_run")
+                      and hasattr(v, "dt") else v)
+    for c in ("first_run", "last_run", "days_run", "units_built"):
+        if c not in u:
+            u[c] = None
+    # ACTIVE is the module's scope: MES saw it run since CT_ACTIVE_SINCE, or it
+    # is on the forward list. Sent per row so the table filters client-side
+    # instead of asking for a second, differently-scoped payload.
+    u["active"] = (u["active"].fillna(False).astype(bool) if "active" in u
+                   else u["in_demand"].fillna(False).astype(bool))
     u["has_cycle_time"] = u["in_iedb_ct"]
     # Did the completion run judge this model. `graded` is the universe's own
     # column and means "has a readable row in completion_status_v2" — the mart
@@ -2368,7 +2474,8 @@ def _workcell_models(workcell: str, _key):
     # without reading it out of the status word.
     u["checked"] = u["graded"].fillna(False).astype(bool) if "graded" in u else False
     keep = ["assembly", "verdict", "checked", "has_cycle_time", "in_iedb_catalog",
-            "in_mes_history", "in_demand", "units", "next_build", "last_build"]
+            "in_mes_history", "in_demand", "units", "next_build", "last_build",
+            "active", "first_run", "last_run", "days_run", "units_built"]
     for c in keep:
         if c not in u:
             u[c] = None
@@ -2377,7 +2484,26 @@ def _workcell_models(workcell: str, _key):
         ["incomplete", "no_cycle_time", "not_in_iedb", "not_built", "cannot_check", "complete"])}
     u["_o"] = u["verdict"].map(order).fillna(99)
     u = u.sort_values(["_o", "units"], ascending=[True, False], na_position="last")
-    return {"workcell": workcell, "models": int(len(u)), "rows": _df_to_json(u[keep])}
+    # Per-workcell KPI, computed here so the page never re-derives it from the
+    # rows and drifts from the landing page's cards.
+    act = u["active"].fillna(False).astype(bool)
+    ct_ = act & u["has_cycle_time"].fillna(False).astype(bool)
+    vd = u["verdict"]
+    kpi = {
+        "active":            int(act.sum()),
+        "active_has_ct":     int(ct_.sum()),
+        "active_no_ct":      int((act & u["in_iedb_catalog"].fillna(False)
+                                     & ~u["has_cycle_time"].fillna(False)).sum()),
+        "active_not_iedb":   int((act & ~u["in_iedb_catalog"].fillna(False)
+                                     & ~u["has_cycle_time"].fillna(False)).sum()),
+        "active_complete":   int((ct_ & (vd == "complete")).sum()),
+        "active_incomplete": int((ct_ & (vd == "incomplete")).sum()),
+        "active_not_built":  int((ct_ & (vd == "not_built")).sum()),
+        "all_models":        int(len(u)),
+    }
+    return {"workcell": workcell, "models": int(len(u)),
+            "kpi": kpi, "active_since": CT_ACTIVE_SINCE,
+            "rows": _df_to_json(u[keep])}
 
 
 @router.get("/universe/workcell")
@@ -2387,6 +2513,7 @@ def ct_workcell_models(workcell: str = Query(..., description="Workcell, any spe
     try:
         return _workcell_models(workcell, mart_key(
             ct / "assembly_catalog.parquet", ct / "raw.parquet",
+            ct / "model_runs.parquet",
             ct / "completion_status_v2.parquet", eb / "runners.parquet",
             *(eb / n for n in _DEMAND_MARTS)))
     except FileNotFoundError as e:

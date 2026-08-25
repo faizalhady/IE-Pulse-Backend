@@ -70,6 +70,12 @@ CT_MART = {
     # The status marts above are SNAPSHOTS - each run overwrites them - so there
     # was no way to answer "are we getting better?". This is the only cycle-time
     # mart that accumulates.
+    #: one row per (customer, assembly) SEEN IN THE #21 DAY CACHE, whole span.
+    #: The MES-side answer to "what actually ran" - same files the verdicts come
+    #: from, unlike ebuild/runners.parquet which is a build-PLAN aggregate off a
+    #: different system (eDashboard SQL) and a different key (SMT_Assembly).
+    #: Built by scripts/build_model_runs.py. No MES calls.
+    "model_runs":           CT_MART_DIR / "model_runs.parquet",
     "completion_history":   CT_MART_DIR / "completion_history.parquet",
     "mes_serial_index":     CT_MART_DIR / "mes_serial_index.parquet",  # (customer, assembly, serial) from #94
     # IEDB CustomerStatus coverage report, snapshotted by the pipeline instead of
@@ -162,3 +168,14 @@ CT_CUSTOMERS = [
     {"customer": "Skydio",                  "division": "Mobile Devices*",               "customer_id": 2535, "assembly_count": 5},
     {"customer": "GO",                      "division": "GO*",                           "customer_id": 2526, "assembly_count": 3},
 ]
+
+#: The line between "active" and "dormant" for the Cycle Time module.
+#:
+#: A model is ACTIVE if MES saw it run on or after this date, OR it is on the
+#: planner / eDash forward list. Everything else is dormant - still stored, still
+#: queryable, just not what the module leads with.
+#:
+#: Chosen by Faiz 2026-08-25. It is a FILTER, not a cutoff on the data: the day
+#: cache holds 1095 days (from 2023-08-26), so this can move either way without
+#: re-scanning a single day.
+CT_ACTIVE_SINCE = "2024-09-01"

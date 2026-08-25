@@ -62,12 +62,13 @@ sys.path.insert(0, str(ROOT))
 
 from modules.cycle_time import completion_v2 as v2          # noqa: E402
 from modules.cycle_time.config import CT_CUSTOMERS, CT_MART  # noqa: E402
-from modules.cycle_time.model_universe import build, norm    # noqa: E402
+from modules.cycle_time.model_universe import STATUSES, build, norm  # noqa: E402
 
 log = logging.getLogger("scope")
 
 
-def _targets(scope: str, workcell: str | None, include_graded: bool) -> pd.DataFrame:
+def _targets(scope: str, workcell: str | None, include_graded: bool,
+             verdict: str | None = None) -> pd.DataFrame:
     """[customer, assembly] for the chosen scope, minus what is already graded."""
     u = build(_use_mart=False)
     if scope == "has_ct":
@@ -78,6 +79,12 @@ def _targets(scope: str, workcell: str | None, include_graded: bool) -> pd.DataF
         raise SystemExit(f"unknown scope {scope!r}")
     if workcell:
         u = u[u["wc"] == norm(workcell)]
+    if verdict:
+        # A verdict filter is by definition a RE-check: every one of these
+        # already has a verdict, so it implies --include-graded. Without this
+        # the next line drops the whole selection and the run finds nothing.
+        u = u[u["verdict"] == verdict]
+        include_graded = True
     if not include_graded:
         u = u[~u["graded"].fillna(False)]
     return u[["workcell", "assembly", "wc"]].rename(columns={"workcell": "customer"})
@@ -121,6 +128,10 @@ def main() -> int:
     ap.add_argument("--smallest", type=int, metavar="N",
                     help="only the N SMALLEST workcells. The smoke-test switch: real "
                          "workcells, start to finish, for a few minutes rather than hours.")
+    ap.add_argument("--verdict", choices=STATUSES,
+                    help="only models CURRENTLY holding this verdict. `--verdict not_built "
+                         "--window 730` is the re-check: widen the MES window for the models "
+                         "nothing was found for, and leave every settled verdict untouched.")
     ap.add_argument("--include-graded", action="store_true",
                     help="re-check models that already have a verdict (a code fix needs this)")
     ap.add_argument("--no-resume", action="store_true")
@@ -146,7 +157,7 @@ def main() -> int:
     fh = logging.FileHandler(logfile, encoding="utf-8"); fh.setFormatter(fmt); root.addHandler(fh)
     log.info("log file: %s", logfile)
 
-    tgt = _targets(a.scope, a.workcell, a.include_graded)
+    tgt = _targets(a.scope, a.workcell, a.include_graded, a.verdict)
     if tgt.empty:
         print(f"scope {a.scope!r}: nothing to check")
         return 0
@@ -161,7 +172,9 @@ def main() -> int:
 
     by = tgt.groupby("customer").size().sort_values()
     print(f"\nscope        : {a.scope}"
+          f"{'  verdict=' + a.verdict if a.verdict else ''}"
           f"{'  workcell=' + a.workcell if a.workcell else ''}")
+    print(f"window       : {a.window} days")
     print(f"models       : {len(tgt):,}")
     print(f"workcells    : {len(by)}   (smallest first)")
     print(f"checkpoint   : every {v2._CKPT_EVERY} models, inside the workcell\n")

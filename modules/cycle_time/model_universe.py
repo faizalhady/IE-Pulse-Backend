@@ -59,7 +59,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from modules.cycle_time.config import BASE_DIR, CT_CUSTOMERS, CT_MART
+from modules.cycle_time.config import (BASE_DIR, CT_ACTIVE_SINCE, CT_CUSTOMERS,
+                                        CT_MART)
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +198,20 @@ def _read_status(path: Path) -> pd.DataFrame:
     return d
 
 
+def _ran_since(path: Path, since: str) -> pd.DataFrame:
+    """(workcell, assembly) MES actually saw run on or after `since`.
+
+    Source is the #21 day cache via model_runs.parquet - the SAME files the
+    verdicts come from. `in_mes_history` (ebuild/runners.parquet) answers a
+    similar-sounding question off a different system and a different key, and the
+    two disagreed on 1,083 models. Anything that decides ACTIVE reads this one.
+    """
+    d = _pairs(path, cols=["last_seen"], newest="last_seen")
+    if "last_seen" not in d.columns:
+        return d
+    return d[pd.to_datetime(d["last_seen"]) >= pd.Timestamp(since)]
+
+
 def _rescue_blank(blank: pd.DataFrame, cat: pd.DataFrame) -> pd.DataFrame:
     """Give a workcell back to the blank-workcell rows IEDB can identify.
 
@@ -248,6 +263,7 @@ def build(mart: Path | None = None, _use_mart: bool = True) -> pd.DataFrame:
         "in_mes_history":  _pairs(eb / "runners.parquet"),
         "in_planner":      _pairs(eb / "planner_runners.parquet"),
         "in_edash":        _pairs(eb / "projection_runners.parquet"),
+        "ran_recent":      _ran_since(ct / "model_runs.parquet", CT_ACTIVE_SINCE),
         "graded":          _read_status(ct / "completion_status_v2.parquet"),
     }
 
@@ -270,6 +286,11 @@ def build(mart: Path | None = None, _use_mart: bool = True) -> pd.DataFrame:
         u[k] = u.set_index(["wc", "a"]).index.isin(d.set_index(["wc", "a"]).index)
 
     u["in_demand"] = u["in_planner"] | u["in_edash"]
+    # ACTIVE = MES saw it run since CT_ACTIVE_SINCE, or it is on the forward
+    # list. This is what the module leads with; everything else is dormant and
+    # still stored. A model cannot be active unless we SAW it run, which is why
+    # "active but no build found" is ~0.8% instead of the old 84%.
+    u["active"] = u["ran_recent"] | u["in_demand"]
     u["in_iedb"] = u["in_iedb_catalog"] | u["in_iedb_ct"]
 
     # Keep a readable name. Prefer the configured spelling; fall back to whatever
@@ -419,7 +440,12 @@ def _mart_is_fresh(root: Path) -> bool:
     ct, eb = root / "cycle_time", root / "ebuild"
     srcs = [ct / "assembly_catalog.parquet", ct / "raw.parquet",
             ct / "completion_status_v2.parquet", eb / "runners.parquet",
-            eb / "planner_runners.parquet", eb / "projection_runners.parquet"]
+            eb / "planner_runners.parquet", eb / "projection_runners.parquet",
+            # model_runs drives `active`. Left out of this list, a rebuilt day
+            # cache would leave the stored universe looking fresh and every
+            # screen would keep showing the previous scope - the exact failure
+            # this function exists to prevent.
+            ct / "model_runs.parquet"]
     newest = max((p.stat().st_mtime for p in srcs if p.exists()), default=0)
     return out.stat().st_mtime >= newest
 
@@ -480,8 +506,34 @@ def summary(mart: Path | None = None) -> pd.DataFrame:
     u["no_ct"] = u["in_iedb_catalog"] & ~u["in_iedb_ct"]
     u["not_iedb"] = ~u["in_iedb_catalog"] & ~u["in_iedb_ct"]
 
+    # ── the ACTIVE slice ───────────────────────────────────────────────────
+    # Pre-computed as booleans so the groupby stays a plain sum and each column
+    # says in its own name exactly which population it counts. The old cards
+    # mixed populations - "checked" over one denominator, "complete" over
+    # another - and the percentages were against a number not on the card.
+    act = u["active"].fillna(False) if "active" in u else pd.Series(False, index=u.index)
+    vd = u["verdict"] if "verdict" in u else pd.Series(None, index=u.index)
+    # THE THREE BUCKETS, inside the active scope. Same partition the whole-pool
+    # columns use (has_ct / no_ct / not_iedb), so the two read the same way.
+    # `no_ct` and `not_iedb` were one card before and they have different owners:
+    # no_ct is "IE never timed it", not_iedb is "IEDB has never heard of it and
+    # somebody has to create it first".
+    u["active_has_ct"]     = act & u["in_iedb_ct"]
+    u["active_no_ct"]      = act & u["in_iedb_catalog"] & ~u["in_iedb_ct"]
+    u["active_not_iedb"]   = act & ~u["in_iedb_catalog"] & ~u["in_iedb_ct"]
+    u["active_complete"]   = u["active_has_ct"] & (vd == "complete")
+    u["active_incomplete"] = u["active_has_ct"] & (vd == "incomplete")
+    u["active_not_built"]  = u["active_has_ct"] & (vd == "not_built")
+
     g = u.groupby("workcell").agg(
         models=("a", "size"),
+        active=("active", "sum"),
+        active_has_ct=("active_has_ct", "sum"),
+        active_no_ct=("active_no_ct", "sum"),
+        active_not_iedb=("active_not_iedb", "sum"),
+        active_complete=("active_complete", "sum"),
+        active_incomplete=("active_incomplete", "sum"),
+        active_not_built=("active_not_built", "sum"),
         in_iedb=("in_iedb", "sum"),
         has_ct=("has_ct", "sum"),
         no_ct=("no_ct", "sum"),
@@ -493,6 +545,8 @@ def summary(mart: Path | None = None) -> pd.DataFrame:
     # The partition must hold per workcell, not just plant-wide. If it ever does
     # not, one of the three is silently wrong and the page would still render.
     assert (g["has_ct"] + g["no_ct"] + g["not_iedb"] == g["models"]).all(),         "the three buckets do not sum to models - they are not a partition"
+    assert (g["active_has_ct"] + g["active_no_ct"] + g["active_not_iedb"]
+            == g["active"]).all(),         "the active buckets do not sum to active - they are not a partition"
     g["pct_has_ct"] = (g["has_ct"] / g["models"] * 100).round(1)
 
     # One column per answer. reindex(): a workcell with nobody in a bucket must
