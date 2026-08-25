@@ -1262,11 +1262,34 @@ def _with_untimed(df: pd.DataFrame, customer: str) -> pd.DataFrame:
         return df
 
 
+@lru_cache(maxsize=64)
+def _assembly_list(customer: str, sub_workcenter: Optional[str], _key) -> bytes:
+    """Cached body of /assembly-list.
+
+    It was the only per-workcell endpoint with no cache, and `_with_untimed()`
+    rebuilds the model universe on every call - 5.6s and 8.5MB for KEYSIGHT, paid
+    again on every page open and every browser tab. Keyed on the same mart mtimes
+    as everything else, so a refresh invalidates it with the rest.
+    """
+    import json
+    return json.dumps(_assembly_list_impl(customer, sub_workcenter),
+                      allow_nan=False, default=str).encode()
+
+
 @router.get("/assembly-list")
 def ct_assembly_list(
     customer:       str = Query(..., description="Customer name — must match a /customers entry"),
     sub_workcenter: Optional[str] = Query(None, description="Optional line filter"),
 ):
+    ct, eb = CT_MART["raw"].parent, CT_MART["raw"].parent.parent / "ebuild"
+    return Response(content=_assembly_list(customer, sub_workcenter, mart_key(
+        ct / "assembly_summary.parquet", ct / "raw.parquet",
+        ct / "assembly_catalog.parquet", ct / "model_runs.parquet",
+        ct / "completion_status_v2.parquet", eb / "runners.parquet")),
+        media_type="application/json")
+
+
+def _assembly_list_impl(customer: str, sub_workcenter: Optional[str]):
     """
     Lightweight per-assembly LIST for the 'Cycle Time by Assembly' page collapsed
     rows. ONE grouped pass over raw.parquet — no cycle-time math, no string
@@ -1550,21 +1573,51 @@ def ct_completion_refresh_status():
     return _COMPLETION_STATE
 
 
+@lru_cache(maxsize=16)
+def _completion_all(customer, status, fields, _key) -> bytes:
+    """Cached body of /completion, serialised ONCE per mart version.
+
+    Caching the dict alone was not enough: FastAPI's jsonable_encoder walks the
+    whole structure on every response, which for 14.6MB is seconds of CPU per
+    call even when the compute was free. Same trick /completion/demand already
+    uses for its fast path.
+    """
+    import json
+    return json.dumps(_completion_all_impl(customer, status, fields),
+                      allow_nan=False, default=str).encode()
+
+
 @router.get("/completion")
 def ct_completion(
     customer: Optional[str] = Query(None, description="Filter to one workcell (case-insensitive)."),
     status:   Optional[str] = Query(None, description="Filter to one status (incomplete/complete/no_data/unavailable/unverified)."),
+    fields:   Optional[str] = Query(None, description="Comma-separated columns to return. A "
+                                    "caller that only builds a lookup should ask for what it "
+                                    "reads - the full row set is 14.6MB."),
 ):
     """Completion-status summary per model. → { as_of, count, counts:{status:n}, models:[...] }.
 
-    DEPRECATED - kept only so an old caller does not 404. It used to serve the v1
-    mart, whose vocabulary (`no_data`, `unavailable`, `unverified`) the current
-    code cannot even emit, and whose verdicts were never corrected. Nothing in
-    the app calls it, so nobody noticed it disagreeing with every other screen.
+    NOT DEAD - this comment used to say "nothing in the app calls it", which was
+    wrong: PlantRunnerDashboard calls it on every load. Believing that is why
+    nobody noticed it costing 13s and 14.6MB uncached, rebuilding the whole model
+    universe each time to serve what that page uses as a five-column lookup.
+
+    It served the v1 vocabulary once (`no_data`, `unavailable`, `unverified` -
+    words the current code cannot emit) with verdicts that were never corrected,
+    so it disagreed with every other screen.
 
     It now returns the same corrected verdicts as everything else. Prefer
     /completion/demand (ranked, with demand) or /universe/summary (per workcell).
     """
+    ct, eb = CT_MART["raw"].parent, CT_MART["raw"].parent.parent / "ebuild"
+    return Response(content=_completion_all(customer, status, fields, mart_key(
+        ct / "completion_status_v2.parquet", ct / "raw.parquet",
+        ct / "assembly_catalog.parquet", ct / "model_runs.parquet",
+        ct / "line_metrics.parquet", eb / "runners.parquet")),
+        media_type="application/json")
+
+
+def _completion_all_impl(customer, status, fields):
     p = CT_MART["completion_status_v2"]
     if not p.exists():
         raise HTTPException(status_code=503, detail="completion mart not built. POST /completion/refresh first.")
@@ -1589,10 +1642,19 @@ def ct_completion(
         as_of = datetime.fromtimestamp(p.stat().st_mtime).isoformat()
     except OSError:
         pass
+    counts = df["status"].value_counts().to_dict() if len(df) else {}
+    if fields:
+        # Project AFTER counting, so a slim caller still gets the full tally.
+        # customer/assembly are forced in: every caller keys on them, and a
+        # lookup with no key is just weight.
+        want = [c.strip() for c in fields.split(",") if c.strip()]
+        keep = [c for c in dict.fromkeys(["customer", "assembly", *want]) if c in df.columns]
+        if keep:
+            df = df[keep]
     return {
         "as_of": as_of,
         "count": len(df),
-        "counts": df["status"].value_counts().to_dict() if len(df) else {},
+        "counts": counts,
         "models": _df_to_json(df),
     }
 
