@@ -1993,16 +1993,28 @@ def _completion_demand(_key) -> dict:
     }
 
 
-@lru_cache(maxsize=2)
-def _completion_demand_json(_key) -> bytes:
-    """The unfiltered payload, serialised ONCE per mart version.
+@lru_cache(maxsize=8)
+def _completion_demand_json(scope: str, _key) -> bytes:
+    """The unfiltered payload for ONE scope, serialised once per mart version.
 
     Keyed on the same mart mtimes as the frame itself, so a refresh invalidates
     both together and a stale body can never outlive the data it describes.
+
+    Scope used to be excluded from this path, so `all` was pre-serialised and
+    fast while `planned` and `active` re-encoded on every request - which made
+    `active` (11MB, 3.4s) SLOWER than `all` (40MB, 1.9s). The staged loader
+    fetches all three, so the middle stage was the slowest thing on the page.
     """
     import json
     data = _completion_demand(_key)
     rows = data["models"]
+    total_all = len(rows)
+    total_active = sum(1 for r in rows if r.get("active"))
+    total_planned = sum(1 for r in rows if r.get("has_demand"))
+    if scope == "planned":
+        rows = [r for r in rows if r.get("has_demand")]
+    elif scope == "active":
+        rows = [r for r in rows if r.get("active")]
     as_of = None
     try:
         as_of = datetime.fromtimestamp(CT_MART["completion_status_v2"].stat().st_mtime).isoformat()
@@ -2011,9 +2023,18 @@ def _completion_demand_json(_key) -> bytes:
     body = {
         "as_of": as_of,
         "total": len(rows),
+        "total_all": total_all,
+        "total_active": total_active,
+        "total_planned": total_planned,
+        "scope_applied": scope,
+        "active_since": CT_ACTIVE_SINCE,
         "count": len(rows),
-        "counts": data["counts"],
-        "unchecked": data["unchecked"],
+        # Counts are recomputed for the scope - serving the whole-mart tally
+        # beside a filtered row set is how a status chip ends up claiming more
+        # models than the table under it holds.
+        "counts": (pd.Series([r["status"] for r in rows]).value_counts().to_dict()
+                   if rows else {}),
+        "unchecked": sum(1 for r in rows if r.get("status") == "not_checked"),
         "freshness": data.get("freshness", []),
         "scope": data["scope"],
         "models": rows,
@@ -2060,8 +2081,9 @@ def ct_completion_demand(
     #
     # Filtered calls fall through to the normal path — they are rare, small, and
     # not worth a cache key each.
-    if not (workcells or plants or status or limit) and scope == "all":
-        return Response(content=_completion_demand_json(_completion_demand_key()),
+    # Every scope gets the pre-serialised path now, not just `all`.
+    if not (workcells or plants or status or limit):
+        return Response(content=_completion_demand_json(scope, _completion_demand_key()),
                         media_type="application/json")
 
     data = _completion_demand(_completion_demand_key())
